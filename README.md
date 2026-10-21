@@ -123,6 +123,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 ```
 roy_harness/
 ├─ README.md
+├─ LICENSE                     MIT（本專案）
 ├─ LICENSE-UPSTREAM-MIT        上游程式碼的 MIT 授權全文
 ├─ .gitignore                  含 .harness.env（個人端點）
 ├─ src/harness/harness_vllm.py
@@ -133,4 +134,4 @@ roy_harness/
 
 程式碼骨架來自 [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)（Copyright (c) 2026 Isuru Wijesiri）：程式碼 MIT，文字 CC BY-NC-ND 4.0。`harness_vllm.py` 是以其 MIT 程式碼（`src/harness/harness.py`）為基礎的衍生作品，MIT 全文見 `LICENSE-UPSTREAM-MIT`；書中文字未被改寫或轉載。
 
-本 repo 在上游之上**新增的部分**尚未指定授權，待作者決定。
+本 repo 在上游之上新增的部分同樣採 **MIT**（見 `LICENSE`，Copyright (c) 2026 Kun-Min Chiu）；上游的版權聲明保留在 `LICENSE-UPSTREAM-MIT`。
