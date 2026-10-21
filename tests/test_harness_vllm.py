@@ -223,14 +223,21 @@ class TestLocalConfig(Base):
                    "proxy.example.com", "evil.example", "private", "h",
                    "choosealicense.com",
                    "creativecommons.org"}
-        root = os.path.join(HERE, "..")
+        root = os.path.abspath(os.path.join(HERE, ".."))
+        try:                      # every tracked file, not a hand-kept list (小o review)
+            files = subprocess.run(["git", "ls-files"], cwd=root, check=True,
+                                   capture_output=True, text=True,
+                                   encoding="utf-8").stdout.splitlines()
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("not a git checkout")
+        files = [f for f in files if f]
+        self.assertIn("src/harness/harness_vllm.py", files)   # not a silently empty list
         bad = []
-        for rel in ("README.md", "LICENSE", os.path.join("src", "harness", "harness_vllm.py"),
-                    os.path.join("tests", "test_harness_vllm.py")):
+        for rel in files:
             with open(os.path.join(root, rel), encoding="utf-8") as f:
                 text = f.read()
             for host in re.findall(r"https?://([A-Za-z0-9.-]+)", text):
-                if host not in allowed:
+                if host.lower() not in allowed:
                     bad.append((rel, host))
         self.assertEqual(bad, [])
 
@@ -507,6 +514,21 @@ class TestProviders(Base):
             self.cfg(HARNESS_PROVIDER=prov, HARNESS_API_KEY="k", HARNESS_MODEL="m",
                      HARNESS_BASE_URL="http://localhost:4000/v1")     # local proxy ok
 
+    def test_cleartext_check_cannot_be_bypassed_by_url_spelling(self):
+        """Found by the 小o review: HTTP:// (any case) and localhost:1@evil.example
+        slipped past a startswith('http://') test, sending the key in the clear
+        to another host."""
+        for bad in ("HTTP://evil.example/v1", "Http://evil.example/v1",
+                    "http://localhost:1@evil.example/v1", "ftp://evil.example/v1",
+                    "evil.example/v1"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.cfg(HARNESS_PROVIDER="openai", HARNESS_API_KEY="k",
+                         HARNESS_MODEL="m", HARNESS_BASE_URL=bad)
+        for ok in ("HTTPS://api.example.com/v1", "http://LOCALHOST:4000/v1",
+                   "http://127.0.0.1:4000/v1", "http://[::1]:4000/v1"):
+            self.cfg(HARNESS_PROVIDER="openai", HARNESS_API_KEY="k",
+                     HARNESS_MODEL="m", HARNESS_BASE_URL=ok)
+
     def test_unknown_provider_is_rejected(self):
         with self.assertRaises(ValueError):
             self.cfg(HARNESS_PROVIDER="openia")
@@ -564,6 +586,15 @@ class TestProviders(Base):
     def test_cache_parsers_admit_missing_metrics(self):
         self.assertIn("unknown", hv.parse_cache_metrics("sglang", "nothing\n"))
         self.assertIn("unknown", hv.parse_cache_metrics("llamacpp", "nothing\n"))
+
+    def test_malformed_metric_numbers_report_unknown_instead_of_crashing(self):
+        """Found by the 小o review: a truncated value like '1e' matched the regex,
+        float() raised, and /cache ended the whole interactive session."""
+        for kind, line in (("sglang", 'sglang:cache_hit_rate{a="b"} 1e\n'),
+                           ("llamacpp", "llamacpp:prompt_tokens_total +\n"),
+                           ("vllm", 'vllm:prefix_cache_hits_total{a="b"} .\n')):
+            out = hv.parse_cache_metrics(kind, line)
+            self.assertIsInstance(out, str, kind)
 
     def test_cache_command_does_not_call_the_network_for_hosted_providers(self):
         hv.PROVIDER = "openai"

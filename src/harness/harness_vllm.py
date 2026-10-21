@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 def _load_local_env():
@@ -97,8 +98,14 @@ def resolve_config(env):
     if not p["local"]:
         if not key:
             raise ValueError(f"{name}: set {p['key'][0]} (or HARNESS_API_KEY)")
-        host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
-        if url.startswith("http://") and host not in ("localhost", "127.0.0.1"):
+        try:                                  # urlsplit: case, userinfo, IPv6 handled
+            parts = urllib.parse.urlsplit(url)
+            host = parts.hostname
+        except ValueError:
+            raise ValueError(f"{name}: unparsable base URL")
+        if parts.scheme not in ("http", "https") or not host:
+            raise ValueError(f"{name}: base URL must be http(s)://host/...")
+        if parts.scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
             raise ValueError(f"{name}: refusing to send an API key over plain http")
     return name, url.rstrip("/"), model, key
 
@@ -330,21 +337,23 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
         time.sleep(wait)
     raise LLMError("unreachable")
 
+_NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"   # a float() can always read it
+
 def parse_cache_metrics(kind, text):
     """Prometheus text -> one status line. Metric names differ per server."""
     if kind == "sglang":                 # needs --enable-metrics
-        m = re.search(r"^sglang:cache_hit_rate\{[^}]*\}\s+([0-9.e+-]+)", text, re.M)
+        m = re.search(rf"^sglang:cache_hit_rate\{{[^}}]*\}}\s+({_NUM})", text, re.M)
         return (f"sglang cache_hit_rate={float(m.group(1)):.3f}" if m
                 else "unknown (no sglang:cache_hit_rate in /metrics)")
     if kind == "llamacpp":               # needs --metrics; no hit counter exists
-        m = re.search(r"^llamacpp:prompt_tokens_total\s+([0-9.e+-]+)", text, re.M)
+        m = re.search(rf"^llamacpp:prompt_tokens_total\s+({_NUM})", text, re.M)
         return ("llama.cpp /metrics has no prefix-cache hit counter; "
                 f"prompt_tokens_total={float(m.group(1)):.0f}" if m
                 else "unknown (no llamacpp:prompt_tokens_total in /metrics)")
     en = re.search(r'enable_prefix_caching="(\w+)"', text)
     def total(name):
         return sum(float(v) for v in re.findall(
-            rf"^vllm:prefix_cache_{name}_total\{{[^}}]*\}}\s+([0-9.e+-]+)",
+            rf"^vllm:prefix_cache_{name}_total\{{[^}}]*\}}\s+({_NUM})",
             text, re.M))
     return (f"prefix caching enabled={en.group(1) if en else '?'}; "
             f"hits/queries={total('hits'):.0f}/{total('queries'):.0f}")
