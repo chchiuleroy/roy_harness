@@ -1,5 +1,6 @@
 # personal endpoint / secrets
 .harness.env
+.harness.hooks.json
 
 # runtime artefacts of the harness
 session*.json

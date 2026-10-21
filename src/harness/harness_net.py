@@ -7,6 +7,7 @@ Two measured facts drive this (Python 3.13.7, 2026-10-21):
     user switches it on explicitly (config file or HARNESS_ALLOW_HTTP=1), never
     because of anything a server, a model or a web page says.
 """
+import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,3 +43,19 @@ def open_url(req, timeout):
     """Like urlopen, but a redirect raises urllib.error.HTTPError instead of being
     followed (so credentials never travel to another host)."""
     return _OPENER.open(req, timeout=timeout)
+
+
+def post_json(url, body, headers=None, timeout=30, allow_http=False):
+    """POST body as JSON; return (status, text). Non-2xx (including a refused
+    redirect) comes back as a status, not an exception; connection errors and
+    timeouts still raise (OSError / urllib.error.URLError)."""
+    check_url(url, allow_http)
+    req = urllib.request.Request(
+        url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"content-type": "application/json",
+                 "user-agent": "harness101/0.3", **(headers or {})})
+    try:
+        with open_url(req, timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()[:2000].decode("utf-8", "replace")

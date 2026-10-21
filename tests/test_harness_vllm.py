@@ -15,6 +15,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -959,6 +960,518 @@ class TestNetHardening(Base):
             "http://llm.corp/v1")
 
 
+# ------------------------------------------------------- hooks (stage 1)
+OK_TEXT = 'print("note-from-hook")'
+EXIT2 = 'import sys\nsys.stderr.write("no way")\nsys.exit(2)'
+CRASH = "import sys\nsys.exit(1)"
+HANG = "import time\ntime.sleep(30)"
+BIG = 'import sys\nsys.stdout.write("x" * 50000)'
+BAD_BYTES = r'import sys' + "\n" + r'sys.stdout.buffer.write(b"ok-\xff-end")'
+CJK = 'import sys\nsys.stdout.write("中文提醒")'
+ENV_DUMP = ('import os, sys\n'
+            'sys.stdout.write(",".join(sorted(k for k in os.environ '
+            'if "KEY" in k.upper() or k == "PYTHONUTF8")))')
+SAVE_PAYLOAD = ('import sys\n'
+                'open("payload.json", "w", encoding="utf-8").write(sys.stdin.read())')
+TOUCH_SECOND = 'open("second_ran.txt", "w").write("x")'
+
+
+def json_out(obj):
+    return "import json\nprint(json.dumps(%r))" % (obj,)
+
+
+def pre_decision(decision, reason=""):
+    return json_out({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": decision,
+        "permissionDecisionReason": reason}})
+
+
+class HookBase(Base):
+    def setUp(self):
+        super().setUp()
+        import harness_hooks as hh
+        self.hh = hh
+        self._hooks = hv.HOOKS
+        self._sid = hv.SESSION_ID
+
+    def tearDown(self):
+        hv.HOOKS, hv.SESSION_ID = self._hooks, self._sid
+        super().tearDown()
+
+    def script(self, name, body):
+        with open(name, "w", encoding="utf-8") as f:
+            f.write(textwrap.dedent(body))
+        return os.path.abspath(name)
+
+    def write_cfg(self, event, handlers, matcher=None):
+        group = {"hooks": handlers}
+        if matcher is not None:
+            group["matcher"] = matcher
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": {event: [group]}}, f)
+        return self.hh.load(".harness.hooks.json")
+
+    def cmd(self, name, body, **extra):
+        return {"type": "command", "command": sys.executable,
+                "args": [self.script(name, body)], **extra}
+
+    def one(self, event, body, matcher=None, **extra):
+        return self.write_cfg(event, [self.cmd("h.py", body, **extra)], matcher)
+
+    def run_hook(self, event, body, payload=None, **extra):
+        cfg = self.one(event, body, **extra)
+        return self.hh.run(event, payload or {"tool_name": "write_file"}, cfg)
+
+
+class TestHooksConfig(HookBase):
+    def test_missing_file_means_no_hooks(self):
+        cfg = self.hh.load("does_not_exist.json")
+        res = self.hh.run("PreToolUse", {"tool_name": "write_file"}, cfg)
+        self.assertFalse(res.blocked)
+        self.assertEqual((res.context, res.failures), ([], []))
+
+    def test_a_bad_config_fails_loudly(self):
+        """A typo must never silently turn a safety hook off."""
+        good = {"type": "command", "command": "python"}
+        cases = {
+            "not json": "{nope",
+            "unknown event": json.dumps({"hooks": {"PreToolUs": [{"hooks": [good]}]}}),
+            "unknown type": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{"type": "shell", "command": "x"}]}]}}),
+            "command missing": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{"type": "command"}]}]}}),
+            "bad matcher regex": json.dumps({"hooks": {"PreToolUse": [
+                {"matcher": "(", "hooks": [good]}]}}),
+            "bad onFailure": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{**good, "onFailure": "shrug"}]}]}}),
+            "remote http without opt-in": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{"type": "http", "url": "http://policy.corp/hook"}]}]}}),
+            "http without url": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{"type": "http"}]}]}}),
+            "shell-form command string": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{"type": "command", "command": "python check.py"}]}]}}),
+            "typo in a handler key": json.dumps({"hooks": {"PreToolUse": [
+                {"hooks": [{**good, "onFailur": "block"}]}]}}),
+        }
+        for label, text in cases.items():
+            with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+                f.write(text)
+            with self.assertRaises(self.hh.HooksConfigError, msg=label):
+                self.hh.load(".harness.hooks.json")
+
+    def test_http_hook_to_an_internal_host_needs_the_explicit_switch(self):
+        cfg = self.write_cfg("PreToolUse", [
+            {"type": "http", "url": "http://policy.corp/hook", "allow_http": True}])
+        self.assertFalse(cfg.is_empty())
+
+    def test_matcher_is_a_full_match_on_the_tool_name(self):
+        """A prefix match would let `run_command_v2` slip past a `run_command` rule."""
+        cfg = self.one("PreToolUse", EXIT2, matcher="run_command|write_file")
+        for name, blocked in (("run_command", True), ("write_file", True),
+                              ("run_command_v2", False), ("xwrite_file", False),
+                              ("read_file", False)):
+            res = self.hh.run("PreToolUse", {"tool_name": name}, cfg)
+            self.assertEqual(res.blocked, blocked, name)
+
+    def test_no_matcher_matches_every_tool(self):
+        cfg = self.one("PreToolUse", EXIT2)
+        for name in ("read_file", "agent", "run_command"):
+            self.assertTrue(self.hh.run("PreToolUse", {"tool_name": name}, cfg).blocked)
+
+
+class TestHookRunner(HookBase):
+    def test_exit_0_stdout_becomes_context(self):
+        res = self.run_hook("PostToolUse", OK_TEXT)
+        self.assertFalse(res.blocked)
+        self.assertEqual(res.context, ["note-from-hook"])
+
+    def test_exit_2_vetoes_with_the_reason(self):
+        res = self.run_hook("PreToolUse", EXIT2)
+        self.assertTrue(res.blocked)
+        self.assertIn("no way", res.reason)
+
+    def test_json_deny_and_top_level_block_veto_but_allow_never_grants(self):
+        """Scripts written for Claude Code print these shapes. `allow` must not
+        count as permission: a hook can only tighten the gate."""
+        res = self.run_hook("PreToolUse", pre_decision("deny", "json says no"))
+        self.assertTrue(res.blocked)
+        self.assertIn("json says no", res.reason)
+        res = self.run_hook("PreToolUse", json_out({"decision": "block",
+                                                    "reason": "top-level no"}))
+        self.assertTrue(res.blocked)
+        self.assertIn("top-level no", res.reason)
+        for d in ("allow", "ask", "defer"):
+            res = self.run_hook("PreToolUse", pre_decision(d, "fine"))
+            self.assertFalse(res.blocked, d)
+
+    def test_json_additional_context_is_collected(self):
+        body = json_out({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                "additionalContext": "from-json"}})
+        res = self.run_hook("PostToolUse", body)
+        self.assertEqual(res.context, ["from-json"])
+
+    def test_failures_ask_by_default_on_pre_events(self):
+        """A hook that crashes, hangs or is missing must not silently open the gate
+        (fail toward asking, like the classifier)."""
+        for label, h in (("crash", self.cmd("c.py", CRASH)),
+                         ("hang", self.cmd("g.py", HANG, timeout=1)),
+                         ("missing", {"type": "command",
+                                      "command": "no-such-program-xyz"})):
+            for event in ("PreToolUse", "UserPromptSubmit"):
+                cfg = self.write_cfg(event, [h])
+                res = self.hh.run(event, {"tool_name": "write_file"}, cfg)
+                self.assertFalse(res.blocked, (label, event))
+                self.assertEqual(len(res.failures), 1, (label, event))
+
+    def test_on_failure_block_vetoes_and_continue_ignores(self):
+        for mode, blocked, failures in (("block", True, 0), ("continue", False, 0)):
+            cfg = self.write_cfg("PreToolUse",
+                                 [self.cmd("c.py", CRASH, onFailure=mode)])
+            res = self.hh.run("PreToolUse", {"tool_name": "write_file"}, cfg)
+            self.assertEqual((res.blocked, len(res.failures)), (blocked, failures), mode)
+
+    def test_failures_do_not_ask_on_post_events_by_default(self):
+        res = self.run_hook("PostToolUse", CRASH)
+        self.assertEqual((res.blocked, res.failures), (False, []))
+
+    def test_timeout_kills_the_hook_quickly(self):
+        t0 = time.time()
+        self.run_hook("PreToolUse", HANG, timeout=1)
+        self.assertLess(time.time() - t0, 10)
+
+    def test_oversized_output_is_capped_and_marked(self):
+        res = self.run_hook("PostToolUse", BIG)
+        text = res.context[0]
+        self.assertLess(len(text), 10_500)
+        self.assertIn("truncated", text)
+
+    def test_non_utf8_and_cjk_output_survive(self):
+        self.assertIn("ok-", self.run_hook("PostToolUse", BAD_BYTES).context[0])
+        self.assertEqual(self.run_hook("PostToolUse", CJK).context, ["中文提醒"])
+
+    def test_first_veto_stops_later_hooks(self):
+        cfg = self.write_cfg("PreToolUse", [self.cmd("a.py", EXIT2),
+                                            self.cmd("b.py", TOUCH_SECOND)])
+        self.assertTrue(self.hh.run("PreToolUse", {"tool_name": "x"}, cfg).blocked)
+        self.assertFalse(os.path.exists("second_ran.txt"))
+
+    def test_hook_environment_is_scrubbed_but_forces_utf8(self):
+        """Secrets are not handed to hooks unless the config names them."""
+        os.environ["HT_SECRET_KEY"] = "s3cret"
+        os.environ["HT_LISTED_KEY"] = "listed"
+        try:
+            plain = self.run_hook("PostToolUse", ENV_DUMP).context[0]
+            listed = self.run_hook("PostToolUse", ENV_DUMP,
+                                   env=["HT_LISTED_KEY"]).context[0]
+        finally:
+            os.environ.pop("HT_SECRET_KEY"), os.environ.pop("HT_LISTED_KEY")
+        self.assertNotIn("HT_SECRET_KEY", plain)
+        self.assertNotIn("HT_LISTED_KEY", plain)
+        self.assertIn("PYTHONUTF8", plain)
+        self.assertIn("HT_LISTED_KEY", listed)
+        self.assertNotIn("HT_SECRET_KEY", listed)
+
+    def test_payload_reaches_the_hook_on_stdin(self):
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "write_file",
+                   "tool_input": {"path": "a.txt", "content": "中文"}, "cwd": "c"}
+        self.run_hook("PreToolUse", SAVE_PAYLOAD, payload)
+        with open("payload.json", encoding="utf-8") as f:
+            self.assertEqual(json.load(f), payload)
+
+
+class TestHooksInHarness(HookBase):
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+        self.answer = "n"
+        hv.read_line = lambda prompt: (self.asked.append(prompt), self.answer)[1]
+
+    def install(self, event, body, matcher=None, **extra):
+        hv.HOOKS = self.one(event, body, matcher, **extra)
+
+    def write(self, path="a.txt"):
+        return hv.execute_tool("write_file", {"path": path, "content": "hello"})
+
+    def test_a_pre_hook_veto_stops_the_tool_even_in_auto_mode(self):
+        for mode in ("normal", "auto"):
+            hv.MODE = mode
+            self.install("PreToolUse", EXIT2, "write_file")
+            out = self.write("v.txt")
+            self.assertIn("BLOCKED by hook", out, mode)
+            self.assertIn("no way", out)
+            self.assertFalse(os.path.exists("v.txt"), mode)
+
+    def test_a_hook_cannot_grant_what_the_gate_would_ask_about(self):
+        """`allow` from a hook must not replace the human in safe mode."""
+        hv.MODE = "safe"
+        self.install("PreToolUse", pre_decision("allow", "fine"), "write_file")
+        out = self.write("g.txt")
+        self.assertEqual(len(self.asked), 1)
+        self.assertIn("DENIED", out)
+        self.assertFalse(os.path.exists("g.txt"))
+
+    def test_hook_failure_asks_the_human_and_respects_the_answer(self):
+        self.install("PreToolUse", CRASH, "write_file")
+        self.answer = "n"
+        self.assertIn("DENIED", self.write("n.txt"))
+        self.assertFalse(os.path.exists("n.txt"))
+        self.answer = "y"
+        self.assertIn("wrote", self.write("y.txt"))
+        self.assertTrue(os.path.exists("y.txt"))
+        self.assertEqual(len(self.asked), 2)
+        self.assertIn("hook", self.asked[0].lower())
+
+    def test_pre_hook_notes_reach_the_model_through_the_tool_result(self):
+        self.install("PreToolUse", OK_TEXT, "write_file")
+        out = self.write("p.txt")
+        self.assertIn("wrote", out)
+        self.assertIn("note-from-hook", out)
+
+    def test_post_hook_context_is_appended_to_the_tool_result(self):
+        with open("r.txt", "w", encoding="utf-8") as f:
+            f.write("file body")
+        self.install("PostToolUse", OK_TEXT, "read_file")
+        out = hv.execute_tool("read_file", {"path": "r.txt"})
+        self.assertIn("file body", out)
+        self.assertIn("note-from-hook", out)
+
+    def test_hooks_fire_for_subagent_tool_calls_with_their_agent_id(self):
+        """The guarantee must hold at every depth, not only for the main loop."""
+        self.install("PreToolUse", SAVE_PAYLOAD)
+        hv.execute_tool("read_file", {"path": "payload.json"}, depth=1)
+        with open("payload.json", encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["tool_name"], "read_file")
+        self.assertTrue(payload.get("agent_id"))
+        os.remove("payload.json")
+        hv.execute_tool("todo_write", {"todos": "x"}, depth=0)
+        with open("payload.json", encoding="utf-8") as f:
+            self.assertFalse(json.load(f).get("agent_id"))
+
+    def test_the_model_cannot_edit_the_hooks_file(self):
+        """Otherwise it could write itself a hook (or delete the one watching it)."""
+        for tool, args in (
+                ("write_file", {"path": ".harness.hooks.json", "content": "{}"}),
+                ("write_file", {"path": "sub/../.HARNESS.HOOKS.JSON", "content": "{}"}),
+                ("run_command", {"command": "echo {} > .harness.hooks.json"})):
+            hv.MODE = "normal"
+            self.assertIn("BLOCKED", hv.execute_tool(tool, args), (tool, args))
+        self.assertFalse(os.path.exists(".harness.hooks.json"))
+
+    def test_user_prompt_hook_can_reject_a_prompt_and_add_context(self):
+        import contextlib, io
+        self.install("UserPromptSubmit", EXIT2)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok = hv.submit_filter("do the thing")
+        self.assertFalse(ok)
+        self.assertIn("no way", buf.getvalue())
+        self.install("UserPromptSubmit", OK_TEXT)
+        self.assertTrue(hv.submit_filter("do the thing"))
+        self.assertIn("note-from-hook", hv.drain_reminders())
+
+    def test_session_start_adds_context_and_stop_only_observes(self):
+        import contextlib, io
+        self.install("SessionStart", OK_TEXT)
+        hv.fire_session_start()
+        self.assertIn("note-from-hook", hv.drain_reminders())
+        self.install("Stop", EXIT2)          # Claude Code would keep the turn going;
+        buf = io.StringIO()                  # here it must not loop
+        with contextlib.redirect_stdout(buf):
+            self.assertIsNone(hv.fire_stop())
+        self.assertEqual(hv.drain_reminders(), "")
+
+    def test_slash_hooks_lists_what_is_loaded(self):
+        import contextlib, io
+        self.install("PreToolUse", EXIT2, "write_file")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hv.slash("/hooks", [])
+        self.assertIn("PreToolUse", buf.getvalue())
+        self.assertIn("write_file", buf.getvalue())
+
+
+class _HookServer(http.server.BaseHTTPRequestHandler):
+    script, seen, target_port = [], [], 0
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        type(self).seen.append((self.headers.get("X-Policy"), json.loads(self.rfile.read(n))))
+        kind, arg = type(self).script.pop(0)
+        code = {"status": arg, "redirect": 302}.get(kind, 200)
+        self.send_response(code)
+        if kind == "redirect":
+            self.send_header("Location", f"http://127.0.0.1:{type(self).target_port}/x")
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        if kind == "json":
+            self.wfile.write(json.dumps(arg).encode())
+
+
+class TestHttpHooks(HookBase):
+    def setUp(self):
+        super().setUp()
+        _HookServer.script, _HookServer.seen = [], []
+        _Target.seen = []
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HookServer)
+        self.tgt = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Target)
+        _HookServer.target_port = self.tgt.server_address[1]
+        for s in (self.srv, self.tgt):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/hook"
+
+    def tearDown(self):
+        for s in (self.srv, self.tgt):
+            s.shutdown()
+        super().tearDown()
+
+    def http(self, **extra):
+        return self.write_cfg("PreToolUse", [{"type": "http", "url": self.url, **extra}])
+
+    def run_pre(self, cfg):
+        return self.hh.run("PreToolUse", {"tool_name": "write_file"}, cfg)
+
+    def test_json_decision_from_the_server_vetoes(self):
+        _HookServer.script = [("json", {"decision": "block", "reason": "policy says no"})]
+        res = self.run_pre(self.http())
+        self.assertTrue(res.blocked)
+        self.assertIn("policy says no", res.reason)
+
+    def test_empty_2xx_is_success(self):
+        _HookServer.script = [("empty", None)]
+        res = self.run_pre(self.http())
+        self.assertEqual((res.blocked, res.failures), (False, []))
+
+    def test_non_2xx_and_connection_failures_follow_on_failure(self):
+        _HookServer.script = [("status", 500)]
+        self.assertEqual(len(self.run_pre(self.http()).failures), 1)
+        _HookServer.script = [("status", 500)]
+        self.assertTrue(self.run_pre(self.http(onFailure="block")).blocked)
+        dead = self.write_cfg("PreToolUse", [{"type": "http", "timeout": 2,
+                                              "url": "http://127.0.0.1:9/hook"}])
+        self.assertEqual(len(self.run_pre(dead).failures), 1)
+
+    def test_a_redirect_is_a_failure_and_nothing_is_forwarded(self):
+        """An internal policy server must not be able to bounce the token elsewhere."""
+        os.environ["HT_POLICY_TOKEN"] = "tok"
+        try:
+            _HookServer.script = [("redirect", None)]
+            cfg = self.http(headers_env={"X-Policy": "HT_POLICY_TOKEN"})
+            res = self.run_pre(cfg)
+        finally:
+            os.environ.pop("HT_POLICY_TOKEN")
+        self.assertEqual(len(res.failures), 1)
+        self.assertEqual(_Target.seen, [])
+
+    def test_header_value_comes_from_the_named_environment_variable(self):
+        os.environ["HT_POLICY_TOKEN"] = "tok-123"
+        try:
+            _HookServer.script = [("empty", None)]
+            self.run_pre(self.http(headers_env={"X-Policy": "HT_POLICY_TOKEN"}))
+        finally:
+            os.environ.pop("HT_POLICY_TOKEN")
+        self.assertEqual(_HookServer.seen[0][0], "tok-123")
+        self.assertEqual(_HookServer.seen[0][1]["tool_name"], "write_file")
+
+    def test_a_missing_token_variable_is_a_visible_failure(self):
+        os.environ.pop("HT_NOT_SET", None)
+        _HookServer.script = [("empty", None)]
+        res = self.run_pre(self.http(headers_env={"X-Policy": "HT_NOT_SET"}))
+        self.assertEqual(len(res.failures), 1)
+        self.assertEqual(_HookServer.seen, [])      # nothing sent without its token
+
+
+class _LLMServer(http.server.BaseHTTPRequestHandler):
+    """Scripted OpenAI-style server that keeps every request body it receives."""
+    script, bodies = [], []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        type(self).bodies.append(json.loads(self.rfile.read(n)))
+        body = json.dumps(type(self).script.pop(0)).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def tool_call_reply(name, args):
+    return {"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": None, "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)}}]}}],
+        "usage": {}}
+
+
+class TestHooksEndToEnd(HookBase):
+    """main() wired to hooks, run as a real process against a scripted model."""
+
+    def setUp(self):
+        super().setUp()
+        _LLMServer.script, _LLMServer.bodies = [], []
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LLMServer)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        super().tearDown()
+
+    def run_harness(self, stdin_text):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("VLLM_", "HARNESS_"))}
+        env.update(HARNESS_BASE_URL=f"http://127.0.0.1:{self.srv.server_address[1]}/v1",
+                   HARNESS_STREAM="0", PYTHONUTF8="1")
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", os.path.join(SRC, "harness_vllm.py"),
+             "session.json"], input=stdin_text, capture_output=True, text=True,
+            encoding="utf-8", env=env, timeout=120)
+
+    def touch_hook(self, name, marker):
+        return self.cmd(name, f'open({marker!r}, "w").write("x")')
+
+    def test_rejected_prompt_never_reaches_the_model(self):
+        cfg = {"UserPromptSubmit": [{"hooks": [self.cmd("p.py", EXIT2)]}]}
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": cfg}, f)
+        _LLMServer.script = [llm_reply("should not be asked")]
+        out = self.run_harness("hello\n")
+        self.assertEqual(_LLMServer.bodies, [])
+        self.assertIn("prompt rejected", out.stdout)
+
+    def test_veto_session_start_and_stop_through_the_real_loop(self):
+        cfg = {"SessionStart": [{"hooks": [self.touch_hook("s.py", "started.txt")]}],
+               "Stop": [{"hooks": [self.touch_hook("t.py", "stopped.txt")]}],
+               "PreToolUse": [{"matcher": "write_file",
+                               "hooks": [self.cmd("v.py", EXIT2)]}]}
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": cfg}, f)
+        _LLMServer.script = [tool_call_reply("write_file", {"path": "e2e.txt",
+                                                            "content": "x"}),
+                             llm_reply("done")]
+        out = self.run_harness("please write the file\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(os.path.exists("e2e.txt"))        # vetoed before it ran
+        self.assertTrue(os.path.exists("started.txt"))
+        self.assertTrue(os.path.exists("stopped.txt"))
+        tool_msgs = [m for m in _LLMServer.bodies[1]["messages"] if m["role"] == "tool"]
+        self.assertIn("BLOCKED by hook", tool_msgs[0]["content"])
+
+    def test_a_broken_hooks_file_stops_the_harness_before_any_model_call(self):
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            f.write('{"hooks": {"PreToolUs": []}}')
+        _LLMServer.script = [llm_reply("nope")]
+        out = self.run_harness("hello\n")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("hooks config error", out.stderr)
+        self.assertEqual(_LLMServer.bodies, [])
+
+
 # ------------------------------------------------------------------ live tests
 @unittest.skipUnless(LIVE, "set HARNESS_LIVE=1 to hit the real server")
 class TestLive(Base):
@@ -1125,6 +1638,37 @@ class TestLive(Base):
         hv.CURRENT_REQUEST = "Please delete junk.txt"
         v, why = hv.classify("del junk.txt")
         self.assertIn(v, ("ALLOW", "ASK"), why)       # must not BLOCK the asked-for action
+
+    # ---- hooks against the real model (stage 1)
+    def write_hooks(self, cfg, **scripts):
+        for name, body in scripts.items():
+            with open(name, "w", encoding="utf-8") as f:
+                f.write(body)
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": cfg}, f)
+
+    def test_a_pre_hook_stops_a_real_models_file_write(self):
+        """A reflex must hold when the brain really asks for the action."""
+        self.write_hooks(
+            {"PreToolUse": [{"matcher": "write_file", "hooks": [
+                {"type": "command", "command": sys.executable, "args": ["deny.py"]}]}]},
+            **{"deny.py": 'import sys\nsys.stderr.write("policy: no file writes here")\nsys.exit(2)'})
+        out = self.run_h(["Use the write_file tool to create hook_probe.txt containing "
+                          "the word hi. If it is refused, tell me the reason in one sentence."])
+        tool_msgs = [m for m in self.session() if m.get("role") == "tool"]
+        if not tool_msgs:
+            self.skipTest("the model did not try the tool this time")
+        self.assertFalse(os.path.exists("hook_probe.txt"), out)
+        self.assertTrue(any("BLOCKED by hook" in m["content"] for m in tool_msgs), tool_msgs)
+
+    def test_session_start_hook_text_reaches_a_real_model(self):
+        """Augmenting hooks work end to end: the model can use what the hook said."""
+        self.write_hooks(
+            {"SessionStart": [{"hooks": [
+                {"type": "command", "command": sys.executable, "args": ["ctx.py"]}]}]},
+            **{"ctx.py": 'print("The project secret word is PELICAN-77.")'})
+        out = self.run_h(["What is the project secret word? Answer with just the word."])
+        self.assertIn("PELICAN-77", out.upper())
 
 
 if __name__ == "__main__":

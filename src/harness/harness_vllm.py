@@ -37,6 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
+import harness_hooks               # user hooks (same folder)
 import harness_net                 # no-redirect opener + URL policy (same folder)
 
 def _load_local_env():
@@ -579,8 +580,9 @@ def undo_last():
 # own state files are here too: a model that can write the permissions file
 # could pre-grant dangerous commands for the next start.
 PROTECTED = (".env", ".ssh", "id_rsa", ".aws/credentials",
-             ".harness_permissions", ".harness_backup")
-STATE_FILES = (".harness_permissions", ".harness_backup", ".harness.env")
+             ".harness_permissions", ".harness_backup", ".harness.hooks")
+STATE_FILES = (".harness_permissions", ".harness_backup", ".harness.env",
+               ".harness.hooks")
 READ_STATE = {}                    # path -> time when the model last read it
 RISKY = ("rm ", "del ", "rmdir", "sudo", "--force", "push", "curl", "wget",
          "> /", "format ")
@@ -726,7 +728,61 @@ def truncate(text):
     return (text[:keep] + f"\n... [truncated {len(text) - 2*keep} chars, "
             f"re-run with a narrower range if needed] ...\n" + text[-keep:])
 
+# ------------------------------------------------ ch 11: hooks (reflexes)
+HOOKS = harness_hooks.EMPTY        # loaded from .harness.hooks.json by main()
+SESSION_ID = ""
+HOOK_RESPONSE_CHARS = 10_000       # how much of a tool result a PostToolUse hook sees
+
+def _fire(event, depth=0, **fields):
+    """Run the hooks for one event. Fields follow Claude Code's hook input."""
+    if HOOKS.is_empty():
+        return harness_hooks.Result()
+    payload = {"session_id": SESSION_ID, "cwd": os.getcwd(),
+               "hook_event_name": event, **fields}
+    if depth > 0:
+        payload["agent_id"] = f"subagent-depth-{depth}"
+    return harness_hooks.run(event, payload, HOOKS)
+
+def _hook_failed_and_user_declined(res, what):
+    """A failed PRE hook is not a verdict: ask, like the classifier does."""
+    return bool(res.failures) and ask_human(
+        f"hook failed ({'; '.join(res.failures)}); {what} anyway?") == "n"
+
+def submit_filter(line):
+    """UserPromptSubmit hooks: True = send the prompt on. Context becomes a reminder."""
+    res = _fire("UserPromptSubmit", prompt=line)
+    if res.blocked:
+        print(f"  [hook] prompt rejected: {res.reason}")
+        return False
+    if _hook_failed_and_user_declined(res, "send the prompt"):
+        return False
+    for text in res.context:
+        remind(text)
+    return True
+
+def fire_session_start():
+    for text in _fire("SessionStart").context:
+        remind(text)
+
+def fire_stop():
+    """Stop hooks only observe (Claude Code's exit 2 would keep the turn going)."""
+    for text in _fire("Stop").context:
+        print(f"  [hook Stop] {text}")
+
 def execute_tool(name, args, depth=0):
+    """ch 11 hooks around ch 13's gate: a hook can veto or add notes, never grant."""
+    pre = _fire("PreToolUse", depth, tool_name=name, tool_input=args)
+    if pre.blocked:
+        return f"BLOCKED by hook: {pre.reason}"
+    if _hook_failed_and_user_declined(pre, f"run {name}"):
+        return "DENIED by user after a hook failed. Ask them how to proceed, or adapt."
+    result = _execute_tool(name, args, depth)
+    post = _fire("PostToolUse", depth, tool_name=name, tool_input=args,
+                 tool_response=result[:HOOK_RESPONSE_CHARS])
+    notes = pre.context + post.context
+    return result + "".join(f"\n[hook] {n}" for n in notes) if notes else result
+
+def _execute_tool(name, args, depth=0):
     err = gate(name, args)                                  # ch 13 first
     if err:
         return err
@@ -956,7 +1012,7 @@ def run_subagent(task, depth=1):
 
 # ----------------------------------------- ch 1 + 6: sessions and memory
 HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
-        "/stop <id>  /undo  /perms  /cache")
+        "/stop <id>  /undo  /perms  /cache  /hooks")
 
 def save_session(messages, session_file):
     tmp = session_file + ".tmp"
@@ -990,13 +1046,20 @@ def slash(cmd, messages):
         print(json.dumps(PERMS, indent=1, ensure_ascii=False))
     elif word == "/cache":
         print(server_cache_status())
+    elif word == "/hooks":
+        print("\n".join(HOOKS.describe()) or "no hooks loaded (.harness.hooks.json)")
     else:
         print(f"unknown command; {HELP}")
     return True, None
 
 def main():
-    global CURRENT_REQUEST
+    global CURRENT_REQUEST, HOOKS, SESSION_ID
     session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
+    SESSION_ID = os.path.basename(session_file)
+    try:
+        HOOKS = harness_hooks.load()                        # ch 11: ./.harness.hooks.json
+    except harness_hooks.HooksConfigError as e:             # never run with a hook silently off
+        raise SystemExit(f"hooks config error: {e}")
     messages = []
     load_perms()
     if os.path.exists(session_file):                        # resume = file read
@@ -1006,6 +1069,7 @@ def main():
     elif os.path.exists(MEMORY_FILE):                       # ch 6: memory
         with open(MEMORY_FILE, encoding="utf-8") as f:
             remind(f"Project memory ({MEMORY_FILE}):\n" + f.read())
+    fire_session_start()
 
     start_reader()
     eof_seen, deadline = False, 0.0
@@ -1042,6 +1106,8 @@ def main():
                     if fresh is not None:
                         messages = fresh
                     continue
+                if not submit_filter(line):                 # ch 11: UserPromptSubmit
+                    continue
                 CURRENT_REQUEST = line
                 pending = drain_reminders()                 # pending notices
                 text = f"{pending}\n{line}" if pending else line
@@ -1051,6 +1117,7 @@ def main():
             except LLMError as e:
                 print(f"\n[harness] model call failed, turn abandoned: {e}")
             save_session(messages, session_file)
+            fire_stop()
     finally:
         save_session(messages, session_file)
     print("[session saved]")

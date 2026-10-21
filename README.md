@@ -2,8 +2,8 @@
 
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
-- 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1050 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（83 項）
+- 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（122 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -86,6 +86,50 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | `HARNESS_SANDBOX` | 無 | JSON 陣列，作為指令前綴 |
 | `HARNESS_ALLOW_HTTP` | 無 | 設 `1` 才允許託管 provider 對非 localhost 使用明文 http（見上） |
 
+## Hook（第 11 章：確定性的反射）
+
+Hook 是你寫的腳本或內部 HTTP 端點，綁在 harness 的事件上，**不管模型怎麼想都會執行**。它可以**觀察**、**補充**（文字會進模型的對話）或**否決**，**不能放行**：hook 回 `allow` 一律忽略，閘門、模式與人仍然照常把關。
+
+設定放在專案目錄的 `.harness.hooks.json`（已列入 `.gitignore`，**只讀本機**，因為 hook 就是會執行的程式碼）。啟動時整份檢查，格式錯、事件名或欄位名打錯都會直接報錯並結束，不會讓安全 hook 靜默失效。`/hooks` 列出已載入的 hook。
+
+```json
+{"hooks": {
+  "PreToolUse": [{"matcher": "run_command|write_file", "hooks": [
+    {"type": "command", "command": "python", "args": ["check.py"], "timeout": 30, "env": ["MY_TOKEN"]},
+    {"type": "http", "url": "http://policy.corp/hook", "allow_http": true,
+     "headers_env": {"Authorization": "POLICY_TOKEN"}, "onFailure": "block"}]}]
+}}
+```
+
+| 事件 | 收到的欄位（stdin JSON 或 POST 本文） | exit 0 的輸出 | 否決時 |
+|---|---|---|---|
+| `PreToolUse` | `tool_name`、`tool_input` | 接在工具結果後面給模型 | 工具不執行，理由回給模型 |
+| `PostToolUse` | 另加 `tool_response`（前 10,000 字元） | 接在工具結果後面 | 不適用；exit 2 的 stderr 當 context |
+| `UserPromptSubmit` | `prompt` | 當 reminder | 這則 prompt 不送給模型 |
+| `SessionStart` | — | 當 reminder | 不適用 |
+| `Stop` | — | 只印出，不回注 | 不適用 |
+
+所有事件另帶 `session_id`、`cwd`、`hook_event_name`；子 agent 的工具呼叫也會觸發 hook，並帶 `agent_id`。`matcher` 是對**工具名稱**的完整比對（Python 正規表示式 `fullmatch`），省略代表全部；只對 `PreToolUse`／`PostToolUse` 有意義。
+
+**合約**（欄位名與結束碼對齊 Claude Code 的 hooks，讀官方文件後設計，已有腳本多半可直接沿用）：exit 0＝成功，stdout 純文字當 context；exit 2＝否決（stderr 或 stdout 是理由）；stdout 印 JSON 時，`hookSpecificOutput.permissionDecision: "deny"` 或頂層 `decision: "block"` 也算否決，`hookSpecificOutput.additionalContext` 當 context；其他結束碼、逾時、起不來、輸出不是合法 JSON，都算「hook 失敗」。每段輸出上限 10,000 字元，超過截斷並標示。
+
+**hook 失敗怎麼辦（`onFailure`）**：`PreToolUse`／`UserPromptSubmit` 預設 `"ask"`，**改問人**（與分類器「失敗一律改問人」一致）；`"block"` 直接否決；`"continue"` 當沒發生。其他事件預設 `"continue"`。
+
+**與 Claude Code 刻意不同的地方**
+
+| 項目 | Claude Code | 這裡 |
+|---|---|---|
+| hook 失敗預設 | 繼續（未設 `onFailure`） | 前置事件改問人 |
+| `allow` | 可放行 | 一律忽略，只能收緊 |
+| `Stop` 的 exit 2 | 讓對話繼續 | 只觀察，避免無限迴圈 |
+| 指令形式 | 有 shell form | 只有 exec form（`command` 是程式、`args` 是參數，不經 shell；Windows 上不能直接執行 `.cmd`／`.bat`，請用 `python 腳本.py`） |
+| 環境變數 | 繼承 | 移除名稱含 `KEY／TOKEN／SECRET／PASSWORD／CREDENTIAL` 的變數，只加 `env` 明列的，並強制 `PYTHONUTF8=1`（cp950 管線會讓中文亂碼） |
+| 不支援 | — | `async`、`if`、`shell` 等欄位可以出現在貼過來的設定裡但會被忽略 |
+
+**HTTP hook 的網路規則**：與 provider 相同，`https://` 一律可以，`http://` 只有 localhost 或該 hook 寫 `"allow_http": true` 才放行（企業內網常沒有 HTTPS，明文代表路徑上的人看得到 token，請用低權限 token）；**不跟隨重新導向**，3xx 算失敗，所以政策伺服器無法把 token 轉去別處；token 值只從環境變數讀（`headers_env` 寫的是變數名稱，不是值），變數沒設就視為失敗，不會送出請求。2xx 且本文為空算成功，其他非 2xx、連線失敗、逾時都算失敗。
+
+**模型不能改 hook**：`.harness.hooks.json` 在受保護路徑內，`write_file`／`edit_file` 擋下，`run_command` 提到該檔名也擋（對 shell 只是字串比對，可被刻意混淆，與其他狀態檔相同的限制）。
+
 ## 對作者所用 vLLM 伺服器（Qwen/Qwen3.6-35B-A3B）的實測發現（2026-10-21）
 
 以下是那一台伺服器的設定，換一台可能不同；`/v1/models` 回報該伺服器 `max_model_len` 為 131072。
@@ -103,7 +147,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-83 項 = 離線 69 項（假伺服器、時間、並行、分類器邏輯等）＋ live 14 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+122 項 = 離線 106 項（假伺服器、時間、並行、分類器邏輯等）＋ live 16 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -139,6 +183,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 攻擊清單只有 5 種，不是完整紅隊測試。
 - 白名單與風險字串都偏 Windows／cmd。
 - **`llamacpp`／`sglang`／`openai`／`anthropic-compat` 只做了離線測試（請求內容、設定解析、`/metrics` 文字解析），沒有對真實伺服器或 API 跑過 live**；欄位行為依各家官方文件。OpenAI 的 `max_completion_tokens` 有官方依據：公開的 OpenAPI 規格（`openai/openai-openapi`）把 Chat Completions 的 `max_tokens` 標為 deprecated，並註明與 o-series 模型不相容；但「託管端點收到 `chat_template_kwargs` 是否回 400」是推斷、未實測，所以預設不送。實測過的只有 `vllm`。
+- Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 
@@ -152,6 +197,7 @@ roy_harness/
 ├─ .gitignore                  含 .harness.env（個人端點）
 ├─ src/harness/harness_vllm.py
 ├─ src/harness/harness_net.py   URL 政策、不跟隨重新導向
+├─ src/harness/harness_hooks.py Hook 載入與執行
 └─ tests/test_harness_vllm.py
 ```
 
