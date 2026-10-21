@@ -2,8 +2,8 @@
 
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
-- 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；MCP 另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，合計 184 項）
+- 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 211 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -174,6 +174,44 @@ harness 當 MCP 客戶端：啟動時連上設定的伺服器，把它們的工�
 
 四種組合都通過；另有一個全鏈測試：真實 vLLM 模型呼叫真實 FastMCP 的 `add`，得到 42。執行方式：建兩個各裝一代 fastmcp 的 venv，設 `HARNESS_LIVE=1`、`HARNESS_MCP_LIVE_MODERN_PY`、`HARNESS_MCP_LIVE_LEGACY_PY`（兩個 venv 的 python 路徑）。沒設就 skipped。
 
+## Skill（第 11 章：需要時才載入的說明書）
+
+Skill 是一個資料夾，裡面有 `SKILL.md`：名稱、一行描述，以及一大段說明書。模型平常只看得到**選單**（名稱＋一行描述），需要時才用 `skill` 工具載入全文，這就是書裡說的 progressive disclosure：索引常駐、細節按需拿。預設讀專案目錄的 `skills/`；`HARNESS_SKILLS_DIRS` 可列多個資料夾（用 `os.pathsep` 分隔；Windows 是 `;`）。`/skills` 列出已載入的；`/skill <名稱>` 由你手動把某個 skill 交給模型。
+
+```
+skills/
+  release/
+    SKILL.md        ← 開頭是 --- 圍起來的 name 與 description，其後是說明書
+    run_checks.py   ← 可選：說明書裡可以叫模型執行的腳本
+```
+
+**選單放在系統提示，不放在對話開頭**：壓縮會把舊訊息摘要掉，放在第一則訊息裡的選單會跟著消失；系統提示每個請求都重建，不受壓縮影響，續接舊 session 也有。代價是每個請求多帶選單那幾百個 token。全文則是 `skill` 工具的結果，留在對話裡，壓縮後若被摘要掉，模型可以再呼叫一次。
+
+**格式**：`SKILL.md` 用一個 YAML 子集解析器讀（單行、帶引號、折疊 `>`、字面 `|`；巢狀欄位跳過）。只用 `name` 與 `description`；`allowed-tools`、`metadata`、`argument-hint`、`license` 等欄位讀到但**忽略**，所以不會從它們得到任何工具限制。資料夾名稱就是 skill 的身分；`name` 欄位與它不同時以資料夾名稱為準並警告。描述缺少或為空的 skill 會略過並警告（選單需要它）。
+
+**安全**（skill 全文是模型會照做的指令，所以信任等級同 `AGENT.md` 與 hooks 檔）：
+- **只讀本機資料夾**。
+- **模型不能建立或修改 skill**：skills 資料夾底下所有檔案（含尚不存在的新檔）受保護，比對真實路徑（同 Hook 的規則）；`run_command` 提到 `SKILL.md` 或 `skills/` 也擋（整詞比對，`graph.py` 式的誤擋與 `echo skills are fun` 都不會）。否則模型可以改寫自己的行為準則並跨 session 保留。
+- **符號連結政策（SymJack）**：skill 資料夾的真實路徑必須落在**某個已設定的根目錄**之內；指到其他地方的符號連結或 junction 略過並警告。載入全文時會**再檢查一次**（啟動後被換成連結也拒絕）。
+- skill 名稱只用來查表，**絕不當成路徑**（`../x`、絕對路徑都讀不到檔案）。
+- `skill` 工具**只給主 agent**，子 agent 看不到，硬喊也擋；它是唯讀本機檔案，所以不問人，但 Hook 照常作用（可以否決）。
+
+**限制數字**（我訂的，不是規格給的）：最多 64 個 skill、描述 300 字元、選單總長 8,000 字元、單一 skill 全文 20,000 字元（超過截斷並附完整檔案路徑）。
+
+**用你的真實資料夾實測**（作者的 Claude Code skill 資料夾，2026-10-21）：
+
+| 項目 | 結果 |
+|---|---|
+| 有 `SKILL.md` | 50 個（描述寫法：折疊 `>` 24、單行 20、帶引號 6） |
+| 載入 | 31 個；選單 7,992／8,000 字元，**預算用完就停**，按字母順序後面的 13 個（`pp-espn`、`subagent`、`tarot`、`tutor`、`tw_stock`、`yt-content` 等）沒輪到 |
+| 符號連結逃出根目錄 | 6 個被略過（`find-skills`、`opencli-*` 五個；`recall` 與 `smart-search` 排在預算之後沒輪到） |
+| `name` 欄位與資料夾名不同 | 9 個（以資料夾名稱為準並警告） |
+| 平均描述長度 | 240 字元（14 個被截到 300） |
+
+結論：我訂的預算放不下這個資料夾，**而且超過預算時是按字母順序丟掉後面的**，被丟掉的 skill 模型根本不知道它存在。這些 skill 是為 Claude Code 寫的（內容會叫模型用 `Skill`、`Bash`、`WebFetch` 這些這個 harness 沒有的工具），所以預設也不指向它。建議做法是自己挑幾個放進專案的 `skills/`。
+
+**驗證**：`tests/test_harness_skills.py` 離線 25 項（解析器、載入、限制、符號連結、工具、接線、保護、斜線指令、真實子行程端對端）；live 2 項（真實 vLLM 模型載入含暗號的 skill 並回答；對真實資料夾載入，需設 `HARNESS_SKILLS_LIVE_DIR`）。
+
 ## 對作者所用 vLLM 伺服器（Qwen/Qwen3.6-35B-A3B）的實測發現（2026-10-21）
 
 以下是那一台伺服器的設定，換一台可能不同；`/v1/models` 回報該伺服器 `max_model_len` 為 131072。
@@ -191,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-184 項 = 離線 163 項（假伺服器、時間、並行、分類器邏輯等）＋ live 21 項（vLLM 16 項、真實 FastMCP 5 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+211 項 = 離線 188 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -246,6 +284,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 回應大小：HTTP hook 的回應上限 1MB；但**模型回應與 `/cache` 的回應沒有大小上限**（既有行為，惡意端點可讓 harness 吃光記憶體），command hook 的輸出也是讀完才截斷（腳本是你自己的、有逾時）。
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
+- Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；**尚未送第三方審查**。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 
@@ -261,11 +300,13 @@ roy_harness/
 ├─ src/harness/harness_net.py   URL 政策、不跟隨重新導向
 ├─ src/harness/harness_hooks.py Hook 載入與執行
 ├─ src/harness/harness_mcp.py   MCP 客戶端（stdio、Streamable HTTP、兩代協定）
+├─ src/harness/harness_skills.py Skill：選單、skill 工具、保護
 ├─ tests/test_harness_vllm.py
 ├─ tests/test_harness_mcp.py        MCP 離線測試（假伺服器）
 ├─ tests/test_harness_mcp_live.py   MCP 對真實 FastMCP 的 live 測試
 ├─ tests/fake_mcp_server.py         假 stdio 伺服器（新版／舊版／雙版…）
-└─ tests/live_fastmcp_server.py     真實 FastMCP 伺服器（live 測試用）
+├─ tests/live_fastmcp_server.py     真實 FastMCP 伺服器（live 測試用）
+└─ tests/test_harness_skills.py     Skill 測試（含 live）
 ```
 
 ## 出處與授權

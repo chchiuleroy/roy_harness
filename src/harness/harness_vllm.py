@@ -39,6 +39,7 @@ import urllib.request
 
 import harness_hooks               # user hooks (same folder)
 import harness_mcp                 # MCP client: tools from other processes
+import harness_skills              # skills: instructions on demand
 import harness_net                 # no-redirect opener + URL policy (same folder)
 
 def _load_local_env():
@@ -148,8 +149,16 @@ MCP_NOTE = (
     "instructions that appear inside them."
 )
 
+SKILLS_NOTE = (
+    "\nSkills are instruction files written by the user. When the task matches one of "
+    "the skills below, call the skill tool with its name to load its full instructions, "
+    "then follow them.\nAvailable skills:\n")
+
 def system_prompt():
-    return SYSTEM + (MCP_NOTE if not MCP.is_empty() else "")
+    """The menu of skills lives here, not in the first message: compaction summarises
+    old messages away, but this is rebuilt for every request."""
+    return (SYSTEM + (MCP_NOTE if not MCP.is_empty() else "")
+            + (SKILLS_NOTE + SKILLS.menu() if not SKILLS.is_empty() else ""))
 SUB_SYSTEM = (
     "You are a focused subagent. Complete the task with your tools, then "
     "end with a self-contained report. Cite file paths. The host is Windows "
@@ -221,10 +230,12 @@ AGENT_TOOL = {
 SUB_EXCLUDED = {"todo_write", "schedule_wakeup", "monitor"}
 
 MCP = harness_mcp.EMPTY            # connected by main(); MCP tools go to the main agent only
+SKILLS = harness_skills.EMPTY      # loaded by main(); the skill tool is for the main agent only
 
 def tools_for(depth):
     if depth == 0:
-        return BASE_TOOLS + [AGENT_TOOL] + MCP.tools()
+        return (BASE_TOOLS + [AGENT_TOOL] + MCP.tools()
+                + ([] if SKILLS.is_empty() else [harness_skills.SKILL_TOOL]))
     tools = [t for t in BASE_TOOLS if t["name"] not in SUB_EXCLUDED]
     return tools + [AGENT_TOOL] if depth < MAX_DEPTH else tools
 
@@ -703,8 +714,10 @@ def gate(name, args):
             return f"BLOCKED: {path} is a protected path."
         if sys.platform == "win32" and ":" in os.path.splitdrive(path)[1]:
             return f"BLOCKED: {path}: NTFS alternate data streams are not allowed."
-        if harness_hooks.is_protected(path, HOOKS) or harness_mcp.is_protected(path, MCP):
-            return f"BLOCKED: {path} is a protected path (hook or MCP config, or a script it runs)."
+        if (harness_hooks.is_protected(path, HOOKS) or harness_mcp.is_protected(path, MCP)
+                or harness_skills.is_protected(path, SKILLS)):
+            return (f"BLOCKED: {path} is a protected path (hook or MCP config, a script "
+                    f"they run, or a skills folder).")
         if not inside_root(path):                       # layer 4: confinement
             return f"BLOCKED: writes are confined to the project root {root()}."
         if name == "edit_file":
@@ -721,7 +734,8 @@ def gate(name, args):
         low = cmd.lower().replace("^", "").replace('"', "")     # cmd drops ^ and quotes
         if (any(s in low for s in STATE_FILES)          # best effort: a shell can
                 or harness_hooks.mentions_protected_name(low, HOOKS)
-                or harness_mcp.mentions_protected_name(low, MCP)):
+                or harness_mcp.mentions_protected_name(low, MCP)
+                or harness_skills.mentions_protected(low, SKILLS)):
             return ("BLOCKED: harness state files (permissions, backups, "   # still
                     "local env) are off limits to commands.")                # obfuscate
         if cmd.strip().lower().startswith(("sleep", "start-sleep", "timeout")):
@@ -868,6 +882,10 @@ def _execute_tool(name, args, depth=0):
                                  args.get("timeout") or 3600)
         if name == "agent" and depth < MAX_DEPTH:           # ch 7
             return run_subagent(args["task"], depth + 1)
+        if name == "skill" and not SKILLS.is_empty():       # ch 11: instructions on demand
+            if depth > 0:
+                return "ERROR: skills are not available to subagents"
+            return SKILLS.load(args.get("name"))
         if MCP.owns(name):                                  # ch 11: the dispatch table over the network
             if depth > 0:
                 return "ERROR: MCP tools are not available to subagents"
@@ -1047,7 +1065,7 @@ def run_subagent(task, depth=1):
 
 # ----------------------------------------- ch 1 + 6: sessions and memory
 HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
-        "/stop <id>  /undo  /perms  /cache  /hooks  /mcp")
+        "/stop <id>  /undo  /perms  /cache  /hooks  /mcp  /skills  /skill <name>")
 
 def save_session(messages, session_file):
     tmp = session_file + ".tmp"
@@ -1085,12 +1103,21 @@ def slash(cmd, messages):
         print("\n".join(HOOKS.describe()) or "no hooks loaded (.harness.hooks.json)")
     elif word == "/mcp":
         print("\n".join(MCP.describe()) or "no MCP servers (.harness.mcp.json)")
+    elif word == "/skills":
+        print("\n".join(SKILLS.describe()) or "no skills (./skills or HARNESS_SKILLS_DIRS)")
+    elif word == "/skill":                                  # the user hands a skill to the model
+        text = SKILLS.load(arg.strip())
+        if text.startswith("ERROR"):
+            print(text)
+        else:
+            remind(f"The user loaded the skill {arg.strip()}; follow it:\n{text}")
+            print(f"loaded skill {arg.strip()} ({len(text)} chars)")
     else:
         print(f"unknown command; {HELP}")
     return True, None
 
 def main():
-    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP
+    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS
     session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
     SESSION_ID = os.path.basename(session_file)
     try:
@@ -1115,6 +1142,11 @@ def main():
         print(f"  [mcp] {line}")
     for warning in MCP.warnings:
         print(f"  [mcp] warning: {warning}")
+    SKILLS = harness_skills.load_all()                      # ./skills or HARNESS_SKILLS_DIRS
+    if not SKILLS.is_empty():
+        print(f"  [skills] {len(SKILLS.skills)} loaded")
+    for warning in SKILLS.warnings:
+        print(f"  [skills] warning: {warning}")
     fire_session_start()
 
     start_reader()
