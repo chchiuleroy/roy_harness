@@ -115,6 +115,12 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - `live` 測試空過問題：見上，改為 skipped。
 - 待驗證項「串流 tool_call 缺 `index`」：在作者的伺服器上 3 次、每次 3 個並行呼叫、12 個片段，全部都有 `index`，未重現，未改程式；其他伺服器未驗證。
 
+**第二次審查（2026-10-21，針對多 provider 支援，Codex 唯讀靜態審查）**：3 項 `confirmed` 缺陷，全部在本機重現後修復，並先確認新測試在修之前是紅的。
+- 明文 http 檢查只用 `startswith("http://")`，`HTTP://evil.example` 與 `http://localhost:1@evil.example` 都能通過，hosted API 金鑰會明文送去外部主機；改用 `urlsplit` 解析（大小寫、userinfo、IPv6 一併處理，非 http(s) 或無主機一律拒絕）。
+- 洩漏私人端點的掃描測試用手寫檔案清單，新增的追蹤檔不會被掃；改掃 `git ls-files` 的全部追蹤檔。
+- `/cache` 的數字 regex 會吃下 `1e`、`+`、`.` 這類 `float()` 讀不了的值，例外會結束整個互動 session；regex 收緊成 `float()` 一定能讀的格式。
+- 審查者的 `not_checked`：它的唯讀沙盒建不了暫存目錄，離線測試全在 setUp 失敗，所以測試結果只有作者這邊的紀錄；也沒有重查各廠商文件。修復後沒有再送複審；修復後 live 測試也沒有重跑。
+
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
 - `auto` 模式下使用者明說「Delete the file junk.txt.」：5/5 分類器放行並執行。
