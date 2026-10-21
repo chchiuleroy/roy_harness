@@ -1,9 +1,9 @@
 # roy_harness
 
-把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容的 vLLM 伺服器**，並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
+把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 960 行，只用標準函式庫，零依賴）
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（61 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（76 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -12,17 +12,32 @@
 
 ```bash
 cd roy_harness
-export VLLM_BASE_URL=http://localhost:8000/v1          # 你的 vLLM 端點（或寫進 .harness.env，見下）
+export VLLM_BASE_URL=http://localhost:8000/v1          # 你的端點（或寫進 .harness.env，見下）
 python -X utf8 src/harness/harness_vllm.py            # 互動；session 存成 session.json
 python -X utf8 src/harness/harness_vllm.py my.json    # 指定 session 檔，再次執行同檔名即接續
 HARNESS_MODE=auto python -X utf8 src/harness/harness_vllm.py
 ```
 
-連線設定：`VLLM_BASE_URL`（預設 `http://localhost:8000/v1`）、`VLLM_MODEL`（預設 `Qwen/Qwen3.6-35B-A3B`）、`VLLM_API_KEY`（伺服器要金鑰才設）。
+### 選模型後端：`HARNESS_PROVIDER`
 
-**個人端點不要寫進原始碼**：在 repo 根目錄建 `.harness.env`（已列入 `.gitignore`），內容是 `KEY=VALUE` 逐行；真正的環境變數優先於檔案。
+| provider | 預設端點 | 必設 | 送出的請求 |
+|---|---|---|---|
+| `vllm`（預設） | `http://localhost:8000/v1` | — | `max_tokens`＋`chat_template_kwargs` |
+| `llamacpp` | 無（必須自己給） | `HARNESS_BASE_URL`、`HARNESS_MODEL` | 同上 |
+| `sglang` | 無（必須自己給） | `HARNESS_BASE_URL`、`HARNESS_MODEL` | 同上 |
+| `openai` | `https://api.openai.com/v1` | `HARNESS_MODEL`、`OPENAI_API_KEY`（或 `HARNESS_API_KEY`） | `max_completion_tokens`，**不送** `chat_template_kwargs` |
+| `anthropic-compat` | `https://api.anthropic.com/v1` | `HARNESS_MODEL`、`ANTHROPIC_API_KEY`（或 `HARNESS_API_KEY`） | `max_tokens`，**不送** `chat_template_kwargs` |
+
+- 通用變數：`HARNESS_BASE_URL`、`HARNESS_MODEL`、`HARNESS_API_KEY`。舊的 `VLLM_BASE_URL`／`VLLM_MODEL`／`VLLM_API_KEY` **只對 `vllm` 有效**，避免換成 openai 時把金鑰送到你的 vLLM 主機。
+- 本地三家都送 `chat_template_kwargs: {"enable_thinking": false}`（llama.cpp 與 SGLang 的官方文件都列了這個欄位；鍵名依模型而異，這裡的 `enable_thinking` 對應 Qwen 系列）。hosted 的兩家不送，未知欄位在 OpenAI 可能被 400。
+- 託管端點拒絕用明文 `http://` 送金鑰（localhost 例外，方便接本地代理）。
+- `anthropic-compat` 走 Anthropic 的 OpenAI 相容層。官方文件說這層「主要用於測試與比較，不視為長期或正式環境方案」，且沒有 prompt caching 與原生 thinking。
+- `/cache` 依 provider 解析 `/metrics`：vLLM 讀 `vllm:prefix_cache_*`；SGLang 讀 `sglang:cache_hit_rate`（需 `--enable-metrics`）；llama.cpp 的 `/metrics`（需 `--metrics`）沒有前綴快取命中計數，只回報 `prompt_tokens_total`；hosted 不查（看 usage 行的 `cached=`）。
+
+**個人端點不要寫進原始碼**：在 repo 根目錄建 `.harness.env`（已列入 `.gitignore`），內容是 `KEY=VALUE` 逐行；真正的環境變數優先於檔案。測試會檢查：追蹤檔案只能出現 localhost 與廠商網域，且 `.harness.env` 裡的主機不得出現在其他任何檔案。
 
 ```
+HARNESS_PROVIDER=vllm
 VLLM_BASE_URL=http://your-vllm-host:8000/v1
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 ```
@@ -60,7 +75,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 | 變數 | 預設 | 用途 |
 |---|---|---|
-| `VLLM_BASE_URL` `VLLM_MODEL` `VLLM_API_KEY` | 見上 | 連線設定 |
+| `HARNESS_PROVIDER` `HARNESS_BASE_URL` `HARNESS_MODEL` `HARNESS_API_KEY` | 見上 | 連線設定（vllm 另接受舊名 `VLLM_*`） |
 | `HARNESS_MODE` | `normal` | `safe`／`normal`／`auto` |
 | `HARNESS_COMPACT_TOKENS` `HARNESS_KEEP_RECENT` | 96000／8 | 壓縮門檻與保留訊息數 |
 | `HARNESS_STREAM` | `1` | 設 `0` 關閉串流 |
@@ -86,7 +101,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-61 項 = 離線 47 項（假伺服器、時間、並行、分類器邏輯等）＋ live 14 項。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+76 項 = 離線 62 項（假伺服器、時間、並行、分類器邏輯等）＋ live 14 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -115,6 +130,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 兩層巢狀子 agent 只有單元測試，沒有 live 示範；並行子 agent 有 live 觀察（3 個交錯執行）但不是自動化測試。
 - 攻擊清單只有 5 種，不是完整紅隊測試。
 - 白名單與風險字串都偏 Windows／cmd。
+- **`llamacpp`／`sglang`／`openai`／`anthropic-compat` 只做了離線測試（請求內容、設定解析、`/metrics` 文字解析），沒有對真實伺服器或 API 跑過 live**；欄位行為依各家官方文件，OpenAI 的 `max_completion_tokens` 為依慣例的推斷、未查官方文件。實測過的只有 `vllm`。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 

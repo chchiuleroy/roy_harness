@@ -214,11 +214,51 @@ class TestLocalConfig(Base):
     """The repo is public, so a personal endpoint must live in a git-ignored
     file, never in the source."""
 
-    def test_source_has_no_personal_endpoint(self):
+    def test_repo_files_name_only_vendor_and_local_hosts(self):
+        """The repo is public. Any host other than localhost, a vendor API or a
+        documentation link in a tracked file is a leaked (or hard-coded) endpoint."""
         import re
-        src = open(os.path.join(SRC, "harness_vllm.py"), encoding="utf-8").read()
-        default = re.search(r'environ\.get\("VLLM_BASE_URL",\s*"([^"]*)"', src).group(1)
-        self.assertTrue(default.startswith("http://localhost"), default)
+        allowed = {"localhost", "127.0.0.1", "api.openai.com", "api.anthropic.com",
+                   "github.com", "your-vllm-host", "host", "example.com",
+                   "proxy.example.com", "evil.example", "private", "h",
+                   "choosealicense.com",
+                   "creativecommons.org"}
+        root = os.path.join(HERE, "..")
+        bad = []
+        for rel in ("README.md", "LICENSE", os.path.join("src", "harness", "harness_vllm.py"),
+                    os.path.join("tests", "test_harness_vllm.py")):
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                text = f.read()
+            for host in re.findall(r"https?://([A-Za-z0-9.-]+)", text):
+                if host not in allowed:
+                    bad.append((rel, host))
+        self.assertEqual(bad, [])
+
+    def test_personal_endpoint_from_env_file_appears_nowhere_else(self):
+        """Whatever host the git-ignored .harness.env names must not occur in any
+        other file, so a push can never carry it. Skipped if no such file."""
+        import re
+        root = os.path.abspath(os.path.join(HERE, ".."))
+        envp = os.path.join(root, ".harness.env")
+        if not os.path.exists(envp):
+            self.skipTest("no .harness.env")
+        with open(envp, encoding="utf-8") as f:
+            hosts = set(re.findall(r"https?://([A-Za-z0-9.-]+)", f.read())) - {
+                "localhost", "127.0.0.1"}
+        hits = []
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "debug")]
+            for fn in files:
+                path = os.path.join(dirpath, fn)
+                if os.path.abspath(path) == os.path.abspath(envp):
+                    continue
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                hits += [os.path.relpath(path, root) for h in hosts if h in text]
+        self.assertEqual(hits, [])
 
     def test_env_file_fills_gaps_but_real_environment_wins(self):
         open(".harness.env", "w", encoding="utf-8").write(
@@ -401,6 +441,134 @@ class TestCompaction(Base):
         hv.call_llm = lambda *a, **k: llm_reply("   ")
         self.assertFalse(hv.compact(m, keep=4))
         self.assertEqual(json.dumps(m), before)
+
+
+# ----------------------------------------------------------- provider dialects
+class TestProviders(Base):
+    """HARNESS_PROVIDER picks the dialect; each case guards a way a wrong
+    dialect fails (a 400 from a hosted API, or a key sent to the wrong host)."""
+
+    def setUp(self):
+        super().setUp()
+        self._cfg = (hv.PROVIDER, hv.BASE_URL, hv.MODEL, hv.API_KEY, hv._post)
+
+    def tearDown(self):
+        hv.PROVIDER, hv.BASE_URL, hv.MODEL, hv.API_KEY, hv._post = self._cfg
+        super().tearDown()
+
+    def cfg(self, **env):
+        return hv.resolve_config(env)
+
+    def test_default_is_local_vllm(self):
+        name, url, model, key = self.cfg()
+        self.assertEqual((name, key), ("vllm", ""))
+        self.assertTrue(url.startswith("http://localhost"), url)
+
+    def test_legacy_vllm_names_still_work_for_vllm(self):
+        """Existing .harness.env files use VLLM_*; they must keep working."""
+        _, url, model, key = self.cfg(VLLM_BASE_URL="http://h:1/v1/", VLLM_MODEL="m",
+                                      VLLM_API_KEY="k")
+        self.assertEqual((url, model, key), ("http://h:1/v1", "m", "k"))
+
+    def test_legacy_vllm_endpoint_is_ignored_by_other_providers(self):
+        """With a personal vLLM host in the environment, switching to openai must
+        not send OPENAI_API_KEY there."""
+        _, url, _, key = self.cfg(HARNESS_PROVIDER="openai", HARNESS_MODEL="m",
+                                  OPENAI_API_KEY="sk-x",
+                                  VLLM_BASE_URL="http://private:8000/v1",
+                                  VLLM_API_KEY="other")
+        self.assertEqual(url, "https://api.openai.com/v1")
+        self.assertEqual(key, "sk-x")
+
+    def test_harness_vars_beat_vendor_key_names(self):
+        _, _, _, key = self.cfg(HARNESS_PROVIDER="anthropic-compat", HARNESS_MODEL="m",
+                                ANTHROPIC_API_KEY="a", HARNESS_API_KEY="h")
+        self.assertEqual(key, "h")
+
+    def test_llamacpp_and_sglang_need_an_explicit_endpoint_and_model(self):
+        """No default port is guessed: a wrong guess talks to the wrong server."""
+        for prov in ("llamacpp", "sglang"):
+            with self.assertRaises(ValueError):
+                self.cfg(HARNESS_PROVIDER=prov, HARNESS_MODEL="m")
+            with self.assertRaises(ValueError):
+                self.cfg(HARNESS_PROVIDER=prov, HARNESS_BASE_URL="http://h:1/v1")
+            self.cfg(HARNESS_PROVIDER=prov, HARNESS_BASE_URL="http://h:1/v1",
+                     HARNESS_MODEL="m")
+
+    def test_hosted_providers_need_key_model_and_https(self):
+        for prov in ("openai", "anthropic-compat"):
+            with self.assertRaises(ValueError):                       # no key
+                self.cfg(HARNESS_PROVIDER=prov, HARNESS_MODEL="m")
+            with self.assertRaises(ValueError):                       # no model
+                self.cfg(HARNESS_PROVIDER=prov, HARNESS_API_KEY="k")
+            with self.assertRaises(ValueError):                       # cleartext key
+                self.cfg(HARNESS_PROVIDER=prov, HARNESS_API_KEY="k", HARNESS_MODEL="m",
+                         HARNESS_BASE_URL="http://proxy.example.com/v1")
+            self.cfg(HARNESS_PROVIDER=prov, HARNESS_API_KEY="k", HARNESS_MODEL="m",
+                     HARNESS_BASE_URL="http://localhost:4000/v1")     # local proxy ok
+
+    def test_unknown_provider_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.cfg(HARNESS_PROVIDER="openia")
+
+    def sent_body(self, provider):
+        got = []
+        hv._post = lambda body, on_text=None: (got.append(body), llm_reply("ok"))[1]
+        hv.PROVIDER = provider
+        hv.call_llm([{"role": "user", "content": "hi"}], None, "sys")
+        return got[0]
+
+    def test_local_servers_get_template_kwargs_and_max_tokens(self):
+        """vLLM, llama.cpp and SGLang all take chat_template_kwargs; without
+        enable_thinking=false a Qwen model's tool calls land in the reasoning field."""
+        for prov in ("vllm", "llamacpp", "sglang"):
+            b = self.sent_body(prov)
+            self.assertEqual(b["chat_template_kwargs"], {"enable_thinking": False}, prov)
+            self.assertIn("max_tokens", b, prov)
+
+    def test_hosted_providers_get_no_vllm_only_fields(self):
+        """Unknown fields can be a 400 on a hosted API."""
+        for prov in ("openai", "anthropic-compat"):
+            self.assertNotIn("chat_template_kwargs", self.sent_body(prov), prov)
+
+    def test_openai_uses_max_completion_tokens_anthropic_keeps_max_tokens(self):
+        b = self.sent_body("openai")
+        self.assertIn("max_completion_tokens", b)
+        self.assertNotIn("max_tokens", b)
+        b = self.sent_body("anthropic-compat")
+        self.assertIn("max_tokens", b)
+        self.assertNotIn("max_completion_tokens", b)
+
+    def test_api_key_goes_out_as_bearer_only_when_set(self):
+        hv.API_KEY = "sk-test"
+        self.assertEqual(hv._headers()["authorization"], "Bearer sk-test")
+        hv.API_KEY = ""
+        self.assertNotIn("authorization", hv._headers())
+
+    VLLM_TXT = ('vllm:cache_config_info{enable_prefix_caching="True"} 1.0\n'
+                'vllm:prefix_cache_hits_total{engine="0"} 30.0\n'
+                'vllm:prefix_cache_queries_total{engine="0"} 40.0\n')
+    SGLANG_TXT = 'sglang:cache_hit_rate{model_name="m"} 0.75\n'
+    LLAMA_TXT = 'llamacpp:prompt_tokens_total 1234\n'
+
+    def test_cache_parsers_match_each_servers_metric_names(self):
+        """Metric names differ per server; reading vLLM names from another server
+        would silently report zero."""
+        self.assertIn("enabled=True", hv.parse_cache_metrics("vllm", self.VLLM_TXT))
+        self.assertIn("30/40", hv.parse_cache_metrics("vllm", self.VLLM_TXT))
+        self.assertIn("0.750", hv.parse_cache_metrics("sglang", self.SGLANG_TXT))
+        out = hv.parse_cache_metrics("llamacpp", self.LLAMA_TXT)
+        self.assertIn("1234", out)
+        self.assertIn("no prefix-cache hit counter", out)
+
+    def test_cache_parsers_admit_missing_metrics(self):
+        self.assertIn("unknown", hv.parse_cache_metrics("sglang", "nothing\n"))
+        self.assertIn("unknown", hv.parse_cache_metrics("llamacpp", "nothing\n"))
+
+    def test_cache_command_does_not_call_the_network_for_hosted_providers(self):
+        hv.PROVIDER = "openai"
+        hv.BASE_URL = "http://127.0.0.1:9/v1"        # nothing listens; must not be tried
+        self.assertIn("not available", hv.server_cache_status())
 
 
 # ------------------------------------------------- ch 1 stream / retry / limits

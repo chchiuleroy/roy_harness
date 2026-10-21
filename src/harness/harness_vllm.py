@@ -14,7 +14,10 @@ original toy leaves out. Chapter map (what each section implements):
          3 classifier model (grounded, fails toward asking), 4 blast radius
          (write confinement, env scrubbing, backups + /undo, optional sandbox prefix)
 
-Env: VLLM_BASE_URL, VLLM_MODEL, VLLM_API_KEY, HARNESS_DEBUG, HARNESS_MODE
+Env: HARNESS_PROVIDER (vllm|llamacpp|sglang|openai|anthropic-compat), HARNESS_BASE_URL,
+     HARNESS_MODEL, HARNESS_API_KEY (vllm also reads legacy VLLM_BASE_URL/MODEL/API_KEY;
+     openai/anthropic-compat also read OPENAI_API_KEY/ANTHROPIC_API_KEY),
+     HARNESS_DEBUG, HARNESS_MODE
      (safe|normal|auto), HARNESS_COMPACT_TOKENS, HARNESS_KEEP_RECENT, HARNESS_STREAM,
      HARNESS_BACKOFF, HARNESS_EOF_GRACE, HARNESS_SANDBOX (JSON list: command prefix).
 Usage: python harness_vllm.py [session.json]      (slash commands: /help)
@@ -53,9 +56,56 @@ def _load_local_env():
 
 _load_local_env()
 
-BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3.6-35B-A3B")
-API_KEY = os.environ.get("VLLM_API_KEY", "")
+# Provider = which dialect of /chat/completions we speak. `local` servers take
+# vLLM-style `chat_template_kwargs` (vLLM live-tested; llama.cpp and SGLang
+# documented); hosted ones must not get it. `cache` picks the /cache parser.
+# No personal endpoint belongs in this table -- only vendor URLs and localhost.
+PROVIDERS = {
+    "vllm":     {"url": "http://localhost:8000/v1", "model": "Qwen/Qwen3.6-35B-A3B",
+                 "key": (), "local": True, "cache": "vllm"},
+    "llamacpp": {"url": None, "model": None, "key": (), "local": True,
+                 "cache": "llamacpp"},
+    "sglang":   {"url": None, "model": None, "key": (), "local": True,
+                 "cache": "sglang"},
+    "openai":   {"url": "https://api.openai.com/v1", "model": None,
+                 "key": ("OPENAI_API_KEY",), "local": False, "cache": None,
+                 "max_key": "max_completion_tokens"},
+    "anthropic-compat": {"url": "https://api.anthropic.com/v1", "model": None,
+                         "key": ("ANTHROPIC_API_KEY",), "local": False,
+                         "cache": None},
+}
+
+def resolve_config(env):
+    """(provider, base_url, model, api_key) from an env mapping, or ValueError.
+    The legacy VLLM_* names only apply to the vllm provider, so another
+    provider's key can never be sent to a vLLM host by accident."""
+    name = env.get("HARNESS_PROVIDER", "vllm")
+    p = PROVIDERS.get(name)
+    if p is None:
+        raise ValueError(f"HARNESS_PROVIDER={name!r}; choose one of "
+                         f"{'|'.join(PROVIDERS)}")
+    legacy = name == "vllm"
+    def pick(*keys):
+        return next((env[k] for k in keys if env.get(k)), "")
+    url = pick("HARNESS_BASE_URL", *(["VLLM_BASE_URL"] if legacy else [])) or p["url"]
+    model = pick("HARNESS_MODEL", *(["VLLM_MODEL"] if legacy else [])) or p["model"]
+    key = pick("HARNESS_API_KEY", *(["VLLM_API_KEY"] if legacy else []), *p["key"])
+    if not url:
+        raise ValueError(f"{name}: set HARNESS_BASE_URL (e.g. http://host:port/v1)")
+    if not model:
+        raise ValueError(f"{name}: set HARNESS_MODEL")
+    if not p["local"]:
+        if not key:
+            raise ValueError(f"{name}: set {p['key'][0]} (or HARNESS_API_KEY)")
+        host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
+        if url.startswith("http://") and host not in ("localhost", "127.0.0.1"):
+            raise ValueError(f"{name}: refusing to send an API key over plain http")
+    return name, url.rstrip("/"), model, key
+
+try:
+    PROVIDER, BASE_URL, MODEL, API_KEY = resolve_config(os.environ)
+except ValueError as _e:
+    raise SystemExit(f"config error: {_e}")
 MAX_ROUNDS = 50
 MAX_DEPTH = 2                      # ch 7: main=0, child=1, grandchild=2 (no deeper)
 MAX_RESULT_CHARS = 30_000          # ch 6: truncate tool results at the source
@@ -236,9 +286,11 @@ def _retry_after(err):
 
 def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
              temperature=None):
-    body = {"model": MODEL, "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system}] + messages,
-            "chat_template_kwargs": {"enable_thinking": False}}
+    prov = PROVIDERS[PROVIDER]
+    body = {"model": MODEL, prov.get("max_key", "max_tokens"): max_tokens,
+            "messages": [{"role": "system", "content": system}] + messages}
+    if prov["local"]:                    # keep Qwen-style thinking off (tool calls)
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     if tools:
         body["tools"] = to_openai_tools(tools)
     if temperature is not None:
@@ -278,14 +330,17 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
         time.sleep(wait)
     raise LLMError("unreachable")
 
-def server_cache_status():
-    """ch 5/12: what does the SERVER say about prefix caching? (/metrics)"""
-    url = BASE_URL.rsplit("/v1", 1)[0] + "/metrics"
-    try:
-        req = urllib.request.Request(url, headers=_headers())
-        text = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
-    except Exception as e:
-        return f"unknown (no /metrics: {e!r})"
+def parse_cache_metrics(kind, text):
+    """Prometheus text -> one status line. Metric names differ per server."""
+    if kind == "sglang":                 # needs --enable-metrics
+        m = re.search(r"^sglang:cache_hit_rate\{[^}]*\}\s+([0-9.e+-]+)", text, re.M)
+        return (f"sglang cache_hit_rate={float(m.group(1)):.3f}" if m
+                else "unknown (no sglang:cache_hit_rate in /metrics)")
+    if kind == "llamacpp":               # needs --metrics; no hit counter exists
+        m = re.search(r"^llamacpp:prompt_tokens_total\s+([0-9.e+-]+)", text, re.M)
+        return ("llama.cpp /metrics has no prefix-cache hit counter; "
+                f"prompt_tokens_total={float(m.group(1)):.0f}" if m
+                else "unknown (no llamacpp:prompt_tokens_total in /metrics)")
     en = re.search(r'enable_prefix_caching="(\w+)"', text)
     def total(name):
         return sum(float(v) for v in re.findall(
@@ -293,6 +348,19 @@ def server_cache_status():
             text, re.M))
     return (f"prefix caching enabled={en.group(1) if en else '?'}; "
             f"hits/queries={total('hits'):.0f}/{total('queries'):.0f}")
+
+def server_cache_status():
+    """ch 5/12: what does the SERVER say about prefix caching? (/metrics)"""
+    kind = PROVIDERS[PROVIDER]["cache"]
+    if kind is None:
+        return "not available for hosted providers (see the cached= field in the usage line)"
+    url = BASE_URL.rsplit("/v1", 1)[0] + "/metrics"
+    try:
+        req = urllib.request.Request(url, headers=_headers())
+        text = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+    except Exception as e:
+        return f"unknown (no /metrics: {e!r}; llama.cpp needs --metrics, SGLang --enable-metrics)"
+    return parse_cache_metrics(kind, text)
 
 # --------------------------------------------- stdin as an event source (ch 9)
 EVENTS = queue.Queue()             # ("line", text) | ("wake", None) | ("eof", None)
