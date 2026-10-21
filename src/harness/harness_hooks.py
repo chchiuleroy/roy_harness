@@ -198,7 +198,7 @@ def load(path=CONFIG_FILE):
     return HooksConfig(groups)
 
 
-def _looks_like_a_file(arg):
+def looks_like_a_file(arg):
     """`-m policy` names a module and `--fix` is a flag: neither is a file to guard."""
     return (os.path.isfile(arg) or "." in os.path.basename(arg)
             or "/" in arg or chr(92) in arg)
@@ -210,7 +210,7 @@ def _script_args(cfg):
             for h in g.handlers:
                 if h.type == "command":
                     yield from (a for a in (h.command, *h.args)
-                                if a and not a.startswith("-") and _looks_like_a_file(a))
+                                if a and not a.startswith("-") and looks_like_a_file(a))
 
 
 def canonical(path):
@@ -243,12 +243,16 @@ def protected_names(cfg):
     return names
 
 
-def mentions_protected_name(text, cfg):
-    """Whole-name match (not graph.py for h.py) of a protected file name in a shell
-    string. Callers pass text already lower-cased and stripped of ^ and quotes."""
-    names = sorted(protected_names(cfg), key=len, reverse=True)
+def mentions_any(text, names):
+    """Whole-name match (not graph.py for h.py) of any file name in a shell string.
+    Callers pass text already lower-cased and stripped of ^ and quotes."""
+    names = sorted(names, key=len, reverse=True)
     pattern = r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")(?![\w.-])"
     return re.search(pattern, text) is not None
+
+
+def mentions_protected_name(text, cfg):
+    return mentions_any(text, protected_names(cfg))
 
 
 def is_protected(path, cfg):

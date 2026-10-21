@@ -222,7 +222,7 @@ class TestLocalConfig(Base):
         allowed = {"localhost", "127.0.0.1", "api.openai.com", "api.anthropic.com",
                    "github.com", "your-vllm-host", "host", "example.com",
                    "proxy.example.com", "api.example.com", "evil.example", "policy.corp",
-                   "llm.corp",
+                   "llm.corp", "mcp.corp",
                    "private", "h",
                    "choosealicense.com",
                    "creativecommons.org"}
