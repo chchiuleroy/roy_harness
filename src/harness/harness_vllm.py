@@ -35,8 +35,9 @@ import sys
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
+
+import harness_net                 # no-redirect opener + URL policy (same folder)
 
 def _load_local_env():
     """Read KEY=VALUE lines from a git-ignored `.harness.env` (repo root, then
@@ -98,15 +99,10 @@ def resolve_config(env):
     if not p["local"]:
         if not key:
             raise ValueError(f"{name}: set {p['key'][0]} (or HARNESS_API_KEY)")
-        try:                                  # urlsplit: case, userinfo, IPv6 handled
-            parts = urllib.parse.urlsplit(url)
-            host = parts.hostname
-        except ValueError:
-            raise ValueError(f"{name}: unparsable base URL")
-        if parts.scheme not in ("http", "https") or not host:
-            raise ValueError(f"{name}: base URL must be http(s)://host/...")
-        if parts.scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
-            raise ValueError(f"{name}: refusing to send an API key over plain http")
+        try:
+            harness_net.check_url(url, allow_http=env.get("HARNESS_ALLOW_HTTP") == "1")
+        except ValueError as e:
+            raise ValueError(f"{name}: base URL: {e}")
     return name, url.rstrip("/"), model, key
 
 try:
@@ -242,7 +238,7 @@ def _post(body, on_text=None):
         f"{BASE_URL}/chat/completions",
         data=json.dumps(body).encode("utf-8"), headers=_headers())
     t0, ttft = time.time(), None
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with harness_net.open_url(req, 300) as resp:
         if not body.get("stream"):
             reply = json.loads(resp.read())
             reply["_ttft"] = None
@@ -366,7 +362,7 @@ def server_cache_status():
     url = BASE_URL.rsplit("/v1", 1)[0] + "/metrics"
     try:
         req = urllib.request.Request(url, headers=_headers())
-        text = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+        text = harness_net.open_url(req, 20).read().decode("utf-8", "replace")
     except Exception as e:
         return f"unknown (no /metrics: {e!r}; llama.cpp needs --metrics, SGLang --enable-metrics)"
     return parse_cache_metrics(kind, text)

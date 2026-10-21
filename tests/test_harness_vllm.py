@@ -220,7 +220,9 @@ class TestLocalConfig(Base):
         import re
         allowed = {"localhost", "127.0.0.1", "api.openai.com", "api.anthropic.com",
                    "github.com", "your-vllm-host", "host", "example.com",
-                   "proxy.example.com", "evil.example", "private", "h",
+                   "proxy.example.com", "api.example.com", "evil.example", "policy.corp",
+                   "llm.corp",
+                   "private", "h",
                    "choosealicense.com",
                    "creativecommons.org"}
         root = os.path.abspath(os.path.join(HERE, ".."))
@@ -837,6 +839,124 @@ class TestSubagents(Base):
             hv.run_subagent = orig
         self.assertEqual(res, ["R:t0", "R:t1", "R:t2"])
         self.assertLess(elapsed, 2.2, f"ran serially ({elapsed:.1f}s)")
+
+
+# ----------------------------------------------- network hardening (stage 0)
+class _Target(http.server.BaseHTTPRequestHandler):
+    """The 'other host' a redirect points at. Records what reached it."""
+    seen = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        type(self).seen.append((self.command, self.path,
+                                self.headers.get("Authorization")))
+        body = json.dumps(llm_reply("from-target")).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = do_GET
+
+
+class _Redirector(http.server.BaseHTTPRequestHandler):
+    code, target_port = 302, 0
+
+    def log_message(self, *a):
+        pass
+
+    def _go(self):
+        self.rfile.read(int(self.headers.get("content-length", 0) or 0))
+        self.send_response(type(self).code)
+        self.send_header("Location", f"http://127.0.0.1:{type(self).target_port}"
+                                     f"{self.path}")
+        self.end_headers()
+
+    do_GET = do_POST = _go
+
+
+class TestNetHardening(Base):
+    """urllib follows 301/302/303 and keeps the Authorization header, so a
+    redirecting endpoint receives the API key AND supplies the model's answer
+    (measured 2026-10-21 against the real call_llm)."""
+
+    def setUp(self):
+        super().setUp()
+        _Target.seen = []
+        self.tgt = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Target)
+        self.red = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirector)
+        _Redirector.target_port = self.tgt.server_address[1]
+        for s in (self.tgt, self.red):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        self._cfg = (hv.BASE_URL, hv.API_KEY, hv.BACKOFF, hv.PROVIDER)
+        hv.BASE_URL = f"http://127.0.0.1:{self.red.server_address[1]}/v1"
+        hv.API_KEY, hv.BACKOFF = "sk-PROBE-SECRET", 0.01
+
+    def tearDown(self):
+        hv.BASE_URL, hv.API_KEY, hv.BACKOFF, hv.PROVIDER = self._cfg
+        for s in (self.tgt, self.red):
+            s.shutdown()
+        super().tearDown()
+
+    def test_call_llm_refuses_redirects_and_leaks_nothing(self):
+        for code in (301, 302, 303, 307, 308):
+            _Redirector.code = code
+            _Target.seen.clear()
+            with self.assertRaises(hv.LLMError, msg=str(code)):
+                hv.call_llm([{"role": "user", "content": "hi"}], None, "sys")
+            self.assertEqual(_Target.seen, [], f"{code}: target was contacted")
+
+    def test_cache_status_does_not_follow_redirects(self):
+        hv.PROVIDER = "vllm"
+        for code in (301, 302, 303):
+            _Redirector.code = code
+            _Target.seen.clear()
+            out = hv.server_cache_status()
+            self.assertIn("unknown", out, code)
+            self.assertEqual(_Target.seen, [], f"{code}: target was contacted")
+
+    def test_check_url_policy(self):
+        """https always; plain http only for loopback or an explicit opt-in."""
+        import harness_net as hn
+        for ok in ("https://api.example.com/v1", "HTTPS://api.example.com/v1",
+                   "http://localhost:4000/v1", "http://127.0.0.1:1/v1",
+                   "http://[::1]:1/v1", "http://LOCALHOST:1/v1"):
+            hn.check_url(ok)
+        for bad in ("http://policy.corp/hook", "HTTP://policy.corp/hook",
+                    "http://localhost:1@policy.corp/hook", "ftp://x/y",
+                    "policy.corp/hook", "http:///nohost", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                hn.check_url(bad)
+        hn.check_url("http://policy.corp/hook", allow_http=True)    # opt-in
+        with self.assertRaises(ValueError):                         # opt-in never
+            hn.check_url("ftp://policy.corp/hook", allow_http=True) # widens scheme
+
+    def test_open_url_raises_on_redirect(self):
+        import harness_net as hn
+        import urllib.request
+        _Redirector.code = 302
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.red.server_address[1]}/x",
+            headers={"Authorization": "Bearer x"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            hn.open_url(req, timeout=5)
+        self.assertEqual(cm.exception.code, 302)
+        self.assertEqual(_Target.seen, [])
+
+    def test_allow_http_opens_an_internal_http_gateway_for_hosted_providers(self):
+        """A corporate gateway speaking plain http must be reachable, but only
+        by an explicit switch; the default stays closed."""
+        base = dict(HARNESS_PROVIDER="openai", HARNESS_MODEL="m",
+                    HARNESS_API_KEY="k", HARNESS_BASE_URL="http://llm.corp/v1")
+        with self.assertRaises(ValueError):
+            hv.resolve_config(base)
+        with self.assertRaises(ValueError):
+            hv.resolve_config({**base, "HARNESS_ALLOW_HTTP": "0"})
+        self.assertEqual(
+            hv.resolve_config({**base, "HARNESS_ALLOW_HTTP": "1"})[1],
+            "http://llm.corp/v1")
 
 
 # ------------------------------------------------------------------ live tests
