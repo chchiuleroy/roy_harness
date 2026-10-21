@@ -251,9 +251,15 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
         with open(f"debug/req_{time.time_ns()}.json", "w",
                   encoding="utf-8") as f:
             json.dump(body, f, indent=2, ensure_ascii=False)
+    emitted = [False]                    # did a failed attempt already print text?
+    shown = None
+    if on_text:
+        def shown(t):
+            emitted[0] = True
+            on_text(t)
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return _post(body, on_text)
+            return _post(body, shown)
         except urllib.error.HTTPError as e:                 # before URLError
             detail = e.read()[:300].decode("utf-8", "replace")
             if e.code not in RETRY_STATUS or attempt == MAX_RETRIES:
@@ -266,7 +272,9 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
             why, wait = repr(e)[:80], None
         if wait is None:
             wait = min(30.0, BACKOFF * 2 ** (attempt - 1)) * (0.5 + random.random())
-        print(f"\n  [retry {attempt}/{MAX_RETRIES - 1}] {why}; waiting {wait:.1f}s")
+        void = " -- the partial text above is void" if emitted[0] else ""
+        emitted[0] = False
+        print(f"\n  [retry {attempt}/{MAX_RETRIES - 1}] {why}; waiting {wait:.1f}s{void}")
         time.sleep(wait)
     raise LLMError("unreachable")
 
@@ -494,7 +502,12 @@ def undo_last():
     return f"removed newly created {path}"
 
 # ------------------------------------------- ch 13 layers 1-3: the gate
-PROTECTED = (".env", ".ssh", "id_rsa", ".aws/credentials")
+# Lower-case; matching is case-insensitive (Windows paths are). The harness's
+# own state files are here too: a model that can write the permissions file
+# could pre-grant dangerous commands for the next start.
+PROTECTED = (".env", ".ssh", "id_rsa", ".aws/credentials",
+             ".harness_permissions", ".harness_backup")
+STATE_FILES = (".harness_permissions", ".harness_backup", ".harness.env")
 READ_STATE = {}                    # path -> time when the model last read it
 RISKY = ("rm ", "del ", "rmdir", "sudo", "--force", "push", "curl", "wget",
          "> /", "format ")
@@ -571,7 +584,7 @@ def classify(cmd):
 # guarantees System32 comes first on PATH, so `find` is safe to list there.
 READ_ONLY_FIRST = ("dir", "type", "findstr", "where", "echo") + (
     ("find",) if sys.platform == "win32" else ())
-SHELL_META = re.compile(r"[&|<>^`()%]")
+SHELL_META = re.compile(r"[&|<>^`()%\r\n]")      # CR/LF chain commands in sh
 
 def read_only(cmd):
     """An ALLOW-list (safe direction): a plain read-only program with no shell
@@ -588,7 +601,7 @@ def gate(name, args):
     """Reflexes + modes + grants + classifier + human. Returns error str or None."""
     path = args.get("path", "")
     if name in ("write_file", "edit_file"):
-        if any(p in path.replace("\\", "/") for p in PROTECTED):
+        if any(p in path.replace("\\", "/").lower() for p in PROTECTED):
             return f"BLOCKED: {path} is a protected path."
         if not inside_root(path):                       # layer 4: confinement
             return f"BLOCKED: writes are confined to the project root {root()}."
@@ -603,6 +616,9 @@ def gate(name, args):
             return "DENIED by user. Ask them how to proceed, or adapt."
     if name in ("run_command", "monitor"):
         cmd = args.get("command", "")
+        if any(s in cmd.lower() for s in STATE_FILES):  # best effort: a shell can
+            return ("BLOCKED: harness state files (permissions, backups, "   # still
+                    "local env) are off limits to commands.")                # obfuscate
         if cmd.strip().lower().startswith(("sleep", "start-sleep", "timeout")):
             return ("BLOCKED: don't wait in the foreground. Use "
                     "background='true', schedule_wakeup or monitor.")
@@ -730,7 +746,7 @@ def compact(messages, keep=None):
     """Replace old messages with a summary; keep the last `keep` verbatim.
     The cut never separates an assistant tool_calls message from its tool
     results. Fails safe: on any problem the array is left untouched."""
-    keep = KEEP_RECENT if keep is None else keep
+    keep = max(1, KEEP_RECENT if keep is None else keep)    # 0 or less would index past the end
     cut = len(messages) - keep
     while cut > 0 and messages[cut]["role"] == "tool":
         cut -= 1
@@ -751,7 +767,7 @@ def compact(messages, keep=None):
         reply = call_llm([{"role": "user", "content": transcript}], None,
                          SUMMARY_SYSTEM, max_tokens=2048, temperature=0)
         summary = (reply["choices"][0]["message"].get("content") or "").strip()
-    except LLMError:
+    except Exception:                    # incl. a well-formed reply with the wrong shape
         return False
     if not summary:
         return False

@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容的 vLLM 伺服器**，並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 960 行，只用標準函式庫，零依賴）
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（55 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（61 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -37,7 +37,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | 4 | Agent loop | 依 `finish_reason` 分流，最多 50 輪；工具錯誤原樣回給模型 |
 | 6 | 截斷、`AGENT.md` 記憶、**壓縮** | 單筆工具結果上限 30,000 字元並標示截掉多少；輸入超過 `HARNESS_COMPACT_TOKENS`（預設 96,000）就把舊訊息換成摘要、保留最近 8 則；舊摘要**原文保留**不重摘要 |
 | 7 | **子 agent 巢狀（深度 2）與並行** | 同一回覆的多個 `agent` 呼叫並行；子 agent 沒有 `todo_write`／`schedule_wakeup`／`monitor`（避免干擾主迴圈） |
-| 8 | 引導佇列 | 事件變成 `<system-reminder>` 附在下一則訊息尾端 |
+| 8 | 引導佇列 | 事件變成 `<system-reminder>` 區塊：附在下一則使用者訊息的**開頭**（使用者文字之前）；工具迴圈中則接在工具結果之後、獨立成一則 user 訊息；喚醒事件沒有使用者文字，自己成為一則 user 訊息 |
 | 9 | 背景任務、`task_stop`、`schedule_wakeup`、`monitor` | 事件（任務結束、鬧鐘、監控條件成立）會**自己啟動新回合**，不需使用者輸入；`/tasks`、`/stop` 讓人看得到也殺得掉 |
 | 12 | 除錯 | `HARNESS_DEBUG=1` 把每次完整請求存到 `debug/`；每輪印 token 用量；`/cache` 查伺服器快取狀態 |
 | 13 | 安全分層 | 見下 |
@@ -86,13 +86,19 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-55 項 = 離線 41 項（假伺服器、時間、並行、分類器邏輯等）＋ live 14 項。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+61 項 = 離線 47 項（假伺服器、時間、並行、分類器邏輯等）＋ live 14 項。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
 - 讓模型重摘要自己的摘要會丟掉最早的事實（live 5 次有 2 次丟）；改成舊摘要原文保留。
 - `auto` 模式只把命中 RISKY 字串清單的指令送分類器，`powershell -c "iwr ... | iex"` 會直接放行；改成除只讀白名單外全部送分類器。
 - 分類器曾 3/3 誤判無害的 `find /v /c "" a.txt`；加進只讀白名單。
+
+**第三方審查（2026-10-21，Codex 唯讀靜態審查）**：回報 9 項缺陷與 1 項待驗證，逐條對原碼核對後處理如下。
+- 已修並補回歸測試（先寫失敗測試再修）：多行指令的換行未視為 shell 串接符號，會讓 `auto` 模式的只讀白名單被繞過（在 Windows cmd 上實測第二行**不會**被執行，因為 cmd 在換行處截斷，但邏輯缺口成立，sh 下會被利用）；權限檔 `.harness_permissions.json` 與備份目錄可被模型寫入（也就能預先授權危險指令）；受保護路徑比對區分大小寫（`.ENV` 可繞過）；壓縮在收到格式異常的回應時會拋例外；`HARNESS_KEEP_RECENT` 為 0 或負數會索引越界；串流重試時失敗嘗試已印出的文字沒有標示作廢；README 對 reminder 位置的描述與程式相反。
+- 未修，已列入限制：分類器的「引用驗證」只確認引文是請求的子字串，不理解否定或條件語境。
+- `live` 測試空過問題：見上，改為 skipped。
+- 待驗證項「串流 tool_call 缺 `index`」：在作者的伺服器上 3 次、每次 3 個並行呼叫、12 個片段，全部都有 `index`，未重現，未改程式；其他伺服器未驗證。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
@@ -103,6 +109,8 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 ## 已知限制（沒做或沒驗證）
 
 - **沒有 OS 級 sandbox**：本機沒有 Docker、WSL 也未安裝。`HARNESS_SANDBOX` 介面存在但**未實測**。寫入限制與環境清理是行程內的強制，不等於 OS 隔離；shell 指令仍可讀寫專案外的檔案（只有 `write_file`／`edit_file` 受根目錄限制）。
+- 分類器放行時要求引用使用者原話，但驗證只確認引文**是請求的子字串**；若請求寫「不要刪除 x」而分類器引用「刪除 x」，程式端擋不住，要靠分類器自己理解語意。
+- 保護 `.harness_permissions.json` 等狀態檔，對檔案工具是確定性的，對 shell 指令只是字串比對（盡力而為，可被刻意混淆）；這是 shell 可寫專案外檔案這個既有限制的延伸。
 - 良性任務的 `auto` 模式誤判率只量測過一種任務、3 次，其他任務未知。
 - 兩層巢狀子 agent 只有單元測試，沒有 live 示範；並行子 agent 有 live 觀察（3 個交錯執行）但不是自動化測試。
 - 攻擊清單只有 5 種，不是完整紅隊測試。
