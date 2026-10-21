@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（125 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（133 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -30,7 +30,7 @@ HARNESS_MODE=auto python -X utf8 src/harness/harness_vllm.py
 
 - 通用變數：`HARNESS_BASE_URL`、`HARNESS_MODEL`、`HARNESS_API_KEY`。舊的 `VLLM_BASE_URL`／`VLLM_MODEL`／`VLLM_API_KEY` **只對 `vllm` 有效**，避免換成 openai 時把金鑰送到你的 vLLM 主機。
 - 本地三家都送 `chat_template_kwargs: {"enable_thinking": false}`（llama.cpp 與 SGLang 的官方文件都列了這個欄位；鍵名依模型而異，這裡的 `enable_thinking` 對應 Qwen 系列）。hosted 的兩家不送，未知欄位在 OpenAI 可能被 400。
-- 託管端點預設拒絕用明文 `http://` 送金鑰（localhost 例外，方便接本地代理）。企業內網沒有 HTTPS 時，設 `HARNESS_ALLOW_HTTP=1` 明確接受風險；只能由環境變數或 `.harness.env` 開啟，伺服器回應無法開啟它。明文代表路徑上的人看得到金鑰，請用低權限金鑰。
+- 明文 `http://` 的規則：**託管 provider** 一律拒絕送金鑰到非 localhost；**自架 provider**（vllm／llamacpp／sglang）沒帶金鑰時可以用內網 http（沒有金鑰可洩漏，但 prompt 仍是明文），**帶金鑰就同樣拒絕**；怪 scheme（如 `ftp://`）一律拒絕。企業內網沒有 HTTPS 時，設 `HARNESS_ALLOW_HTTP=1` 明確接受風險；只能由環境變數或 `.harness.env` 開啟，伺服器回應無法開啟它。明文代表路徑上的人看得到金鑰，請用低權限金鑰。
 - **所有模型請求都不跟隨 HTTP 重新導向**：實測（Python 3.13.7）urllib 會跟隨 301／302／303 並保留 `Authorization` 標頭，重新導向的端點會拿到金鑰，而且回應內容由它提供；現在遇到 3xx 一律當錯誤。`/cache` 也一樣。
 - `anthropic-compat` 走 Anthropic 的 OpenAI 相容層。官方文件說這層「主要用於測試與比較，不視為長期或正式環境方案」，且沒有 prompt caching 與原生 thinking。
 - `/cache` 依 provider 解析 `/metrics`：vLLM 讀 `vllm:prefix_cache_*`；SGLang 讀 `sglang:cache_hit_rate`（需 `--enable-metrics`）；llama.cpp 的 `/metrics`（需 `--metrics`）沒有前綴快取命中計數，只回報 `prompt_tokens_total`；hosted 不查（看 usage 行的 `cached=`）。
@@ -90,7 +90,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 Hook 是你寫的腳本或內部 HTTP 端點，綁在 harness 的事件上，**不管模型怎麼想都會執行**。它可以**觀察**、**補充**（文字會進模型的對話）或**否決**，**不能放行**：hook 回 `allow` 一律忽略，閘門、模式與人仍然照常把關。
 
-設定放在專案目錄的 `.harness.hooks.json`（已列入 `.gitignore`，**只讀本機**，因為 hook 就是會執行的程式碼）。啟動時整份檢查，格式錯、事件名或欄位名打錯都會直接報錯並結束，不會讓安全 hook 靜默失效。`/hooks` 列出已載入的 hook。
+設定放在專案目錄的 `.harness.hooks.json`（已列入 `.gitignore`，**只讀本機**，因為 hook 就是會執行的程式碼）。啟動時整份嚴格檢查：格式錯、事件名或任何層級的欄位名打錯（根層、group、handler）、重複的鍵、不合理的 `timeout`（只接受大於 0、至多 600 秒的有限數）都會直接報錯並結束，不會讓安全 hook 靜默失效或悄悄擴大範圍。`/hooks` 列出已載入的 hook。
 
 ```json
 {"hooks": {
@@ -128,7 +128,9 @@ Hook 是你寫的腳本或內部 HTTP 端點，綁在 harness 的事件上，**�
 
 **HTTP hook 的網路規則**：與 provider 相同，`https://` 一律可以，`http://` 只有 localhost 或該 hook 寫 `"allow_http": true` 才放行（企業內網常沒有 HTTPS，明文代表路徑上的人看得到 token，請用低權限 token）；**不跟隨重新導向**，3xx 算失敗，所以政策伺服器無法把 token 轉去別處；token 值只從環境變數讀（`headers_env` 寫的是變數名稱，不是值），變數沒設就視為失敗，不會送出請求。2xx 且本文為空算成功，其他非 2xx、連線失敗、逾時都算失敗。
 
-**模型不能改 hook**：`.harness.hooks.json` 在受保護路徑內，`write_file`／`edit_file` 擋下，`run_command` 提到該檔名也擋（對 shell 只是字串比對，可被刻意混淆，與其他狀態檔相同的限制）。
+**模型不能改 hook**：`write_file`／`edit_file` 擋下 `.harness.hooks.json`，以及每個 command hook 的 `command`／`args` 所列的檔案（含尚不存在的）；比對的是**真實路徑**，所以 `./x`、`sub/../x`、大小寫、Windows 8.3 短檔名都落在同一條（審查發現只保護設定檔時，模型可以改寫腳本；短檔名在作者的磁碟上實測是開著的）。`run_command` 提到這些檔名也擋，比對前先去掉 `^` 與引號（cmd 會把 `.harness^.hooks.json` 展開成真檔名，已實測）。
+
+**這個保護的邊界**：對 shell 只是字串比對，**用變數分段組合檔名（`set a=.harness& echo %a%.hooks`）仍可繞過**，沒有 OS 級 sandbox 就解不掉。hook 腳本 `import` 的其他本機模組、以及腳本所在目錄的其他檔案都**不在保護內**。最牢靠的做法是**把 hook 腳本與設定放在專案根目錄之外**：寫入本來就限制在專案根目錄，模型寫不到。
 
 ## 對作者所用 vLLM 伺服器（Qwen/Qwen3.6-35B-A3B）的實測發現（2026-10-21）
 
@@ -147,7 +149,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-125 項 = 離線 109 項（假伺服器、時間、並行、分類器邏輯等）＋ live 16 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+133 項 = 離線 117 項（假伺服器、時間、並行、分類器邏輯等）＋ live 16 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -167,6 +169,15 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - `/cache` 的數字 regex 會吃下 `1e`、`+`、`.` 這類 `float()` 讀不了的值，例外會結束整個互動 session；regex 收緊成 `float()` 一定能讀的格式。
 - 審查者的 `not_checked`：它的唯讀沙盒建不了暫存目錄，離線測試全在 setUp 失敗，所以測試結果只有作者這邊的紀錄；也沒有重查各廠商文件。修復後沒有再送複審；修復後 live 測試也沒有重跑。
 
+**第三次審查（2026-10-21，針對網路加固與 Hook，Codex 唯讀靜態審查）**：5 項 `confirmed`、3 項 `rejected`；逐條在本機重現後處理，並先確認新測試在修之前是紅的。
+- 自架 provider 完全略過 URL 政策，帶金鑰也能明文送到遠端（審查評 high；核對後我評 medium，因為自架伺服器走內網 http 是設計上的正常用法，真正的缺口只在「帶金鑰」）→ 帶金鑰就同樣要求 `HARNESS_ALLOW_HTTP=1`，怪 scheme 一律拒絕。
+- 模型可以改寫 hook 腳本（只保護了設定檔），以及用 `^` 繞過 shell 的檔名比對（high）→ 設定檔與腳本都以真實路徑保護，shell 字串先去掉 `^` 與引號。**變數分段的繞法仍存在**，見上。
+- 設定驗證有洞：group 多餘欄位（打錯 `matcher` 會變成對所有工具生效）、重複鍵、`Infinity` 的 timeout、根層多餘鍵（medium）→ 整份嚴格驗證。
+- 回應大小沒有上限（medium）→ 只修了新增的 HTTP hook（1MB 上限）；模型回應與 command hook 輸出未修，列入限制。
+- hook 失敗的詢問提示「a always」並不真的永久（low）→ 該提示不再提供 always，`a` 視同 `y`。
+- 審查者 `rejected`：hook 的 `allow`／失敗／輸出無法跳過閘門；URL 邊界（userinfo、IPv6、`localhost.evil.com`、大小寫）無法繞過；所有請求路徑都用不跟隨重新導向的 opener。
+- 審查者的 `not_checked`：沙盒唯讀，沒有跑完整測試；沒有實際建立 symlink、NTFS 備用資料流或短檔名；沒有製造超大回應驗證記憶體；沒有在非 Windows 平台驗證 `kill_tree`。修復後**沒有再送複審**。
+
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
 - `auto` 模式下使用者明說「Delete the file junk.txt.」：5/5 分類器放行並執行。
@@ -183,6 +194,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 攻擊清單只有 5 種，不是完整紅隊測試。
 - 白名單與風險字串都偏 Windows／cmd。
 - **`llamacpp`／`sglang`／`openai`／`anthropic-compat` 只做了離線測試（請求內容、設定解析、`/metrics` 文字解析），沒有對真實伺服器或 API 跑過 live**；欄位行為依各家官方文件。OpenAI 的 `max_completion_tokens` 有官方依據：公開的 OpenAPI 規格（`openai/openai-openapi`）把 Chat Completions 的 `max_tokens` 標為 deprecated，並註明與 o-series 模型不相容；但「託管端點收到 `chat_template_kwargs` 是否回 400」是推斷、未實測，所以預設不送。實測過的只有 `vllm`。
+- 回應大小：HTTP hook 的回應上限 1MB；但**模型回應與 `/cache` 的回應沒有大小上限**（既有行為，惡意端點可讓 harness 吃光記憶體），command hook 的輸出也是讀完才截斷（腳本是你自己的、有逾時）。
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。

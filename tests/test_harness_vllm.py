@@ -477,7 +477,7 @@ class TestProviders(Base):
     def test_legacy_vllm_names_still_work_for_vllm(self):
         """Existing .harness.env files use VLLM_*; they must keep working."""
         _, url, model, key = self.cfg(VLLM_BASE_URL="http://h:1/v1/", VLLM_MODEL="m",
-                                      VLLM_API_KEY="k")
+                                      VLLM_API_KEY="k", HARNESS_ALLOW_HTTP="1")
         self.assertEqual((url, model, key), ("http://h:1/v1", "m", "k"))
 
     def test_legacy_vllm_endpoint_is_ignored_by_other_providers(self):
@@ -531,6 +531,26 @@ class TestProviders(Base):
                    "http://127.0.0.1:4000/v1", "http://[::1]:4000/v1"):
             self.cfg(HARNESS_PROVIDER="openai", HARNESS_API_KEY="k",
                      HARNESS_MODEL="m", HARNESS_BASE_URL=ok)
+
+    def test_self_hosted_providers_refuse_a_key_over_remote_plain_http(self):
+        """Found by the 小o review: the URL policy skipped self-hosted providers, so
+        a key (and every prompt) could go to a remote host in the clear. Without a
+        key there is nothing to leak, so plain http to an internal server stays easy."""
+        for prov in ("vllm", "llamacpp", "sglang"):
+            base = dict(HARNESS_PROVIDER=prov, HARNESS_MODEL="m",
+                        HARNESS_BASE_URL="http://llm.corp:8000/v1")
+            self.cfg(**base)                                       # no key: fine
+            with self.assertRaises(ValueError, msg=prov):
+                self.cfg(**base, HARNESS_API_KEY="k")
+            self.cfg(**base, HARNESS_API_KEY="k", HARNESS_ALLOW_HTTP="1")
+            self.cfg(**{**base, "HARNESS_BASE_URL": "https://llm.corp/v1"},
+                     HARNESS_API_KEY="k")
+            self.cfg(**{**base, "HARNESS_BASE_URL": "http://localhost:8000/v1"},
+                     HARNESS_API_KEY="k")
+            with self.assertRaises(ValueError, msg=prov):          # odd scheme
+                self.cfg(**{**base, "HARNESS_BASE_URL": "ftp://llm.corp/v1"})
+        with self.assertRaises(ValueError):                        # legacy key name too
+            self.cfg(VLLM_BASE_URL="http://llm.corp:8000/v1", VLLM_API_KEY="k")
 
     def test_unknown_provider_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -1059,6 +1079,28 @@ class TestHooksConfig(HookBase):
             with self.assertRaises(self.hh.HooksConfigError, msg=label):
                 self.hh.load(".harness.hooks.json")
 
+    def test_the_whole_file_is_validated_strictly(self):
+        """Found by the 小o review: extra keys, duplicate keys and absurd timeouts
+        silently weakened a safety hook (a mistyped `matcher` even widened it to
+        every tool)."""
+        h = '{"type": "command", "command": "python"}'
+        ok_group = '{"hooks": [%s]}' % h
+        cases = {
+            "extra root key": '{"hooks": {"PreToolUse": [%s]}, "hookz": {}}' % ok_group,
+            "unknown group key": '{"hooks": {"PreToolUse": [{"matcherz": "x", "hooks": [%s]}]}}' % h,
+            "duplicate root key": '{"hooks": {"PreToolUse": [%s]}, "hooks": {}}' % ok_group,
+            "duplicate event key": '{"hooks": {"PreToolUse": [%s], "PreToolUse": []}}' % ok_group,
+            "duplicate handler key": '{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "a", "command": "b"}]}]}}',
+        }
+        for t in ("Infinity", "NaN", "0", "-1", "601"):
+            cases[f"timeout {t}"] = ('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", '
+                                     '"command": "python", "timeout": %s}]}]}}' % t)
+        for label, text in cases.items():
+            with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+                f.write(text)
+            with self.assertRaises(self.hh.HooksConfigError, msg=label):
+                self.hh.load(".harness.hooks.json")
+
     def test_http_hook_to_an_internal_host_needs_the_explicit_switch(self):
         cfg = self.write_cfg("PreToolUse", [
             {"type": "http", "url": "http://policy.corp/hook", "allow_http": True}])
@@ -1296,6 +1338,63 @@ class TestHooksInHarness(HookBase):
             self.assertIn("BLOCKED", hv.execute_tool(tool, args), (tool, args))
         self.assertFalse(os.path.exists(".harness.hooks.json"))
 
+    def test_the_model_cannot_overwrite_the_scripts_a_hook_runs(self):
+        """Found by the 小o review: protecting only the config file left the
+        scripts it names editable, so the model could rewrite its own watchdog and
+        have it run at the next event."""
+        self.install("PreToolUse", OK_TEXT, "no_such_tool")      # script is h.py
+        os.makedirs("sub", exist_ok=True)
+        for path in ("h.py", "./h.py", "sub/../h.py", "H.PY"):
+            for tool, args in (("write_file", {"path": path, "content": "x"}),
+                               ("edit_file", {"path": path, "old_text": "a",
+                                              "new_text": "b"})):
+                out = hv.execute_tool(tool, args)
+                self.assertIn("protected", out.lower(), (tool, path, out))
+        with open("h.py", encoding="utf-8") as f:
+            self.assertIn("note-from-hook", f.read())
+
+    def test_a_script_that_does_not_exist_yet_is_protected_too(self):
+        """Otherwise the model could create the file the config already points at."""
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": sys.executable,
+                 "args": ["later.py"]}]}]}}, f)
+        hv.HOOKS = self.hh.load(".harness.hooks.json")
+        # ask the gate directly: running this config would just fail (python exits 2
+        # when its script is missing), which is a different reason to refuse
+        out = hv.gate("write_file", {"path": "later.py", "content": "x"})
+        self.assertIn("protected", (out or "").lower())
+
+    @unittest.skipUnless(sys.platform == "win32", "8.3 short names are a Windows thing")
+    def test_a_windows_short_name_does_not_get_past_the_protection(self):
+        import ctypes
+        self.install("PreToolUse", OK_TEXT)
+        buf = ctypes.create_unicode_buffer(260)
+        ctypes.windll.kernel32.GetShortPathNameW(os.path.abspath(".harness.hooks.json"),
+                                                 buf, 260)
+        if not buf.value or buf.value.lower().endswith(".harness.hooks.json"):
+            self.skipTest("8.3 short names are disabled on this volume")
+        out = hv.execute_tool("write_file", {"path": buf.value, "content": "{}"})
+        self.assertIn("protected", out.lower(), buf.value)
+
+    def test_caret_and_quote_obfuscation_of_protected_names_is_caught(self):
+        """cmd expands `.harness^.hooks.json` to the real name (measured), so a plain
+        substring test missed it. Variable splitting still can; see the README."""
+        self.install("PreToolUse", OK_TEXT, "no_such_tool")
+        for cmd in ("echo x > .harness^.hooks.json", 'echo x > .harn"ess.hooks.json',
+                    "echo x > h.py", "echo x > H^.PY"):
+            self.assertIn("BLOCKED", hv.execute_tool("run_command", {"command": cmd}), cmd)
+
+    def test_the_hook_failure_question_does_not_promise_always(self):
+        """`a` means always for command grants; for a hook failure it cannot, so it is
+        not offered and counts as a plain yes (found by the 小o review)."""
+        self.install("PreToolUse", CRASH, "write_file")
+        self.answer = "a"
+        self.assertIn("wrote", self.write("a1.txt"))
+        self.assertIn("wrote", self.write("a2.txt"))
+        self.assertEqual(len(self.asked), 2)                 # asked again, no memory
+        self.assertNotIn("always", self.asked[0].lower())
+
     def test_user_prompt_hook_can_reject_a_prompt_and_add_context(self):
         import contextlib, io
         self.install("UserPromptSubmit", EXIT2)
@@ -1347,6 +1446,8 @@ class _HookServer(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if kind == "json":
             self.wfile.write(json.dumps(arg).encode())
+        elif kind == "big":
+            self.wfile.write(b" " * 2_000_000 + b"{}")
 
 
 class TestHttpHooks(HookBase):
@@ -1377,6 +1478,13 @@ class TestHttpHooks(HookBase):
         res = self.run_pre(self.http())
         self.assertTrue(res.blocked)
         self.assertIn("policy says no", res.reason)
+
+    def test_an_oversized_response_is_a_failure_not_a_memory_problem(self):
+        """A hook endpoint must not be able to make the harness buffer gigabytes."""
+        _HookServer.script = [("big", None)]
+        res = self.run_pre(self.http())
+        self.assertEqual(len(res.failures), 1)
+        self.assertIn("large", res.failures[0])
 
     def test_empty_2xx_is_success(self):
         _HookServer.script = [("empty", None)]

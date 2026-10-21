@@ -97,13 +97,16 @@ def resolve_config(env):
         raise ValueError(f"{name}: set HARNESS_BASE_URL (e.g. http://host:port/v1)")
     if not model:
         raise ValueError(f"{name}: set HARNESS_MODEL")
-    if not p["local"]:
-        if not key:
-            raise ValueError(f"{name}: set {p['key'][0]} (or HARNESS_API_KEY)")
-        try:
-            harness_net.check_url(url, allow_http=env.get("HARNESS_ALLOW_HTTP") == "1")
-        except ValueError as e:
-            raise ValueError(f"{name}: base URL: {e}")
+    if not p["local"] and not key:
+        raise ValueError(f"{name}: set {p['key'][0]} (or HARNESS_API_KEY)")
+    # Plain http is normal for a self-hosted server on an internal network, but a
+    # key must never cross the network in the clear without an explicit switch.
+    strict = (not p["local"]) or bool(key)
+    try:
+        harness_net.check_url(
+            url, allow_http=env.get("HARNESS_ALLOW_HTTP") == "1" or not strict)
+    except ValueError as e:
+        raise ValueError(f"{name}: base URL: {e}")
     return name, url.rstrip("/"), model, key
 
 try:
@@ -668,8 +671,11 @@ def read_only(cmd):
     return bool(words) and words[0].lower() in READ_ONLY_FIRST \
         and not SHELL_META.search(cmd)
 
-def ask_human(what):
-    ans = read_line(f"\n  [approve?] {what}\n  (y once / a always / N) > ").strip().lower()
+def ask_human(what, always=True):
+    options = "y once / a always / N" if always else "y once / N"
+    ans = read_line(f"\n  [approve?] {what}\n  ({options}) > ").strip().lower()
+    if ans == "a" and not always:                       # nothing to remember here
+        ans = "y"
     return ans if ans in ("y", "a") else "n"            # EOF or junk => deny
 
 def gate(name, args):
@@ -678,6 +684,8 @@ def gate(name, args):
     if name in ("write_file", "edit_file"):
         if any(p in path.replace("\\", "/").lower() for p in PROTECTED):
             return f"BLOCKED: {path} is a protected path."
+        if harness_hooks.is_protected(path, HOOKS):     # hooks config + the scripts it runs
+            return f"BLOCKED: {path} is a protected path (a hook's config or script)."
         if not inside_root(path):                       # layer 4: confinement
             return f"BLOCKED: writes are confined to the project root {root()}."
         if name == "edit_file":
@@ -691,7 +699,9 @@ def gate(name, args):
             return "DENIED by user. Ask them how to proceed, or adapt."
     if name in ("run_command", "monitor"):
         cmd = args.get("command", "")
-        if any(s in cmd.lower() for s in STATE_FILES):  # best effort: a shell can
+        low = cmd.lower().replace("^", "").replace('"', "")     # cmd drops ^ and quotes
+        if (any(s in low for s in STATE_FILES)          # best effort: a shell can
+                or any(n in low for n in harness_hooks.protected_names(HOOKS))):
             return ("BLOCKED: harness state files (permissions, backups, "   # still
                     "local env) are off limits to commands.")                # obfuscate
         if cmd.strip().lower().startswith(("sleep", "start-sleep", "timeout")):
@@ -746,7 +756,8 @@ def _fire(event, depth=0, **fields):
 def _hook_failed_and_user_declined(res, what):
     """A failed PRE hook is not a verdict: ask, like the classifier does."""
     return bool(res.failures) and ask_human(
-        f"hook failed ({'; '.join(res.failures)}); {what} anyway?") == "n"
+        f"hook failed ({'; '.join(res.failures)}); {what} anyway?",
+        always=False) == "n"
 
 def submit_filter(line):
     """UserPromptSubmit hooks: True = send the prompt on. Context becomes a reminder."""

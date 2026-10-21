@@ -17,6 +17,7 @@ Differences from Claude Code, on purpose:
 """
 import dataclasses
 import json
+import math
 import os
 import re
 import subprocess
@@ -29,6 +30,8 @@ TOOL_EVENTS = ("PreToolUse", "PostToolUse")        # `matcher` applies to the to
 PRE_EVENTS = ("PreToolUse", "UserPromptSubmit")    # these can veto, and ask on failure
 OUTPUT_CAP = 10_000                                # chars per hook output
 DEFAULT_TIMEOUT = 30.0
+MAX_TIMEOUT = 600.0                                # seconds; also rejects inf/nan
+CONFIG_FILE = ".harness.hooks.json"
 ON_FAILURE = ("ask", "block", "continue")
 SCRUB = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)   # same rule as clean_env
 # Claude Code fields we accept in a pasted config but do not implement.
@@ -112,8 +115,9 @@ def _parse_handler(event, raw, where):
     if on_failure not in ON_FAILURE:
         _fail(f"{where}: onFailure must be one of {ON_FAILURE}, got {on_failure!r}")
     timeout = raw.get("timeout", DEFAULT_TIMEOUT)
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-        _fail(f"{where}: timeout must be a positive number of seconds")
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or not 0 < timeout <= MAX_TIMEOUT):
+        _fail(f"{where}: timeout must be a number of seconds, over 0 and at most {MAX_TIMEOUT:g}")
     if kind == "command":
         command, args = raw.get("command"), raw.get("args", [])
         if not isinstance(command, str) or not command.strip():
@@ -145,19 +149,30 @@ def _parse_handler(event, raw, where):
                    headers_env=dict(headers_env), allow_http=allow_http)
 
 
-def load(path=".harness.hooks.json"):
+def _no_duplicate_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")   # last-one-wins would hide a hook
+        out[key] = value
+    return out
+
+
+def load(path=CONFIG_FILE):
     """Parse the hooks file. Missing file = no hooks; a malformed one raises, so a
     typo can never silently turn a safety hook off."""
     if not os.path.exists(path):
         return EMPTY
     try:
         with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
+            raw = json.load(f, object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError) as e:
         _fail(f"{path}: cannot read as JSON: {e}")
     hooks = raw.get("hooks") if isinstance(raw, dict) else None
     if not isinstance(hooks, dict):
         _fail(f"{path}: expected an object with a 'hooks' object")
+    if set(raw) - {"hooks"}:
+        _fail(f"{path}: unknown top-level key(s) {sorted(set(raw) - {'hooks'})}")
     groups = {}
     for event, items in hooks.items():
         if event not in EVENTS:
@@ -168,6 +183,9 @@ def load(path=".harness.hooks.json"):
             where = f"{path}: {event}[{i}]"
             if not isinstance(item, dict) or not isinstance(item.get("hooks"), list):
                 _fail(f"{where}: expected an object with a 'hooks' list")
+            if set(item) - {"matcher", "hooks"}:
+                _fail(f"{where}: unknown key(s) {sorted(set(item) - {'matcher', 'hooks'})} "
+                      f"(a mistyped matcher would widen the hook to every tool)")
             matcher = item.get("matcher")
             if matcher is not None:
                 try:
@@ -178,6 +196,36 @@ def load(path=".harness.hooks.json"):
                         for j, h in enumerate(item["hooks"])]
             groups.setdefault(event, []).append(Group(matcher, handlers))
     return HooksConfig(groups)
+
+
+def _script_args(cfg):
+    for groups in cfg.groups.values():
+        for g in groups:
+            for h in g.handlers:
+                if h.type == "command":
+                    yield from (a for a in (h.command, *h.args) if a and not a.startswith("-"))
+
+
+def protected_paths(cfg, config_path=CONFIG_FILE):
+    """Files the model must not write: the hooks config and everything a command
+    hook is given (its script). Real paths, so ./x, sub/../x, case and Windows 8.3
+    short names all land on the same entry; paths that do not exist yet count too."""
+    paths = {config_path, *_script_args(cfg)}
+    return {os.path.normcase(os.path.realpath(p)) for p in paths}
+
+
+def protected_names(cfg):
+    """Lower-case file names to refuse inside shell commands (best effort)."""
+    names = {CONFIG_FILE}
+    for a in _script_args(cfg):
+        base = os.path.basename(a).lower()
+        if "." in base:
+            names.add(base)
+    return names
+
+
+def is_protected(path, cfg):
+    return os.path.normcase(os.path.realpath(path)) in protected_paths(cfg)
 
 
 def kill_tree(proc):

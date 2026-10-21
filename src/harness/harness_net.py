@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+MAX_RESPONSE = 1_000_000          # bytes; a policy hook answers with a few bytes
 
 
 def check_url(url, allow_http=False):
@@ -56,6 +57,9 @@ def post_json(url, body, headers=None, timeout=30, allow_http=False):
                  "user-agent": "harness101/0.3", **(headers or {})})
     try:
         with open_url(req, timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
+            raw = resp.read(MAX_RESPONSE + 1)           # bounded: never buffer a flood
+            if len(raw) > MAX_RESPONSE:
+                raise ValueError(f"response too large (over {MAX_RESPONSE} bytes)")
+            return resp.status, raw.decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read()[:2000].decode("utf-8", "replace")
+        return e.code, e.read(2000).decode("utf-8", "replace")
