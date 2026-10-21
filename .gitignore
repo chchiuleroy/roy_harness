@@ -1,0 +1,13 @@
+# personal endpoint / secrets
+.harness.env
+
+# runtime artefacts of the harness
+session*.json
+*.tmp
+debug/
+.harness_backup/
+.harness_permissions.json
+
+# python
+__pycache__/
+*.pyc
