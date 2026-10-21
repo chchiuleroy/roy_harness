@@ -51,7 +51,7 @@ def post_json(url, body, headers=None, timeout=30, allow_http=False):
     timeouts still raise (OSError / urllib.error.URLError)."""
     check_url(url, allow_http)
     req = urllib.request.Request(
-        url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        url, data=json.dumps(body).encode("ascii"),     # ASCII-escaped: survives lone surrogates
         headers={"content-type": "application/json",
                  "user-agent": "harness101/0.3", **(headers or {})})
     try:

@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（122 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（125 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -109,9 +109,9 @@ Hook 是你寫的腳本或內部 HTTP 端點，綁在 harness 的事件上，**�
 | `SessionStart` | — | 當 reminder | 不適用 |
 | `Stop` | — | 只印出，不回注 | 不適用 |
 
-所有事件另帶 `session_id`、`cwd`、`hook_event_name`；子 agent 的工具呼叫也會觸發 hook，並帶 `agent_id`。`matcher` 是對**工具名稱**的完整比對（Python 正規表示式 `fullmatch`），省略代表全部；只對 `PreToolUse`／`PostToolUse` 有意義。
+所有事件另帶 `session_id`、`cwd`、`hook_event_name`；payload 是 ASCII 跳脫的 JSON（`json.load` 即可還原中文；模型輸出可能含孤立 surrogate，直接當 UTF-8 編碼會丟例外）；子 agent 的工具呼叫也會觸發 hook，並帶 `agent_id`。`matcher` 是對**工具名稱**的完整比對（Python 正規表示式 `fullmatch`），省略代表全部；只對 `PreToolUse`／`PostToolUse` 有意義。
 
-**合約**（欄位名與結束碼對齊 Claude Code 的 hooks，讀官方文件後設計，已有腳本多半可直接沿用）：exit 0＝成功，stdout 純文字當 context；exit 2＝否決（stderr 或 stdout 是理由）；stdout 印 JSON 時，`hookSpecificOutput.permissionDecision: "deny"` 或頂層 `decision: "block"` 也算否決，`hookSpecificOutput.additionalContext` 當 context；其他結束碼、逾時、起不來、輸出不是合法 JSON，都算「hook 失敗」。每段輸出上限 10,000 字元，超過截斷並標示。
+**合約**（欄位名與結束碼對齊 Claude Code 的 hooks，讀官方文件後設計，已有腳本多半可直接沿用）：exit 0＝成功，stdout 純文字當 context；exit 2＝否決（stderr 或 stdout 是理由）；stdout 印 JSON 時，`hookSpecificOutput.permissionDecision: "deny"` 或頂層 `decision: "block"` 也算否決，`hookSpecificOutput.additionalContext` 當 context；其他結束碼、逾時、起不來、輸出不是合法 JSON、harness 端的任何內部錯誤，都算「hook 失敗」，不會讓 agent 迴圈崩潰。每段輸出上限 10,000 字元，超過截斷並標示。
 
 **hook 失敗怎麼辦（`onFailure`）**：`PreToolUse`／`UserPromptSubmit` 預設 `"ask"`，**改問人**（與分類器「失敗一律改問人」一致）；`"block"` 直接否決；`"continue"` 當沒發生。其他事件預設 `"continue"`。
 
@@ -147,7 +147,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-122 項 = 離線 106 項（假伺服器、時間、並行、分類器邏輯等）＋ live 16 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+125 項 = 離線 109 項（假伺服器、時間、並行、分類器邏輯等）＋ live 16 項（其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。

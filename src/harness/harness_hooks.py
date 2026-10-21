@@ -207,13 +207,15 @@ def _cap(text):
 
 def _run_command(h, payload):
     """-> (exit_code | None, stdout, stderr, failure_reason | None)"""
+    # ASCII-escaped JSON: model output can carry lone surrogates, which UTF-8
+    # cannot encode; serialise BEFORE starting a process so a failure leaks none
+    data = json.dumps(payload).encode("ascii")
     try:
         proc = subprocess.Popen([h.command, *h.args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=_env(h), cwd=os.getcwd())
     except OSError as e:
         return None, "", "", f"cannot start {h.command!r}: {e}"
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
         out, err = proc.communicate(data, timeout=h.timeout)
     except subprocess.TimeoutExpired:
@@ -284,7 +286,10 @@ def run(event, payload, cfg):
                 and not group.matcher.fullmatch(name)):
             continue
         for h in group.handlers:
-            kind, val = _call(h, payload)
+            try:
+                kind, val = _call(h, payload)
+            except Exception as e:                 # a hook problem must not kill the loop
+                kind, val = "fail", f"internal error: {type(e).__name__}: {e}"
             if kind == "ok":
                 if val:
                     res.context.append(_cap(val))

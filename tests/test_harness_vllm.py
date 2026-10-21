@@ -1179,6 +1179,44 @@ class TestHookRunner(HookBase):
             self.assertEqual(json.load(f), payload)
 
 
+class TestHookRobustness(HookBase):
+    """A hook problem must never take the agent loop down."""
+
+    def test_an_unpaired_surrogate_in_the_payload_does_not_crash_and_arrives(self):
+        """Model output can carry lone surrogates; encoding them as UTF-8 raises.
+        The payload is sent as ASCII-escaped JSON, so it survives intact."""
+        lone = json.loads('"a\\ud800b"')
+        res = self.hh.run("PostToolUse", {"tool_name": "x", "tool_response": lone},
+                          self.one("PostToolUse", SAVE_PAYLOAD))
+        self.assertEqual(res.failures, [])
+        with open("payload.json", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["tool_response"], lone)
+
+    def test_any_internal_error_becomes_a_hook_failure_not_a_crash(self):
+        cfg = self.one("PreToolUse", OK_TEXT)
+        res = self.hh.run("PreToolUse", {"tool_name": "x", "tool_input": {1, 2}}, cfg)
+        self.assertFalse(res.blocked)
+        self.assertEqual(len(res.failures), 1)          # PRE event: the harness asks
+        blocking = self.one("PreToolUse", OK_TEXT, onFailure="block")
+        self.assertTrue(self.hh.run("PreToolUse",
+                                    {"tool_name": "x", "tool_input": {1, 2}},
+                                    blocking).blocked)
+
+    def test_http_hook_survives_a_lone_surrogate_too(self):
+        import harness_net as hn
+        lone = json.loads('"a\\ud800b"')
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HookServer)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _HookServer.script, _HookServer.seen = [("empty", None)], []
+        try:
+            status, _ = hn.post_json(f"http://127.0.0.1:{srv.server_address[1]}/h",
+                                     {"x": lone})
+        finally:
+            srv.shutdown()
+        self.assertEqual(status, 200)
+        self.assertEqual(_HookServer.seen[0][1]["x"], lone)
+
+
 class TestHooksInHarness(HookBase):
     def setUp(self):
         super().setUp()
