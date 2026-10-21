@@ -198,20 +198,39 @@ def load(path=CONFIG_FILE):
     return HooksConfig(groups)
 
 
+def _looks_like_a_file(arg):
+    """`-m policy` names a module and `--fix` is a flag: neither is a file to guard."""
+    return (os.path.isfile(arg) or "." in os.path.basename(arg)
+            or "/" in arg or chr(92) in arg)
+
+
 def _script_args(cfg):
     for groups in cfg.groups.values():
         for g in groups:
             for h in g.handlers:
                 if h.type == "command":
-                    yield from (a for a in (h.command, *h.args) if a and not a.startswith("-"))
+                    yield from (a for a in (h.command, *h.args)
+                                if a and not a.startswith("-") and _looks_like_a_file(a))
+
+
+def canonical(path):
+    """The name the OS will really use. Windows maps `x.py.`, `x.py ` and
+    `x.py::$DATA` onto x.py (measured: open() created the protected file), so those
+    are folded away before comparing; then real path + case folding handle ./, .., 
+    8.3 short names and symlinks."""
+    p = os.path.normpath(path)
+    if sys.platform == "win32":
+        p = re.sub(r"::\$data$", "", p, flags=re.I)
+        drive, rest = os.path.splitdrive(p)
+        parts = [seg if seg in (".", "..") else seg.rstrip(". ") for seg in rest.split(os.sep)]
+        p = drive + os.sep.join(parts)
+    return os.path.normcase(os.path.realpath(p))
 
 
 def protected_paths(cfg, config_path=CONFIG_FILE):
     """Files the model must not write: the hooks config and everything a command
-    hook is given (its script). Real paths, so ./x, sub/../x, case and Windows 8.3
-    short names all land on the same entry; paths that do not exist yet count too."""
-    paths = {config_path, *_script_args(cfg)}
-    return {os.path.normcase(os.path.realpath(p)) for p in paths}
+    hook is given as a file (its script); paths that do not exist yet count too."""
+    return {canonical(p) for p in {config_path, *_script_args(cfg)}}
 
 
 def protected_names(cfg):
@@ -224,8 +243,16 @@ def protected_names(cfg):
     return names
 
 
+def mentions_protected_name(text, cfg):
+    """Whole-name match (not graph.py for h.py) of a protected file name in a shell
+    string. Callers pass text already lower-cased and stripped of ^ and quotes."""
+    names = sorted(protected_names(cfg), key=len, reverse=True)
+    pattern = r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")(?![\w.-])"
+    return re.search(pattern, text) is not None
+
+
 def is_protected(path, cfg):
-    return os.path.normcase(os.path.realpath(path)) in protected_paths(cfg)
+    return canonical(path) in protected_paths(cfg)
 
 
 def kill_tree(proc):

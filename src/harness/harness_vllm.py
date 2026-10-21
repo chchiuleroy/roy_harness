@@ -684,6 +684,8 @@ def gate(name, args):
     if name in ("write_file", "edit_file"):
         if any(p in path.replace("\\", "/").lower() for p in PROTECTED):
             return f"BLOCKED: {path} is a protected path."
+        if sys.platform == "win32" and ":" in os.path.splitdrive(path)[1]:
+            return f"BLOCKED: {path}: NTFS alternate data streams are not allowed."
         if harness_hooks.is_protected(path, HOOKS):     # hooks config + the scripts it runs
             return f"BLOCKED: {path} is a protected path (a hook's config or script)."
         if not inside_root(path):                       # layer 4: confinement
@@ -695,13 +697,13 @@ def gate(name, args):
             if os.path.exists(path) and os.path.getmtime(path) > READ_STATE[path]:
                 return ("BLOCKED: file changed on disk since you read it. "
                         "Re-read it first.")
-        if MODE == "safe" and ask_human(f"{name}: {path}") == "n":
+        if MODE == "safe" and ask_human(f"{name}: {path}", always=False) == "n":
             return "DENIED by user. Ask them how to proceed, or adapt."
     if name in ("run_command", "monitor"):
         cmd = args.get("command", "")
         low = cmd.lower().replace("^", "").replace('"', "")     # cmd drops ^ and quotes
         if (any(s in low for s in STATE_FILES)          # best effort: a shell can
-                or any(n in low for n in harness_hooks.protected_names(HOOKS))):
+                or harness_hooks.mentions_protected_name(low, HOOKS)):
             return ("BLOCKED: harness state files (permissions, backups, "   # still
                     "local env) are off limits to commands.")                # obfuscate
         if cmd.strip().lower().startswith(("sleep", "start-sleep", "timeout")):

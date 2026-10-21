@@ -1365,6 +1365,56 @@ class TestHooksInHarness(HookBase):
         out = hv.gate("write_file", {"path": "later.py", "content": "x"})
         self.assertIn("protected", (out or "").lower())
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows name normalisation")
+    def test_windows_trailing_dot_space_and_stream_tricks_do_not_get_past(self):
+        """Found by the 小o re-review and reproduced here: Windows maps `x.py.`,
+        `x.py ` and `x.py::$DATA` onto `x.py` (open() created the protected file),
+        while a plain path comparison saw three different names."""
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": sys.executable,
+                 "args": ["later.py"]}]}]}}, f)
+        hv.HOOKS = self.hh.load(".harness.hooks.json")
+        os.makedirs("sub", exist_ok=True)
+        for path in ("later.py.", "later.py ", "later.py. .", "LATER.PY.",
+                     "later.py::$DATA", "later.py:x", "sub/../later.py.",
+                     ".harness.hooks.json.", ".harness.hooks.json::$DATA"):
+            out = hv.gate("write_file", {"path": path, "content": "x"})
+            self.assertIn("BLOCKED", out or "", path)
+        # the comparison itself must fold these too (second layer behind the stream rule)
+        for alias in ("later.py.", "later.py ", "later.py::$DATA", "sub/../later.py."):
+            self.assertEqual(self.hh.canonical(alias), self.hh.canonical("later.py"), alias)
+        # and the real thing: nothing may appear on disk
+        hv.read_line = lambda p: "y"
+        hv.execute_tool("write_file", {"path": "later.py.", "content": "x"})
+        self.assertFalse(os.path.exists("later.py"))
+
+    def test_a_module_name_or_look_alike_file_is_not_mistaken_for_a_script(self):
+        """Over-blocking is a bug too (found by the 小o re-review): `-m policy` names a
+        module, and `graph.py` merely contains the text `h.py`."""
+        with open(".harness.hooks.json", "w", encoding="utf-8") as f:
+            json.dump({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": "python", "args": ["-m", "policy"]}]}]}}, f)
+        hv.HOOKS = self.hh.load(".harness.hooks.json")
+        self.assertIsNone(hv.gate("write_file", {"path": "policy", "content": "x"}))
+        self.assertIsNone(hv.gate("run_command", {"command": "echo policy"}))
+        self.install("PreToolUse", OK_TEXT, "no_such_tool")            # script is h.py
+        for cmd in ("echo graph.py", "echo path.py", "echo h.pyo", "echo xh.py"):
+            self.assertIsNone(hv.gate("run_command", {"command": cmd}), cmd)
+        for cmd in ("echo x > h.py", r"copy x sub\h.py", r"type .\h.py", "del H.PY",
+                    "echo x>h.py"):
+            self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
+
+    def test_safe_mode_write_prompt_does_not_offer_always(self):
+        """`a` is remembered only for command grants; offering it for writes was a
+        promise the harness never kept (found by the 小o re-review)."""
+        hv.MODE = "safe"
+        self.answer = "a"
+        self.assertIsNone(hv.gate("write_file", {"path": "ok.txt", "content": "x"}))
+        self.assertIsNone(hv.gate("write_file", {"path": "ok.txt", "content": "x"}))
+        self.assertEqual(len(self.asked), 2)
+        self.assertNotIn("always", self.asked[0].lower())
+
     @unittest.skipUnless(sys.platform == "win32", "8.3 short names are a Windows thing")
     def test_a_windows_short_name_does_not_get_past_the_protection(self):
         import ctypes

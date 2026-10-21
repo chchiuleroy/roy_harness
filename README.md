@@ -128,7 +128,7 @@ Hook 是你寫的腳本或內部 HTTP 端點，綁在 harness 的事件上，**�
 
 **HTTP hook 的網路規則**：與 provider 相同，`https://` 一律可以，`http://` 只有 localhost 或該 hook 寫 `"allow_http": true` 才放行（企業內網常沒有 HTTPS，明文代表路徑上的人看得到 token，請用低權限 token）；**不跟隨重新導向**，3xx 算失敗，所以政策伺服器無法把 token 轉去別處；token 值只從環境變數讀（`headers_env` 寫的是變數名稱，不是值），變數沒設就視為失敗，不會送出請求。2xx 且本文為空算成功，其他非 2xx、連線失敗、逾時都算失敗。
 
-**模型不能改 hook**：`write_file`／`edit_file` 擋下 `.harness.hooks.json`，以及每個 command hook 的 `command`／`args` 所列的檔案（含尚不存在的）；比對的是**真實路徑**，所以 `./x`、`sub/../x`、大小寫、Windows 8.3 短檔名都落在同一條（審查發現只保護設定檔時，模型可以改寫腳本；短檔名在作者的磁碟上實測是開著的）。`run_command` 提到這些檔名也擋，比對前先去掉 `^` 與引號（cmd 會把 `.harness^.hooks.json` 展開成真檔名，已實測）。
+**模型不能改 hook**：`write_file`／`edit_file` 擋下 `.harness.hooks.json`，以及每個 command hook 的 `command`／`args` 所列的檔案（含尚不存在的）；比對的是**真實路徑**，所以 `./x`、`sub/../x`、大小寫、Windows 8.3 短檔名都落在同一條；Windows 會把 `x.py.`、`x.py `（尾端的點與空白）和 `x.py::$DATA` 都對應到 `x.py`（複審時實測：`open()` 真的建立了受保護的檔案），這些在比對前先摺疊，寫入路徑出現 NTFS 備用資料流語法（冒號）則一律拒絕（審查發現只保護設定檔時，模型可以改寫腳本；短檔名在作者的磁碟上實測是開著的）。`run_command` 提到這些檔名也擋，比對前先去掉 `^` 與引號（cmd 會把 `.harness^.hooks.json` 展開成真檔名，已實測）。
 
 **這個保護的邊界**：對 shell 只是字串比對，**用變數分段組合檔名（`set a=.harness& echo %a%.hooks`）仍可繞過**，沒有 OS 級 sandbox 就解不掉。hook 腳本 `import` 的其他本機模組、以及腳本所在目錄的其他檔案都**不在保護內**。最牢靠的做法是**把 hook 腳本與設定放在專案根目錄之外**：寫入本來就限制在專案根目錄，模型寫不到。
 
@@ -176,7 +176,8 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 回應大小沒有上限（medium）→ 只修了新增的 HTTP hook（1MB 上限）；模型回應與 command hook 輸出未修，列入限制。
 - hook 失敗的詢問提示「a always」並不真的永久（low）→ 該提示不再提供 always，`a` 視同 `y`。
 - 審查者 `rejected`：hook 的 `allow`／失敗／輸出無法跳過閘門；URL 邊界（userinfo、IPv6、`localhost.evil.com`、大小寫）無法繞過；所有請求路徑都用不跟隨重新導向的 opener。
-- 審查者的 `not_checked`：沙盒唯讀，沒有跑完整測試；沒有實際建立 symlink、NTFS 備用資料流或短檔名；沒有製造超大回應驗證記憶體；沒有在非 Windows 平台驗證 `kill_tree`。修復後**沒有再送複審**。
+- 審查者的 `not_checked`：沙盒唯讀，沒有跑完整測試；沒有實際建立 symlink、NTFS 備用資料流或短檔名；沒有製造超大回應驗證記憶體；沒有在非 Windows 平台驗證 `kill_tree`。
+- **複審（同日，小c 把上面的修復送回同一位審查者）**：3 項 `confirmed`、3 項 `rejected`，核對後全部處理並先寫失敗測試。①**high**：指向「尚不存在的腳本」時，`later.py.`、`later.py `、`later.py::$DATA` 都能繞過保護，同意 high，實測 Windows 真的把它們對應到 `later.py` → 比對前摺疊這些寫法，備用資料流語法一律拒絕。②low：`h.py` 的子字串比對會誤擋 `graph.py`，`-m policy` 的 `policy` 被當成檔案 → 改整個檔名比對；不像檔案的參數（沒副檔名、不是檔案、沒路徑分隔）不保護。③low：safe 模式寫檔提示仍顯示 always 卻不記憶（原本程式就有）→ 不再提供。審查者 `rejected`：自架 provider 的修法與我把嚴重度調為 medium 站得住腳；嚴格驗證沒有剩餘洞；去掉 `^` 與引號的正規化沒有引入新繞法。審查者的 `not_checked`：沙盒唯讀未跑完整測試；短檔名、junction、符號連結沒有可用的現成目標；UNC 管理分享因權限未能驗證。這批修復**沒有再送第三輪**。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
