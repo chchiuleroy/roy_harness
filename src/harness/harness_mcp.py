@@ -46,6 +46,11 @@ DEFAULT_TIMEOUT = 60.0
 MAX_TIMEOUT = 600.0
 MAX_DESCRIPTION = 1000
 MAX_PAGES = 20
+# Tool definitions travel with EVERY model request, before any approval or hook applies,
+# so a server must not be able to flood them. These limits are my own numbers, not the spec's.
+MAX_TOOLS_PER_SERVER = 128
+MAX_TOOL_SCHEMA_BYTES = 20_000            # one serialised tool definition
+MAX_CATALOG_BYTES = 100_000               # all servers together
 MAX_LINE = 1_000_000                           # one JSON-RPC message, bytes
 NAME_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")  # no underscore: `server__tool` stays unambiguous
 SERVER_KEYS = {"stdio": {"type", "command", "args", "env", "timeout", "trust"},
@@ -351,7 +356,9 @@ class _Server:
             self.version = MODERN
             return
         except McpRpcError as e:
-            if e.code in MODERN_ERROR_CODES:
+            # spec: over HTTP the body of a 400 is inspected; the same code behind any
+            # other status (a proxy, a broken gateway) is not a modern server speaking
+            if e.code in MODERN_ERROR_CODES and e.http_status in (None, 400):
                 supported = (e.data or {}).get("supported") if isinstance(e.data, dict) else None
                 if isinstance(supported, list) and MODERN in supported:
                     raise McpError(f"modern server rejected {MODERN}: {e}")
@@ -606,9 +613,10 @@ class HttpServer(_Server):
         try:
             resp = harness_net.open_url(req, timeout)
         except urllib.error.HTTPError as e:
-            text = e.read(2000).decode("utf-8", "replace")
+            raw = e.read(harness_net.MAX_RESPONSE + 1)    # the whole body, bounded: a cut
+            text = raw[:2000].decode("utf-8", "replace")  # JSON error would not parse
             try:                          # a recognised modern error arrives as a JSON body
-                msg = json.loads(text)
+                msg = json.loads(raw) if len(raw) <= harness_net.MAX_RESPONSE else None
             except ValueError:
                 msg = None
             return e.code, {k.lower(): v for k, v in e.headers.items()}, msg, text
@@ -672,7 +680,8 @@ class HttpServer(_Server):
             raise McpError(f"{method}: empty response")
         if "error" in msg:
             e = msg["error"] if isinstance(msg["error"], dict) else {}
-            raise McpRpcError(e.get("code"), str(e.get("message", "error")), e.get("data"))
+            raise McpRpcError(e.get("code"), str(e.get("message", "error")), e.get("data"),
+                              http_status=status)
         return msg.get("result")
 
     def raw_notify(self, method, params):
@@ -689,6 +698,7 @@ class Registry:
         self.cfg = cfg or McpConfig({})
         self.servers, self.failures, self.warnings = {}, {}, []
         self._tools = {}            # exposed name -> (server, tool name, definition)
+        self._catalog_bytes = 0     # serialised size of everything in _tools
 
     def is_empty(self):
         return not self.servers
@@ -711,9 +721,24 @@ class Registry:
                                      f"collides with {exposed!r}")
                 continue
             description = clean_text(tool.get("description"), MAX_DESCRIPTION)
-            self._tools[exposed] = (server, name, {
-                "name": exposed, "description": f"[mcp:{server.name}] {description}".strip(),
-                "input_schema": tool["inputSchema"]})
+            definition = {"name": exposed,
+                          "description": f"[mcp:{server.name}] {description}".strip(),
+                          "input_schema": tool["inputSchema"]}
+            size = len(json.dumps(definition))
+            if size > MAX_TOOL_SCHEMA_BYTES:
+                self.warnings.append(f"{server.name}: skipped tool {name!r}: its definition is "
+                                     f"too large ({size} bytes, limit {MAX_TOOL_SCHEMA_BYTES})")
+                continue
+            if added >= MAX_TOOLS_PER_SERVER:
+                self.warnings.append(f"{server.name}: stopped at the limit of "
+                                     f"{MAX_TOOLS_PER_SERVER} tools per server; the rest are ignored")
+                break
+            if self._catalog_bytes + size > MAX_CATALOG_BYTES:
+                self.warnings.append(f"{server.name}: stopped, the tool catalog budget of "
+                                     f"{MAX_CATALOG_BYTES} bytes is used up; the rest are ignored")
+                break
+            self._catalog_bytes += size
+            self._tools[exposed] = (server, name, definition)
             added += 1
         server.tool_count = added
         self.servers[server.name] = server

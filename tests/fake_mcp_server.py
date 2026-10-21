@@ -16,6 +16,7 @@ import sys
 import time
 
 ERA = os.environ.get("FAKE_MCP_ERA", "modern")
+MANY = int(os.environ.get("FAKE_MCP_MANY", "0"))     # list this many small tools (+ one huge)
 LOG = os.environ.get("FAKE_MCP_LOG")
 META = "io.modelcontextprotocol/"
 MODERN, LEGACY = "2026-07-28", "2025-11-25"
@@ -154,7 +155,14 @@ def main():
                                  "Unsupported protocol version" if ERA in ("modern", "dual")
                                  else "Server not initialized"))
             continue
-        if method == "tools/list":
+        if method == "tools/list" and MANY:
+            huge = {"name": "huge", "description": "huge schema", "inputSchema": {
+                "type": "object", "properties": {
+                    f"p{i}": {"type": "string", "description": "x" * 50} for i in range(1000)}}}
+            small = [{"name": f"t{i}", "description": "d", "inputSchema": schema()}
+                     for i in range(MANY)]
+            reply(id_, {"resultType": "complete", "tools": [huge] + small})
+        elif method == "tools/list":
             if params.get("cursor") == "p2":
                 reply(id_, {"resultType": "complete", "tools": PAGE2})
             else:

@@ -247,7 +247,9 @@ def mentions_any(text, names):
     """Whole-name match (not graph.py for h.py) of any file name in a shell string.
     Callers pass text already lower-cased and stripped of ^ and quotes."""
     names = sorted(names, key=len, reverse=True)
-    pattern = r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")(?![\w.-])"
+    # Windows drops trailing dots, so `h.py.` is h.py: a dot ends the name unless a name
+    # character follows it (`h.py.bak` is another file)
+    pattern = r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")(?![\w-]|\.\w)"
     return re.search(pattern, text) is not None
 
 

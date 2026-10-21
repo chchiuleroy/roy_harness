@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；MCP 另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，合計 179 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；MCP 另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，合計 184 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -151,9 +151,9 @@ harness 當 MCP 客戶端：啟動時連上設定的伺服器，把它們的工�
 | 新版（2026-07-28） | 無握手，每個請求的 `_meta` 帶版本、身分與能力；HTTP 另有 `MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭 | 先送 `server/discover`（HTTP 同） |
 | 舊版（2025-11-25 及更早） | `initialize` 握手；HTTP 用 `Mcp-Session-Id` | 探測得到的不是「已知新版錯誤」（`-32022`、`-32020`）或沒回應，就改走握手 |
 
-規則的重點：**已知的新版錯誤絕不退回握手**（`UnsupportedProtocolVersionError` 若清單沒有雙方共同的版本，直接失敗；若清單含我們會講的舊版，才用該版握手）。舊版只讀過 2025-11-25 的規格；伺服器回 2025-06-18 或 2025-03-26 我會接受並印警告（形狀應相同，**未獨立驗證**）。HTTP 回應可以是 JSON 或事件串流（SSE），兩種都會解析；工具若標了 `x-mcp-header`，新版 HTTP 會依規格鏡射成 `Mcp-Param-*` 標頭（非 ASCII 或前後有空白用 `=?base64?...?=`），定義不合規的工具只排除該工具。
+規則的重點：**已知的新版錯誤絕不退回握手**（HTTP 只認 `400` 的本文，且完整讀取該本文後才解析，上限 1MB；同樣的錯誤碼出現在其他狀態碼底下不算）（`UnsupportedProtocolVersionError` 若清單沒有雙方共同的版本，直接失敗；若清單含我們會講的舊版，才用該版握手）。舊版只讀過 2025-11-25 的規格；伺服器回 2025-06-18 或 2025-03-26 我會接受並印警告（形狀應相同，**未獨立驗證**）。HTTP 回應可以是 JSON 或事件串流（SSE），兩種都會解析；工具若標了 `x-mcp-header`，新版 HTTP 會依規格鏡射成 `Mcp-Param-*` 標頭（非 ASCII 或前後有空白用 `=?base64?...?=`），定義不合規的工具只排除該工具。
 
-**工具與結果**：`tools/list` 會翻完所有分頁；名稱消毒成 `[A-Za-z0-9_-]`，撞名者略過並警告；無效的 `inputSchema` 略過；描述去掉控制字元並限制在 1,000 字元，前面加 `[mcp:伺服器]`。結果一律轉成純文字：圖片與音訊只留「已省略」，`structuredContent` 在沒有文字時轉成 JSON，`isError` 會加 `ERROR (tool reported):` 前綴，`input_required`（要使用者輸入）回「不支援」；結果與其他工具一樣截斷在 30,000 字元。
+**工具與結果**：`tools/list` 會翻完所有分頁；名稱消毒成 `[A-Za-z0-9_-]`，撞名者略過並警告；無效的 `inputSchema` 略過；描述去掉控制字元並限制在 1,000 字元，前面加 `[mcp:伺服器]`。結果一律轉成純文字：圖片與音訊只留「已省略」，`structuredContent` 在沒有文字時轉成 JSON，`isError` 會加 `ERROR (tool reported):` 前綴，`input_required`（要使用者輸入）回「不支援」；結果與其他工具一樣截斷在 30,000 字元。**工具目錄有預算**（工具定義會跟著每個模型請求送出，早於任何核准或 hook）：每台伺服器最多 128 個工具、單一工具定義最多 20,000 位元組、所有伺服器合計最多 100,000 位元組，超過的略過並警告；這些數字是我自己訂的，不是規格給的。
 
 **安全**（伺服器是接進 agent 身體的程式碼，它的工具描述與結果都是陌生人的文字）：
 - 每次呼叫**預設問人**，`auto` 模式也一樣、不交給分類器；只有該伺服器明寫 `"trust": "always"` 才免問。
@@ -191,7 +191,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-179 項 = 離線 158 項（假伺服器、時間、並行、分類器邏輯等）＋ live 21 項（vLLM 16 項、真實 FastMCP 5 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+184 項 = 離線 163 項（假伺服器、時間、並行、分類器邏輯等）＋ live 21 項（vLLM 16 項、真實 FastMCP 5 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -221,6 +221,12 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 審查者的 `not_checked`：沙盒唯讀，沒有跑完整測試；沒有實際建立 symlink、NTFS 備用資料流或短檔名；沒有製造超大回應驗證記憶體；沒有在非 Windows 平台驗證 `kill_tree`。
 - **複審（同日，小c 把上面的修復送回同一位審查者）**：3 項 `confirmed`、3 項 `rejected`，核對後全部處理並先寫失敗測試。①**high**：指向「尚不存在的腳本」時，`later.py.`、`later.py `、`later.py::$DATA` 都能繞過保護，同意 high，實測 Windows 真的把它們對應到 `later.py` → 比對前摺疊這些寫法，備用資料流語法一律拒絕。②low：`h.py` 的子字串比對會誤擋 `graph.py`，`-m policy` 的 `policy` 被當成檔案 → 改整個檔名比對；不像檔案的參數（沒副檔名、不是檔案、沒路徑分隔）不保護。③low：safe 模式寫檔提示仍顯示 always 卻不記憶（原本程式就有）→ 不再提供。審查者 `rejected`：自架 provider 的修法與我把嚴重度調為 medium 站得住腳；嚴格驗證沒有剩餘洞；去掉 `^` 與引號的正規化沒有引入新繞法。審查者的 `not_checked`：沙盒唯讀未跑完整測試；短檔名、junction、符號連結沒有可用的現成目標；UNC 管理分享因權限未能驗證。這批修復**沒有再送第三輪**。
 
+**MCP 的第三方審查（2026-10-21，Codex 唯讀靜態審查，範圍 `16c0188..e7d75bf`）**：3 項 `confirmed`、其餘檢查未發現缺陷；逐條本機重現後處理，並先寫失敗測試。
+- **high**：`run_command` 可用尾端的點繞過腳本保護。`mentions_any` 的右邊界把句點當成名稱的一部分，`echo x > h.py.` 不會被認成 `h.py`，gate 直接放行；而 Windows 會把 `h.py.` 當成 `h.py`。我自己重現（`mentions_any` 回 `False`、`gate` 回 `None`）→ 句點結束名稱，除非後面緊接名稱字元（`h.py.bak` 是另一個檔案）。上一輪我只修了 `write_file` 的路徑比對，漏了 shell 字串這條。
+- **medium**：HTTP 世代偵測。錯誤本文只讀前 2,000 位元組就解析，較長的合法新版錯誤會解析失敗，被當成非新版而送出 `initialize`，違反「已知新版錯誤絕不退回握手」；另外新版錯誤碼出現在非 400 的狀態碼下也被接受。重現後 → 完整讀取（有上限）、只認 400。
+- **medium**：工具目錄沒有總量預算，一台惡意或失控的伺服器能用大量工具或超大 schema 讓每個模型請求都超出上下文或請求大小上限，早於任何核准與 hook。→ 加上三層預算（見上）。
+- 審查者的 `not_checked`：沙盒唯讀，沒有跑測試、沒有啟動伺服器、沒有重現我的突變與 live 數字，也沒有實際在 Windows shell 對尾端句點檔名下指令。這批修復**沒有再送複審**。
+
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
 - `auto` 模式下使用者明說「Delete the file junk.txt.」：5/5 分類器放行並執行。
@@ -239,7 +245,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **`llamacpp`／`sglang`／`openai`／`anthropic-compat` 只做了離線測試（請求內容、設定解析、`/metrics` 文字解析），沒有對真實伺服器或 API 跑過 live**；欄位行為依各家官方文件。OpenAI 的 `max_completion_tokens` 有官方依據：公開的 OpenAPI 規格（`openai/openai-openapi`）把 Chat Completions 的 `max_tokens` 標為 deprecated，並註明與 o-series 模型不相容；但「託管端點收到 `chat_template_kwargs` 是否回 400」是推斷、未實測，所以預設不送。實測過的只有 `vllm`。
 - 回應大小：HTTP hook 的回應上限 1MB；但**模型回應與 `/cache` 的回應沒有大小上限**（既有行為，惡意端點可讓 harness 吃光記憶體），command hook 的輸出也是讀完才截斷（腳本是你自己的、有逾時）。
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
-- MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；**尚未送第三方審查**；無 OAuth、無 resources／prompts 等。
+- MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 

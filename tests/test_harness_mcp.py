@@ -21,7 +21,7 @@ import harness_vllm as hv  # noqa: E402
 from test_harness_vllm import Base, _LLMServer, llm_reply, tool_call_reply  # noqa: E402
 
 FAKE = os.path.join(HERE, "fake_mcp_server.py")
-ENV_KEYS = ("FAKE_MCP_ERA", "FAKE_MCP_LOG", "FAKE_MCP_LEGACY_REPLY_VERSION",
+ENV_KEYS = ("FAKE_MCP_ERA", "FAKE_MCP_LOG", "FAKE_MCP_LEGACY_REPLY_VERSION", "FAKE_MCP_MANY",
             "HT_MCP_SECRET_KEY", "HT_MCP_LISTED_KEY", "HT_MCP_TOKEN_VAR")
 VALID_TOOLS = {"echo", "big", "image", "structured", "fail", "ask", "slow", "die",
                "envnames", "bad_name_", "a_b", "evil", "hdr"}
@@ -97,10 +97,10 @@ class TestMcpConfig(McpBase):
             "stdio without command": json.dumps({"servers": {"a": {"type": "stdio"}}}),
             "shell-form command": json.dumps({"servers": {"a": {"type": "stdio",
                                                                 "command": "python s.py"}}}),
-            "stdio with url": json.dumps({"servers": {"a": {**ok, "url": "https://x/mcp"}}}),
+            "stdio with url": json.dumps({"servers": {"a": {**ok, "url": "https://mcp.corp/mcp"}}}),
             "http without url": json.dumps({"servers": {"a": {"type": "http"}}}),
             "http with command": json.dumps({"servers": {"a": {"type": "http",
-                                                               "url": "https://x/mcp",
+                                                               "url": "https://mcp.corp/mcp",
                                                                "command": "x"}}}),
             "remote http without opt-in": json.dumps({"servers": {"a": {
                 "type": "http", "url": "http://mcp.corp/mcp"}}}),
@@ -202,6 +202,35 @@ class TestMcpStdio(McpBase):
         for t in tools.values():
             self.assertEqual(t["input_schema"]["type"], "object")
 
+    def test_the_tool_catalog_has_a_budget_before_it_reaches_the_model(self):
+        """Found by the 小o review: tool definitions go into EVERY model request, before
+        any approval or hook applies, and only descriptions were limited. A server
+        listing hundreds of tools or one enormous schema could make the model API
+        refuse every request. The limits are my own numbers, not the spec's."""
+        self.era("modern", FAKE_MCP_MANY="300")
+        reg = self.connect({"fake": self.stdio()})
+        names = {t["name"] for t in reg.tools()}
+        self.assertEqual(len(names), self.hm.MAX_TOOLS_PER_SERVER)
+        self.assertNotIn("fake__huge", names)                  # one schema over the cap
+        text = " ".join(reg.warnings)
+        self.assertIn("too large", text)
+        self.assertIn("limit", text)
+        total = sum(len(json.dumps(t)) for t in reg.tools())
+        self.assertLessEqual(total, self.hm.MAX_CATALOG_BYTES)
+
+    def test_the_catalog_budget_is_shared_by_all_servers(self):
+        self.era("modern", FAKE_MCP_MANY="40")
+        old = self.hm.MAX_CATALOG_BYTES
+        self.hm.MAX_CATALOG_BYTES = 6000
+        try:
+            reg = self.connect({"a": self.stdio(), "b": self.stdio()})
+        finally:
+            self.hm.MAX_CATALOG_BYTES = old
+        total = sum(len(json.dumps(t)) for t in reg.tools())
+        self.assertLessEqual(total, 6000)
+        self.assertTrue(any("catalog" in w for w in reg.warnings), reg.warnings)
+        self.assertEqual(reg.failures, {})                      # skipped tools, not a failure
+
     def test_call_results_become_plain_text_for_every_content_type(self):
         self.era("modern")
         reg = self.connect({"fake": self.stdio()})
@@ -299,6 +328,7 @@ class _Target(http.server.BaseHTTPRequestHandler):
 class _McpHttp(http.server.BaseHTTPRequestHandler):
     mode, sse, big, redirect_to, supported = "modern", False, False, None, None
     plain_errors = False
+    pad, error_status = 0, None
     seen = []
 
     def log_message(self, *a):
@@ -377,7 +407,8 @@ class _McpHttp(http.server.BaseHTTPRequestHandler):
         version = meta.get("io.modelcontextprotocol/protocolVersion")
         sup = type(self).supported
         if sup is not None and "2026-07-28" not in sup:
-            return self.err(400, -32022, "Unsupported protocol version",
+            return self.err(type(self).error_status or 400, -32022,
+                            "Unsupported protocol version" + "." * type(self).pad,
                             {"supported": sup, "requested": version}, id_)
         if headers.get("mcp-protocol-version") != "2026-07-28" or version != "2026-07-28" \
                 or headers.get("mcp-method") != method:
@@ -432,7 +463,7 @@ class TestMcpHttp(McpBase):
         c = _McpHttp
         c.mode, c.sse, c.big, c.redirect_to, c.supported, c.seen = \
             "modern", False, False, None, None, []
-        c.plain_errors = False
+        c.plain_errors, c.pad, c.error_status = False, 0, None
         _Target.seen = []
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _McpHttp)
         self.tgt = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Target)
@@ -495,6 +526,22 @@ class TestMcpHttp(McpBase):
         reg = self.http()
         self.assertIn("web", reg.failures)
         self.assertNotIn("initialize", self.methods_seen())
+
+    def test_a_long_modern_error_body_is_still_recognised(self):
+        """Found by the 小o review: the error body was cut at 2,000 bytes before parsing,
+        so a valid but long modern error looked like 'not JSON' and triggered the very
+        initialize handshake the spec forbids for modern servers."""
+        _McpHttp.supported, _McpHttp.pad = ["2027-01-01"], 5000
+        reg = self.http()
+        self.assertIn("web", reg.failures)
+        self.assertNotIn("initialize", self.methods_seen())
+
+    def test_only_a_400_counts_as_a_recognised_modern_error(self):
+        """Spec: on 400, inspect the body. A modern error code behind any other status
+        (a proxy, a broken gateway) must not steer era detection."""
+        _McpHttp.supported, _McpHttp.error_status = ["2027-01-01"], 500
+        self.http()
+        self.assertIn("initialize", self.methods_seen())       # treated as 'not modern'
 
     def test_sse_responses_are_parsed_and_notifications_ignored(self):
         _McpHttp.sse = True
@@ -642,7 +689,8 @@ class TestMcpInHarness(McpBase):
                 out = hv.gate(tool, args)
                 self.assertIn("protected", (out or "").lower(), (tool, path, out))
         for cmd in ("echo {} > .harness.mcp.json", "echo x > srv.py",
-                    "echo x > .harness^.mcp.json", "echo x > SRV^.PY"):
+                    "echo x > .harness^.mcp.json", "echo x > SRV^.PY",
+                    "echo x > srv.py.", "echo x > .harness.mcp.json.."):
             self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
         self.assertIsNone(hv.gate("run_command", {"command": "echo x > other_srv.py2"}))
 

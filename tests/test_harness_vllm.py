@@ -1405,6 +1405,17 @@ class TestHooksInHarness(HookBase):
                     "echo x>h.py"):
             self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
 
+    def test_a_trailing_dot_in_a_shell_command_does_not_hide_a_protected_name(self):
+        """Found by the second 小o re-review: Windows drops trailing dots, so `h.py.` IS
+        h.py, but the whole-name match treated the dot as part of the name and let
+        `echo x > h.py.` through without even a question."""
+        self.install("PreToolUse", OK_TEXT, "no_such_tool")            # script is h.py
+        for cmd in ("echo x > h.py.", "echo x > h.py..", "echo x > h.py::$DATA",
+                    "echo x > .harness.hooks.json.", "echo x > H^.PY."):
+            self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
+        for cmd in ("echo x > h.py.bak", "echo graph.py.", "echo xh.py."):   # other files
+            self.assertIsNone(hv.gate("run_command", {"command": cmd}), cmd)
+
     def test_safe_mode_write_prompt_does_not_offer_always(self):
         """`a` is remembered only for command grants; offering it for writes was a
         promise the harness never kept (found by the 小o re-review)."""
