@@ -286,8 +286,9 @@ def _fit_menu(found):
     names = sorted(found)
 
     def size(chosen, ratio):
+        # the lines are joined with newlines, so there is one fewer newline than lines
         return sum(len(f"- {n}: ") + len(_shorten(found[n].description, ratio)) + 1
-                   for n in chosen)
+                   for n in chosen) - 1
 
     while True:
         ratio = next((r for r in range(1000, -1, -1) if size(names, r) <= MAX_MENU), None)

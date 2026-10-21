@@ -271,6 +271,25 @@ def kill_tree(proc):
         proc.kill()
 
 
+def resolve_command(command):
+    """Where a configured command really lives. A name with a folder part is used as
+    given. A bare name is looked up on PATH only: on Windows CreateProcess would try the
+    current folder FIRST (measured: a hook.exe copied there ran for command `hook`), and
+    the model can create files in that folder. -> a path, or None when PATH has none."""
+    if os.path.dirname(command) or os.path.isabs(command):
+        return command
+    exts = [""] if os.path.splitext(command)[1] else         [""] + [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip(chr(34))
+        if not folder:
+            continue
+        for ext in exts:
+            candidate = os.path.join(folder, command + ext)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def _env(handler):
     env = {k: v for k, v in os.environ.items() if not SCRUB.search(k)}
     for name in handler.env:                       # the config names what it needs
@@ -291,8 +310,11 @@ def _run_command(h, payload):
     # ASCII-escaped JSON: model output can carry lone surrogates, which UTF-8
     # cannot encode; serialise BEFORE starting a process so a failure leaks none
     data = json.dumps(payload).encode("ascii")
+    program = resolve_command(h.command)
+    if program is None:
+        return None, "", "", f"cannot start {h.command!r}: not found on PATH"
     try:
-        proc = subprocess.Popen([h.command, *h.args], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([program, *h.args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=_env(h), cwd=os.getcwd())
     except OSError as e:

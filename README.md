@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 223 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（143 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 231 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-223 項 = 離線 200 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+231 項 = 離線 208 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -272,6 +272,12 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **medium**：HTTP 世代偵測。錯誤本文只讀前 2,000 位元組就解析，較長的合法新版錯誤會解析失敗，被當成非新版而送出 `initialize`，違反「已知新版錯誤絕不退回握手」；另外新版錯誤碼出現在非 400 的狀態碼下也被接受。重現後 → 完整讀取（有上限）、只認 400。
 - **medium**：工具目錄沒有總量預算，一台惡意或失控的伺服器能用大量工具或超大 schema 讓每個模型請求都超出上下文或請求大小上限，早於任何核准與 hook。→ 加上三層預算（見上）。
 - 審查者的 `not_checked`：沙盒唯讀，沒有跑測試、沒有啟動伺服器、沒有重現我的突變與 live 數字，也沒有實際在 Windows shell 對尾端句點檔名下指令。這批修復**沒有再送複審**。
+
+**四批審查修復的複審（2026-10-21，Codex 唯讀，範圍 `c2361aa`、`c32b217`、`bc77023`、`073fcc1`）**：1 項 `confirmed`（low）、1 項 `needs_validation`、沒有 `rejected`；逐條處理並先寫失敗測試。
+- **low（confirmed）**：選單預算的估算多算一個結尾換行（行與行之間才有換行），所以剛好放得下的選單仍被縮短，單一 skill 剛好等於預算時甚至被整個丟掉。已重現（一個 skill、`MAX_MENU=6`，回傳空集合）；估算減 1。
+- **needs_validation → 實測成立**：Windows 的 CreateProcess 在 PATH 之前先找目前資料夾，所以 hook 或 MCP stdio 設定寫裸命令（`python`、`whoami`）時，模型在專案資料夾放同名 `.exe` 就會被執行。審查者無法在唯讀沙盒驗證；我把 `hostname.exe` 複製成 `whoami.exe` 放進資料夾，hook 實際跑的是被植入的那個（先寫成失敗測試）。注意這台機器的環境變數 `NoDefaultCurrentDirectoryInExePath=1` 會讓問題不出現，要在父行程拿掉才重現，所以預設的 Windows 才會中。修法：`resolve_command`——裸名稱只查 PATH（照 `PATHEXT`），不看目前資料夾；帶路徑的照原樣；找不到就明確失敗。hook 與 MCP 都改用。
+- 審查者的 `not_checked`：沙盒無法建立暫存目錄，離線測試它那邊全沒跑成；沒有建真實 symlink／junction／短檔名／ADS／UNC；沒跑突變工具（假綠判斷來自逐測試核對）；沒連真實 MCP／HTTP 伺服器。這批修復**沒有再送下一輪**。
+- 小c 自己的核對：新增 8 項測試，突變 8 種全被抓（其中 2 種第一次存活，補了預算掃描與 MCP 找不到命令兩個測試後被抓）。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。

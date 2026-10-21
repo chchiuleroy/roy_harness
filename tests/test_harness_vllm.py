@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1257,6 +1258,80 @@ class TestHookRobustness(HookBase):
             srv.shutdown()
         self.assertEqual(status, 200)
         self.assertEqual(_HookServer.seen[0][1]["x"], lone)
+
+
+@unittest.skipUnless(os.name == "nt", "only Windows looks in the current folder first")
+class TestBareCommandPlanting(HookBase):
+    """On Windows CreateProcess looks for a bare command name in the current folder BEFORE
+    PATH (measured: a hook.exe copied there ran for command `hook`). The model can create
+    files in that folder, so a bare `python` or `whoami` in a hook or MCP config must be
+    looked up on PATH only. Found by the 小o re-review (needs_validation, then reproduced)."""
+    def setUp(self):
+        super().setUp()
+        saved = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "NoDefaultCurrentDirectoryInExePath", saved)
+        system32 = os.path.join(os.environ["SystemRoot"], "System32")
+        self.real = os.path.join(system32, "whoami.exe")
+        self.other = os.path.join(system32, "hostname.exe")
+
+    def plant(self):
+        shutil.copy(self.other, "whoami.exe")      # a different program under the real name
+
+    def test_the_name_is_looked_up_on_path_not_in_the_current_folder(self):
+        self.plant()
+        got = self.hh.resolve_command("whoami")
+        self.assertTrue(os.path.isfile(got))
+        self.assertNotEqual(os.path.abspath(got), os.path.abspath("whoami.exe"))
+
+    def test_a_hook_command_runs_the_program_from_path_not_the_planted_one(self):
+        cfg = self.write_cfg("PreToolUse", [{"type": "command", "command": "whoami"}])
+        handler = cfg.groups["PreToolUse"][0].handlers[0]
+        on_path = self.hh.resolve_command("whoami")     # may be Git's, not System32's
+        want = subprocess.run([on_path], capture_output=True, text=True).stdout.strip()
+        planted = subprocess.run([self.other], capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(want, planted)
+        self.plant()
+        _, out, _, why = self.hh._run_command(handler, {})
+        self.assertIsNone(why)
+        self.assertEqual(out.strip(), want)
+
+    def test_a_name_with_a_path_is_used_exactly_as_given(self):
+        self.assertEqual(self.hh.resolve_command("./tool"), "./tool")
+        self.assertEqual(self.hh.resolve_command(self.real), self.real)
+
+    def test_an_unknown_name_fails_even_if_a_file_of_that_name_is_planted(self):
+        shutil.copy(self.other, "no-such-prog-xyz.exe")
+        self.assertIsNone(self.hh.resolve_command("no-such-prog-xyz"))
+        cfg = self.write_cfg("PreToolUse", [{"type": "command", "command": "no-such-prog-xyz"}])
+        _, _, _, why = self.hh._run_command(cfg.groups["PreToolUse"][0].handlers[0], {})
+        self.assertIn("cannot start", why)
+
+    def test_an_mcp_command_missing_from_path_is_refused_not_found_in_the_folder(self):
+        import harness_mcp as hm
+        shutil.copy(self.other, "no-such-prog-xyz.exe")
+        with self.assertRaises(hm.McpError) as ctx:
+            hm.StdioServer("x", hm.Spec(type="stdio", command="no-such-prog-xyz")).start()
+        self.assertIn("not found on PATH", str(ctx.exception))
+
+    def test_mcp_stdio_servers_are_resolved_the_same_way(self):
+        import harness_mcp as hm
+        seen = []
+
+        def fake_popen(argv, **kw):
+            seen.append(argv[0])
+            raise OSError("stop here")
+        self.plant()
+        spec = hm.Spec(type="stdio", command="whoami")
+        old = hm.subprocess.Popen
+        hm.subprocess.Popen = fake_popen
+        try:
+            with self.assertRaises(hm.McpError):
+                hm.StdioServer("x", spec).start()
+        finally:
+            hm.subprocess.Popen = old
+        self.assertNotEqual(os.path.abspath(seen[0]), os.path.abspath("whoami.exe"))
+        self.assertTrue(os.path.isabs(seen[0]), seen)
 
 
 class TestHooksInHarness(HookBase):

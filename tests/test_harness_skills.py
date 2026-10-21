@@ -215,6 +215,39 @@ class TestLoading(SkillBase):
         self.assertEqual(reg.menu(), f"- alpha: {'x' * 250}\n- beta: Does beta")
         self.assertEqual(reg.warnings, [])
 
+    def test_a_menu_that_exactly_fits_is_not_shortened(self):
+        """Found by the 小o re-review: the size estimate counted a newline after the last
+        line, so a menu that fit to the character was still cut or lost a skill."""
+        self.mk("a", "x" * 41)
+        exact = len("- a: " + "x" * 41)
+        old = self.hs.MAX_MENU
+        self.hs.MAX_MENU = exact
+        try:
+            reg = self.load()
+            self.hs.MAX_MENU = len("- b: x")
+            self.mk("b", "x", root="b")
+            reg_one = self.load("b")
+        finally:
+            self.hs.MAX_MENU = old
+        self.assertEqual(reg.skills["a"].description, "x" * 41)
+        self.assertEqual(len(reg.menu()), exact)
+        self.assertEqual(reg.warnings, [])
+        self.assertEqual(list(reg_one.skills), ["b"])
+
+    def test_the_menu_never_exceeds_the_budget_at_any_budget(self):
+        """The size estimate and menu() must agree to the character, in both directions:
+        too high wastes room, too low breaks the cap."""
+        for i in range(6):
+            self.mk(f"k{i}", "d" * (60 + 17 * i))
+        old = self.hs.MAX_MENU
+        try:
+            for budget in range(40, 700, 7):
+                self.hs.MAX_MENU = budget
+                menu = self.load().menu()
+                self.assertLessEqual(len(menu), budget, budget)
+        finally:
+            self.hs.MAX_MENU = old
+
     def test_a_description_already_short_is_not_padded_or_cut_when_others_shrink(self):
         for i in range(40):
             self.mk(f"w{i:02d}", "z" * 290)
