@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 219 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 223 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -196,19 +196,19 @@ skills/
 - skill 名稱只用來查表，**絕不當成路徑**（`../x`、絕對路徑都讀不到檔案）。
 - `skill` 工具**只給主 agent**，子 agent 看不到，硬喊也擋；它是唯讀本機檔案，所以不問人，但 Hook 照常作用（可以否決）。
 
-**限制數字**（我訂的，不是規格給的）：最多 64 個 skill、描述 300 字元、選單總長 8,000 字元、單一 skill 全文 20,000 字元（超過截斷並附完整檔案路徑）。
+**限制數字**（我訂的，不是規格給的）：最多 64 個 skill、描述 300 字元、選單總長 8,000 字元、單一 skill 全文 20,000 字元（超過截斷並附完整檔案路徑）。選單超過預算時**不丟 skill**：所有描述按同一比例縮短（每個最短保留 40 字元，以 `…` 結尾，本來就更短的不動），並警告一次；只有連最短描述都放不下時才從字母順序的尾端丟，並警告。
 
 **用你的真實資料夾實測**（作者的 Claude Code skill 資料夾，2026-10-21）：
 
 | 項目 | 結果 |
 |---|---|
 | 有 `SKILL.md` | 50 個（描述寫法：折疊 `>` 24、單行 20、帶引號 6） |
-| 載入 | 31 個；選單 7,992／8,000 字元，**預算用完就停**，按字母順序後面的 13 個（`pp-espn`、`subagent`、`tarot`、`tutor`、`tw_stock`、`yt-content` 等）沒輪到 |
-| 符號連結逃出根目錄 | 6 個被略過（`find-skills`、`opencli-*` 五個；`recall` 與 `smart-search` 排在預算之後沒輪到） |
+| 載入 | 42 個（所有不是連結的 skill）；選單 7,982／8,000 字元，描述縮到原長的 71%（平均 174 字元，最短 60、最長 213）；縮短前的版本只載入 31 個，後面 13 個被丟掉 |
+| 符號連結逃出根目錄 | 8 個被略過（`find-skills`、`opencli-*` 五個、`recall`、`smart-search`） |
 | `name` 欄位與資料夾名不同 | 9 個（以資料夾名稱為準並警告） |
-| 平均描述長度 | 240 字元（14 個被截到 300） |
+| 平均描述長度（縮短前） | 240 字元（14 個被截到 300） |
 
-結論：我訂的預算放不下這個資料夾，**而且超過預算時是（全域）按字母順序丟掉後面的**，被丟掉的 skill 模型根本不知道它存在。這些 skill 是為 Claude Code 寫的（內容會叫模型用 `Skill`、`Bash`、`WebFetch` 這些這個 harness 沒有的工具），所以預設也不指向它。建議做法是自己挑幾個放進專案的 `skills/`。
+結論：我訂的預算放不下這個資料夾，所以改成等比例縮短描述；代價是描述被截短，模型挑 skill 時看到的資訊變少（縮短是否讓挑選變差，沒有測過）。這些 skill 是為 Claude Code 寫的（內容會叫模型用 `Skill`、`Bash`、`WebFetch` 這些這個 harness 沒有的工具），所以預設也不指向它。建議做法仍是自己挑幾個放進專案的 `skills/`。
 
 **驗證**：`tests/test_harness_skills.py` 離線 33 項（解析器、載入、限制、符號連結、工具、接線、保護、斜線指令、真實子行程端對端）；live 2 項（真實 vLLM 模型載入含暗號的 skill 並回答；對真實資料夾載入，需設 `HARNESS_SKILLS_LIVE_DIR`）。
 
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-219 項 = 離線 196 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+223 項 = 離線 200 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。

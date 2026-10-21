@@ -188,6 +188,57 @@ class TestLoading(SkillBase):
         self.assertLessEqual(len(reg.menu()), self.hs.MAX_MENU)
         self.assertTrue(any("menu" in w for w in reg.warnings), reg.warnings)
 
+    def test_an_over_budget_menu_shortens_descriptions_instead_of_hiding_skills(self):
+        """A skill dropped from the menu does not exist for the model; a skill with a
+        shorter description still can be called, and its body is loaded in full. So over
+        budget, every skill stays and the descriptions shrink in proportion."""
+        for i in range(50):
+            self.mk(f"s{i:02d}", ("L" if i % 2 else "S") * (280 if i % 2 else 140))
+        reg = self.load()
+        self.assertEqual(len(reg.skills), 50)
+        self.assertLessEqual(len(reg.menu()), self.hs.MAX_MENU)
+        self.assertGreater(len(reg.menu()), self.hs.MAX_MENU - 150)     # not shrunk needlessly
+        longs = [len(s.description) for s in reg.skills.values() if s.description[0] == "L"]
+        shorts = [len(s.description) for s in reg.skills.values() if s.description[0] == "S"]
+        self.assertTrue(all(d.endswith("…") for d in
+                            (s.description for s in reg.skills.values())))
+        self.assertGreater(min(longs), max(shorts))                     # order is kept
+        self.assertAlmostEqual(sum(longs) / sum(shorts), 2.0, delta=0.15)   # in proportion
+        self.assertTrue(any("shortened" in w and "budget" in w for w in reg.warnings),
+                        reg.warnings)
+
+    def test_a_menu_that_fits_is_left_exactly_as_written(self):
+        """Shortening is only for the over-budget case; a normal folder must not change."""
+        self.mk("alpha", "x" * 250)
+        self.mk("beta", "Does beta")
+        reg = self.load()
+        self.assertEqual(reg.menu(), f"- alpha: {'x' * 250}\n- beta: Does beta")
+        self.assertEqual(reg.warnings, [])
+
+    def test_a_description_already_short_is_not_padded_or_cut_when_others_shrink(self):
+        for i in range(40):
+            self.mk(f"w{i:02d}", "z" * 290)
+        self.mk("aaa", "tiny")
+        reg = self.load()
+        self.assertEqual(reg.skills["aaa"].description, "tiny")
+        self.assertLessEqual(len(reg.menu()), self.hs.MAX_MENU)
+
+    def test_when_even_minimum_descriptions_do_not_fit_the_last_skills_are_dropped(self):
+        for i in range(30):
+            self.mk(f"s{i:02d}", "d" * 200)
+        old = self.hs.MAX_MENU
+        self.hs.MAX_MENU = 600
+        try:
+            reg = self.load()
+        finally:
+            self.hs.MAX_MENU = old
+        self.assertLessEqual(len(reg.menu()), 600)
+        names = list(reg.skills)
+        self.assertEqual(names, sorted(names))
+        self.assertEqual(names[0], "s00")                                # the first stay
+        self.assertLess(len(names), 30)
+        self.assertTrue(any("ignored" in w for w in reg.warnings), reg.warnings)
+
     def test_control_characters_in_a_description_are_removed(self):
         self.mk("ctl", "ok\x07\x1b[31m red")
         self.assertNotIn("\x07", self.load().skills["ctl"].description)

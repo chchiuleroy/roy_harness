@@ -25,6 +25,7 @@ import harness_mcp
 
 MAX_SKILLS = 64             # my limits, not a spec's: the menu rides on every request
 MAX_DESCRIPTION = 300
+MIN_DESCRIPTION = 40         # over budget, descriptions shrink down to this, no further
 MAX_MENU = 8_000
 MAX_BODY = 20_000
 MAX_FILE = 1_000_000        # bytes read from one SKILL.md
@@ -250,20 +251,52 @@ def load_all(dirs=None):
                                     f"was already loaded from {found[name].folder}")
                 continue
             found[name] = Skill(name, description, folder, md)
-    used, names = 0, sorted(found)
-    for index, name in enumerate(names):
-        if len(reg.skills) >= MAX_SKILLS:
-            reg.warnings.append(f"stopped at the limit of {MAX_SKILLS} skills; "
-                                f"{len(names) - index} more ignored")
-            break
-        line = len(f"- {name}: {found[name].description}") + 1
-        if used + line > MAX_MENU:
-            reg.warnings.append(f"stopped: the skill menu budget of {MAX_MENU} characters is "
-                                f"used up; {len(names) - index} more ignored")
-            break
-        used += line
-        reg.skills[name] = found[name]
+    names = sorted(found)
+    if len(names) > MAX_SKILLS:
+        reg.warnings.append(f"stopped at the limit of {MAX_SKILLS} skills; "
+                            f"{len(names) - MAX_SKILLS} more ignored")
+        names = names[:MAX_SKILLS]
+    kept, percent = _fit_menu({n: found[n] for n in names})
+    if len(kept) < len(names):
+        reg.warnings.append(f"stopped: the skill menu budget of {MAX_MENU} characters cannot "
+                            f"hold even shortened descriptions; {len(names) - len(kept)} "
+                            f"more ignored")
+    if percent < 1000:
+        reg.warnings.append(f"the skill menu budget of {MAX_MENU} characters is exceeded: "
+                            f"descriptions longer than {MIN_DESCRIPTION} characters were "
+                            f"shortened to {percent / 10:g}% of their length (the skill tool "
+                            f"still loads the full instructions)")
+    reg.skills = kept
     return reg
+
+
+def _shorten(text, ratio_permille):
+    """Cut a description to ratio/1000 of its length, never below MIN_DESCRIPTION, and
+    never touching one that is already that short."""
+    if len(text) <= MIN_DESCRIPTION:
+        return text
+    size = max(MIN_DESCRIPTION, len(text) * ratio_permille // 1000)
+    return text if size >= len(text) else text[:size - 1].rstrip() + "…"
+
+
+def _fit_menu(found):
+    """-> ({name: Skill} that fit MAX_MENU, ratio in per-mille used). Over budget, the
+    descriptions shrink in proportion (the largest ratio that fits); only when even the
+    minimum descriptions overflow are skills dropped, from the end of the alphabet."""
+    names = sorted(found)
+
+    def size(chosen, ratio):
+        return sum(len(f"- {n}: ") + len(_shorten(found[n].description, ratio)) + 1
+                   for n in chosen)
+
+    while True:
+        ratio = next((r for r in range(1000, -1, -1) if size(names, r) <= MAX_MENU), None)
+        if ratio is not None or not names:
+            break
+        names = names[:-1]
+    ratio = 1000 if ratio is None else ratio
+    return {n: dataclasses.replace(found[n], description=_shorten(found[n].description, ratio))
+            for n in names}, ratio
 
 
 # ------------------------------------------------- what the model must not edit
