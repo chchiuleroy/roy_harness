@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 211 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（136 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 219 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -191,8 +191,8 @@ skills/
 
 **安全**（skill 全文是模型會照做的指令，所以信任等級同 `AGENT.md` 與 hooks 檔）：
 - **只讀本機資料夾**。
-- **模型不能建立或修改 skill**：skills 資料夾底下所有檔案（含尚不存在的新檔）受保護，比對真實路徑（同 Hook 的規則）；`run_command` 提到 `SKILL.md` 或 `skills/` 也擋（整詞比對，`graph.py` 式的誤擋與 `echo skills are fun` 都不會）。否則模型可以改寫自己的行為準則並跨 session 保留。
-- **符號連結政策（SymJack）**：skill 資料夾的真實路徑必須落在**某個已設定的根目錄**之內；指到其他地方的符號連結或 junction 略過並警告。載入全文時會**再檢查一次**（啟動後被換成連結也拒絕）。
+- **模型不能建立或修改 skill**：skills 資料夾底下所有檔案（含尚不存在的新檔）受保護，比對真實路徑（同 Hook 的規則），**並且跟著資料夾的身分走**：審查時重現過 `ren skills moved`、在 `moved` 底下寫檔、再 `ren moved skills` 三步全過閘門（路徑前綴比對在資料夾改名後就失效），現在改名後的資料夾仍是受保護的。`run_command` 的字串只要把 `SKILL.md` 或 skills 資料夾名稱當成**整個詞**提到就擋（所以 `ren skills x`、`rmdir skills` 擋得到）。**取捨：連 `echo skills are fun` 都會被擋**，`echo skills-evil`、`myskills`、`skills.bak` 不會；資料夾若叫 `src` 這種常見詞，任何提到它的 shell 指令都會被擋，這是你設定資料夾名稱時要自己承擔的。否則模型可以改寫自己的行為準則並跨 session 保留。
+- **符號連結政策（SymJack）**：skill 資料夾**和 `SKILL.md` 檔案本身**的真實路徑都必須落在**某個已設定的根目錄**之內；指到其他地方的符號連結或 junction 略過並警告（審查發現原本只檢查資料夾，`SKILL.md` 是連結就能讀到根目錄外）。載入全文時會**再檢查一次**，而且**開啟的是檢查過的真實路徑**（不是連結），讀完再確認一次沒被換掉（啟動後被換成連結也拒絕）。這不是原子操作：同時在改資料夾樹的行程不在防禦範圍內。
 - skill 名稱只用來查表，**絕不當成路徑**（`../x`、絕對路徑都讀不到檔案）。
 - `skill` 工具**只給主 agent**，子 agent 看不到，硬喊也擋；它是唯讀本機檔案，所以不問人，但 Hook 照常作用（可以否決）。
 
@@ -208,9 +208,9 @@ skills/
 | `name` 欄位與資料夾名不同 | 9 個（以資料夾名稱為準並警告） |
 | 平均描述長度 | 240 字元（14 個被截到 300） |
 
-結論：我訂的預算放不下這個資料夾，**而且超過預算時是按字母順序丟掉後面的**，被丟掉的 skill 模型根本不知道它存在。這些 skill 是為 Claude Code 寫的（內容會叫模型用 `Skill`、`Bash`、`WebFetch` 這些這個 harness 沒有的工具），所以預設也不指向它。建議做法是自己挑幾個放進專案的 `skills/`。
+結論：我訂的預算放不下這個資料夾，**而且超過預算時是（全域）按字母順序丟掉後面的**，被丟掉的 skill 模型根本不知道它存在。這些 skill 是為 Claude Code 寫的（內容會叫模型用 `Skill`、`Bash`、`WebFetch` 這些這個 harness 沒有的工具），所以預設也不指向它。建議做法是自己挑幾個放進專案的 `skills/`。
 
-**驗證**：`tests/test_harness_skills.py` 離線 25 項（解析器、載入、限制、符號連結、工具、接線、保護、斜線指令、真實子行程端對端）；live 2 項（真實 vLLM 模型載入含暗號的 skill 並回答；對真實資料夾載入，需設 `HARNESS_SKILLS_LIVE_DIR`）。
+**驗證**：`tests/test_harness_skills.py` 離線 33 項（解析器、載入、限制、符號連結、工具、接線、保護、斜線指令、真實子行程端對端）；live 2 項（真實 vLLM 模型載入含暗號的 skill 並回答；對真實資料夾載入，需設 `HARNESS_SKILLS_LIVE_DIR`）。
 
 ## 對作者所用 vLLM 伺服器（Qwen/Qwen3.6-35B-A3B）的實測發現（2026-10-21）
 
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-211 項 = 離線 188 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+219 項 = 離線 196 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -259,6 +259,14 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 審查者的 `not_checked`：沙盒唯讀，沒有跑完整測試；沒有實際建立 symlink、NTFS 備用資料流或短檔名；沒有製造超大回應驗證記憶體；沒有在非 Windows 平台驗證 `kill_tree`。
 - **複審（同日，小c 把上面的修復送回同一位審查者）**：3 項 `confirmed`、3 項 `rejected`，核對後全部處理並先寫失敗測試。①**high**：指向「尚不存在的腳本」時，`later.py.`、`later.py `、`later.py::$DATA` 都能繞過保護，同意 high，實測 Windows 真的把它們對應到 `later.py` → 比對前摺疊這些寫法，備用資料流語法一律拒絕。②low：`h.py` 的子字串比對會誤擋 `graph.py`，`-m policy` 的 `policy` 被當成檔案 → 改整個檔名比對；不像檔案的參數（沒副檔名、不是檔案、沒路徑分隔）不保護。③low：safe 模式寫檔提示仍顯示 always 卻不記憶（原本程式就有）→ 不再提供。審查者 `rejected`：自架 provider 的修法與我把嚴重度調為 medium 站得住腳；嚴格驗證沒有剩餘洞；去掉 `^` 與引號的正規化沒有引入新繞法。審查者的 `not_checked`：沙盒唯讀未跑完整測試；短檔名、junction、符號連結沒有可用的現成目標；UNC 管理分享因權限未能驗證。這批修復**沒有再送第三輪**。
 
+**Skill 的第三方審查（2026-10-21，Codex 唯讀靜態審查，範圍 `c32b217..76030e6`）**：5 項 `confirmed`、2 項 `rejected`；逐條本機重現後處理，並先寫失敗測試。
+- **high**：模型可以把 skills 資料夾改名（`ren skills moved`），在新名稱底下改寫 `SKILL.md`，再改回來，三步都過閘門；保護是路徑前綴比對，資料夾改名後就不在那個路徑了。我自己重現後同意 → 保護改成同時跟著資料夾的身分（裝置＋檔案索引），shell 比對改成整詞比對根目錄名稱（見上，有誤擋的取捨）。
+- **medium**：SymJack 檢查只看資料夾，沒看 `SKILL.md` 本身 → 兩者都檢查（掃描與載入時）。
+- **medium**：載入時「檢查資料夾、再用路徑開檔」有競態視窗 → 開檢查過的真實路徑，讀完再確認一次；仍不是原子操作（見上）。
+- **medium**：磁碟機根目錄當作 skills 根目錄時，`_inside` 因為 `C:\` 本來就以分隔符結尾又多加一個而判斷錯誤 → 修正。
+- **low**：多個根目錄時預算不是全域字母順序，而是根目錄設定順序，且達到上限就直接返回，後面的根目錄可能完全沒被掃描 → 先全部驗證，再依全域字母順序套用上限，警告會說還有幾個被忽略。
+- 審查者 `rejected`：一般根目錄沒有 `skills`／`skills-evil` 的前綴碰撞；描述的換行與 U+202E 等控制字元無法用來偽造選單條目（換行折成空白、`Cf` 類字元被移除）。審查者的 `not_checked`：沙盒唯讀，沒有實際建立或改名目錄、沒有跑子行程端對端與 live。這批修復**沒有再送複審**。
+
 **MCP 的第三方審查（2026-10-21，Codex 唯讀靜態審查，範圍 `16c0188..e7d75bf`）**：3 項 `confirmed`、其餘檢查未發現缺陷；逐條本機重現後處理，並先寫失敗測試。
 - **high**：`run_command` 可用尾端的點繞過腳本保護。`mentions_any` 的右邊界把句點當成名稱的一部分，`echo x > h.py.` 不會被認成 `h.py`，gate 直接放行；而 Windows 會把 `h.py.` 當成 `h.py`。我自己重現（`mentions_any` 回 `False`、`gate` 回 `None`）→ 句點結束名稱，除非後面緊接名稱字元（`h.py.bak` 是另一個檔案）。上一輪我只修了 `write_file` 的路徑比對，漏了 shell 字串這條。
 - **medium**：HTTP 世代偵測。錯誤本文只讀前 2,000 位元組就解析，較長的合法新版錯誤會解析失敗，被當成非新版而送出 `initialize`，違反「已知新版錯誤絕不退回握手」；另外新版錯誤碼出現在非 400 的狀態碼下也被接受。重現後 → 完整讀取（有上限）、只認 400。
@@ -284,7 +292,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 回應大小：HTTP hook 的回應上限 1MB；但**模型回應與 `/cache` 的回應沒有大小上限**（既有行為，惡意端點可讓 harness 吃光記憶體），command hook 的輸出也是讀完才截斷（腳本是你自己的、有逾時）。
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
-- Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；**尚未送第三方審查**。
+- Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；第三方審查一次（見下）。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 

@@ -28,6 +28,7 @@ MAX_DESCRIPTION = 300
 MAX_MENU = 8_000
 MAX_BODY = 20_000
 MAX_FILE = 1_000_000        # bytes read from one SKILL.md
+MAX_SCAN = 1_000            # folders examined in all roots together
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):[ \t]*(.*)$")
 BLOCK_RE = re.compile(r"^[>|][+-]?\d*$")
@@ -117,7 +118,19 @@ class Skill:
 
 
 def _inside(real, roots):
-    return any(real == r or real.startswith(r + os.sep) for r in roots)
+    # a drive root ("C:\") already ends with a separator; adding another made every child
+    # of it look outside (found by the review)
+    return any(real == r or real.startswith(r if r.endswith(os.sep) else r + os.sep)
+               for r in roots)
+
+
+def _identity(path):
+    """(device, file index) of an existing path: it survives a rename, a path does not."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
 
 
 def _read_text(path):
@@ -140,6 +153,7 @@ class Registry:
         self.skills = {}            # name -> Skill (sorted at the end of load_all)
         self.warnings = []
         self.roots = []             # canonical real paths of every configured folder
+        self.root_ids = set()       # identities of those that existed at start-up
 
     def is_empty(self):
         return not self.skills
@@ -159,12 +173,16 @@ class Registry:
         if skill is None:
             return (f"ERROR: unknown skill {name!r}; available: "
                     f"{', '.join(sorted(self.skills)) or '(none)'}")
-        if not _inside(harness_hooks.canonical(skill.folder), self.roots):
+        folder_real = harness_hooks.canonical(skill.folder)
+        file_real = harness_hooks.canonical(skill.path)
+        if not (_inside(folder_real, self.roots) and _inside(file_real, self.roots)):
             return (f"ERROR: skill {skill.name} now resolves outside the skills folders "
-                    f"(its folder was replaced by a link); refusing to load it")
-        text, why = _read_text(skill.path)
+                    f"(its folder or SKILL.md was replaced by a link); refusing to load it")
+        text, why = _read_text(file_real)            # open what was checked, not the link
         if text is None:
             return f"ERROR: skill {skill.name}: {why}"
+        if harness_hooks.canonical(skill.path) != file_real:   # swapped while reading
+            return f"ERROR: skill {skill.name} changed while it was being read; refusing it"
         body = parse_frontmatter(text)[1].strip("\n")
         if len(body) > MAX_BODY:
             body = (body[:MAX_BODY] + f"\n... [truncated {len(body) - MAX_BODY} more chars; "
@@ -177,13 +195,16 @@ EMPTY = Registry()
 
 def load_all(dirs=None):
     """Scan the skills folders (default: HARNESS_SKILLS_DIRS, else ./skills). One broken
-    skill is skipped with a warning; it never stops the others."""
+    skill is skipped with a warning; it never stops the others. Everything is validated
+    first; the count and menu limits are then applied in global alphabetical order, so
+    the order of the folders does not decide which skills survive."""
     if dirs is None:
         env = os.environ.get("HARNESS_SKILLS_DIRS")
         dirs = [d for d in env.split(os.pathsep) if d.strip()] if env else ["skills"]
     reg = Registry()
     reg.roots = [harness_hooks.canonical(d) for d in dirs]
-    used = 0
+    reg.root_ids = {i for i in (_identity(d) for d in dirs) if i}
+    found, scanned = {}, 0
     for root in dirs:
         if not os.path.isdir(root):
             continue
@@ -192,18 +213,26 @@ def load_all(dirs=None):
             md = os.path.join(folder, "SKILL.md")
             if not os.path.isdir(folder) or not os.path.isfile(md):
                 continue
+            scanned += 1
+            if scanned > MAX_SCAN:
+                reg.warnings.append(f"stopped scanning after {MAX_SCAN} folders")
+                break
             if not _inside(harness_hooks.canonical(folder), reg.roots):
                 reg.warnings.append(
                     f"skipped {name}: it is a link that leaves the skills folders (it points "
                     f"to {os.path.realpath(folder)}); add that folder to HARNESS_SKILLS_DIRS "
                     f"to use it")
                 continue
+            if not _inside(harness_hooks.canonical(md), reg.roots):
+                reg.warnings.append(f"skipped {name}: its SKILL.md is a link that leaves the "
+                                    f"skills folders (it points to {os.path.realpath(md)})")
+                continue
             if not NAME_RE.match(name):
                 reg.warnings.append(f"skipped {name!r}: the folder name must be 1-64 of "
                                     f"letters, digits, '.', '_' or '-', not starting with one "
                                     f"of the last three")
                 continue
-            text, why = _read_text(md)
+            text, why = _read_text(harness_hooks.canonical(md))
             if text is None:
                 reg.warnings.append(f"skipped {name}: {why}")
                 continue
@@ -216,43 +245,55 @@ def load_all(dirs=None):
             if meta.get("name", "").strip() not in ("", name):
                 reg.warnings.append(f"{name}: its name field says {meta['name'].strip()!r}; "
                                     f"the folder name {name!r} is used")
-            if name in reg.skills:
+            if name in found:
                 reg.warnings.append(f"skipped {name} from {root}: a skill with that name "
-                                    f"was already loaded from {reg.skills[name].folder}")
+                                    f"was already loaded from {found[name].folder}")
                 continue
-            if len(reg.skills) >= MAX_SKILLS:
-                reg.warnings.append(f"stopped at the limit of {MAX_SKILLS} skills; the rest "
-                                    f"are ignored")
-                return _finish(reg)
-            line = len(f"- {name}: {description}") + 1
-            if used + line > MAX_MENU:
-                reg.warnings.append(f"stopped: the skill menu budget of {MAX_MENU} characters "
-                                    f"is used up; the rest are ignored")
-                return _finish(reg)
-            used += line
-            reg.skills[name] = Skill(name, description, folder, md)
-    return _finish(reg)
-
-
-def _finish(reg):
-    reg.skills = dict(sorted(reg.skills.items()))
+            found[name] = Skill(name, description, folder, md)
+    used, names = 0, sorted(found)
+    for index, name in enumerate(names):
+        if len(reg.skills) >= MAX_SKILLS:
+            reg.warnings.append(f"stopped at the limit of {MAX_SKILLS} skills; "
+                                f"{len(names) - index} more ignored")
+            break
+        line = len(f"- {name}: {found[name].description}") + 1
+        if used + line > MAX_MENU:
+            reg.warnings.append(f"stopped: the skill menu budget of {MAX_MENU} characters is "
+                                f"used up; {len(names) - index} more ignored")
+            break
+        used += line
+        reg.skills[name] = found[name]
     return reg
 
 
 # ------------------------------------------------- what the model must not edit
 def is_protected(path, reg):
-    """True for anything inside a configured skills folder, existing or not yet."""
-    return _inside(harness_hooks.canonical(path), reg.roots)
+    """True for anything inside a configured skills folder, existing or not yet. Also
+    true under the folder's NEW name if it was renamed: a path prefix alone let
+    `ren skills moved` + a write under `moved` through (found by the review)."""
+    c = harness_hooks.canonical(path)
+    if _inside(c, reg.roots):
+        return True
+    if not reg.root_ids:
+        return False
+    p = c
+    while True:
+        if _identity(p) in reg.root_ids:
+            return True
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
 
 
 def mentions_protected(text, reg):
     """Shell strings (already lower-cased, ^ and quotes removed) that name SKILL.md or a
-    skills folder followed by a path separator (whole-name match; best effort)."""
+    skills folder, as a whole word anywhere (so `ren skills x`, `rmdir skills` and
+    `mklink /J skills ..` are caught, and `echo skills-evil` or `myskills` are not).
+    Best effort: a shell can still build the name from pieces."""
     if not reg.roots:
         return False
-    if harness_hooks.mentions_any(text, {"skill.md"}):
-        return True
     names = {os.path.basename(r.rstrip("/" + chr(92))).lower() for r in reg.roots}
     names.discard("")
-    pattern = r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")[\\/]"
-    return re.search(pattern, text) is not None
+    names.add("skill.md")
+    return harness_hooks.mentions_any(text, names)

@@ -246,6 +246,114 @@ class TestSkillTool(SkillBase):
         self.assertIn("truncated", out)
         self.assertIn("SKILL.md", out)
 
+    def test_a_skill_md_that_leaves_the_roots_is_refused_even_when_its_folder_is_inside(self):
+        """Found by the 小o review: only the folder's location was checked, so a SKILL.md
+        that is itself a link to a file elsewhere was read."""
+        self.mk("alpha")
+        with open("secret.md", "w", encoding="utf-8") as f:
+            f.write("---\nname: x\ndescription: d\n---\nOUTSIDE-CONTENT")
+        reg = self.load("skills")
+        reg.skills["x"] = self.hs.Skill("x", "d", os.path.join("skills", "alpha"),
+                                        os.path.abspath("secret.md"))
+        out = reg.load("x")
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertNotIn("OUTSIDE-CONTENT", out)
+        os.remove(os.path.join("skills", "alpha", "SKILL.md"))      # and at scan time
+        try:
+            os.symlink(os.path.abspath("secret.md"), os.path.join("skills", "alpha", "SKILL.md"))
+        except OSError:
+            return                                                  # no symlink privilege here
+        self.assertEqual(list(self.load("skills").skills), [])
+
+    def test_a_skill_md_link_is_caught_at_scan_time_without_needing_link_privileges(self):
+        """Creating a file symlink needs privileges that are not always there, so the
+        scan check is exercised by making the real path of SKILL.md look external."""
+        self.mk("alpha")
+        self.mk("beta")
+        real = self.hs.harness_hooks.canonical
+        outside = os.path.abspath("outside.md")
+
+        def fake(path, *a, **k):
+            if os.path.basename(str(path)).lower() == "skill.md" and "alpha" in str(path):
+                return real(outside)
+            return real(path, *a, **k)
+        self.hs.harness_hooks.canonical = fake
+        try:
+            reg = self.load("skills")
+        finally:
+            self.hs.harness_hooks.canonical = real
+        self.assertEqual(list(reg.skills), ["beta"])
+        self.assertTrue(any("alpha" in w and "SKILL.md" in w for w in reg.warnings), reg.warnings)
+
+    def test_a_swap_while_the_file_is_being_read_is_noticed(self):
+        """Resolve, read, resolve again: if the answer changed, the text is thrown away."""
+        self.mk("alpha", body="ALPHA-BODY")
+        reg = self.load("skills")
+        real = self.hs.harness_hooks.canonical
+        calls = []
+
+        def fake(path, *a, **k):
+            if os.path.basename(str(path)).lower() == "skill.md":
+                calls.append(path)
+                if len(calls) >= 2:                      # the check after the read
+                    return real(os.path.join("somewhere", "else", "SKILL.md"))
+            return real(path, *a, **k)
+        self.hs.harness_hooks.canonical = fake
+        try:
+            out = reg.load("alpha")
+        finally:
+            self.hs.harness_hooks.canonical = real
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn("while it was being read", out)
+        self.assertNotIn("ALPHA-BODY", out)
+
+    def test_the_file_that_is_opened_is_the_one_that_was_checked(self):
+        """The check resolves the location; opening the original (link) path afterwards
+        leaves a window to swap the link in between. Opening the resolved path closes
+        most of it (not atomic: a concurrent writer on the folder tree is out of scope)."""
+        self.mk("real", root="store")
+        os.makedirs("skills")
+        if not link_dir("skills/alias", "store/real"):
+            self.skipTest("cannot create a directory link here")
+        reg = self.load("skills", "store")
+        seen = []
+        original = self.hs._read_text
+        self.hs._read_text = lambda path: (seen.append(path), original(path))[1]
+        try:
+            reg.load("alias")
+        finally:
+            self.hs._read_text = original
+        self.assertTrue(seen)
+        self.assertNotIn(os.sep + "alias" + os.sep, seen[-1].lower())
+        self.assertIn(os.sep + "store" + os.sep, seen[-1].lower())
+
+    def test_a_drive_root_works_as_a_root_in_the_containment_check(self):
+        """Found by the 小o review: 'C:\\' already ends with a separator, and adding another
+        made every child of a drive root look outside it."""
+        import harness_hooks as hh
+        drive = os.path.splitdrive(os.getcwd())[0] + os.sep
+        child = hh.canonical(os.path.join(drive, "x", "y"))
+        self.assertTrue(self.hs._inside(child, [hh.canonical(drive)]))
+        self.assertFalse(self.hs._inside(hh.canonical(os.path.join(drive, "x")),
+                                         [hh.canonical(os.path.join(drive, "x", "y"))]))
+
+    def test_the_budget_is_applied_in_global_alphabetical_order_across_roots(self):
+        """Found by the 小o review: roots were scanned in turn and loading stopped at the
+        limit, so an earlier root's 'z' skills could push a later root's 'a' out and the
+        later root might not be scanned at all."""
+        for n in ("z1", "z2", "z3"):
+            self.mk(n, root="A")
+        self.mk("a1", root="B")
+        old = self.hs.MAX_SKILLS
+        self.hs.MAX_SKILLS = 2
+        try:
+            reg = self.load("A", "B")
+        finally:
+            self.hs.MAX_SKILLS = old
+        self.assertEqual(list(reg.skills), ["a1", "z1"])
+        self.assertTrue(any("limit" in w for w in reg.warnings))
+        self.assertTrue(any("2" in w and "ignored" in w for w in reg.warnings), reg.warnings)
+
     def test_a_skill_swapped_for_a_link_after_startup_is_refused(self):
         """The body is read at call time, so the location is checked again then."""
         self.mk("alpha")
@@ -337,8 +445,33 @@ class TestSkillsInHarness(SkillBase):
         for cmd in ("echo x > skills/new/SKILL.md", r"echo x > skills\new\run.py",
                     "echo x>SKILL.md", "echo x > skills\\alpha\\SKILL.md."):
             self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
-        for cmd in ("echo skills are fun", r"echo myskills\x", "echo SKILL.md.bak"):
+        for cmd in ("ren skills moved", "move skills elsewhere", "rmdir /s /q skills",
+                    "echo x > skills.", "mklink /J skills C:\\other"):
+            self.assertIn("BLOCKED", hv.gate("run_command", {"command": cmd}) or "", cmd)
+        for cmd in ("echo skills-are-fun", r"echo myskills\x", "echo SKILL.md.bak",
+                    "echo skills.bak"):
             self.assertIsNone(hv.gate("run_command", {"command": cmd}), cmd)
+
+    def test_renaming_the_skills_folder_does_not_unprotect_what_is_inside(self):
+        """Found by the 小o review and reproduced: `ren skills moved`, write under
+        `moved`, `ren moved skills` all passed the gate, because the protection was a
+        path prefix and the folder no longer lived at that path. Protection now also
+        follows the folder's identity."""
+        self.install()
+        os.rename("skills", "moved")                 # what the shell command would do
+        for path in ("moved/alpha/SKILL.md", "moved/alpha/run.py", "moved/new/SKILL.md",
+                     "MOVED/alpha/x.py"):
+            out = hv.gate("write_file", {"path": path, "content": "EVIL"})
+            self.assertIn("protected", (out or "").lower(), path)
+        self.assertIsNone(hv.gate("write_file", {"path": "elsewhere.txt", "content": "x"}))
+        os.rename("moved", "skills")
+
+    def test_a_link_to_the_skills_folder_is_the_same_protected_folder(self):
+        self.install()
+        if not link_dir("alias", "skills"):
+            self.skipTest("cannot create a directory link here")
+        out = hv.gate("write_file", {"path": "alias/alpha/SKILL.md", "content": "EVIL"})
+        self.assertIn("protected", (out or "").lower())
 
     def test_slash_skills_lists_and_slash_skill_hands_the_body_to_the_model(self):
         self.install("alpha", "beta")
