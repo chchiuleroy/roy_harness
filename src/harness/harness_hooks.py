@@ -283,6 +283,10 @@ def _identity(path):
     return (st.st_dev, st.st_ino) if st.st_ino else None
 
 
+def _is_unc(path):
+    return os.path.splitdrive(path)[0].startswith(chr(92) * 2)
+
+
 def _inside_or_same(path, folder):
     """True when `path` is `folder` or below it, however either is spelled. By path
     (real path + case folding) and, because realpath keeps a UNC spelling as it is, also
@@ -295,14 +299,17 @@ def _inside_or_same(path, folder):
         pass
     target = _identity(folder)
     if target is None:
-        return False
-    current = path
+        return _is_unc(path)         # cannot compare: refuse the spelling that smuggles
+    current, unknown = path, False
     while True:
-        if _identity(current) == target:
+        here = _identity(current)
+        if here is None:
+            unknown = True           # a link in the chain cannot be identified
+        elif here == target:
             return True
         parent = os.path.dirname(current)
         if parent == current or not parent:
-            return False
+            return unknown and _is_unc(path)
         current = parent
 
 

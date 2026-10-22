@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -396,6 +397,54 @@ class TestCompaction(Base):
         m.insert(3, {"role": "user", "content": "<system-reminder>Background task t1 finished: exit 0</system-reminder>"})
         hv.compact(m, keep=3)
         self.assertNotIn("Background task t1", m[0]["content"].split("USER MESSAGES")[-1])
+
+    def test_user_text_merged_with_a_pending_reminder_is_still_kept(self):
+        """Found by the 小o review: the main loop sends pending reminders and the user's
+        line as ONE user message; dropping every message that starts with a reminder lost
+        exactly the user's words in a turn that began with a background notice."""
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(5)
+        m.insert(3, {"role": "user", "content":
+                     "<system-reminder>" + chr(10) + "Background task t1 finished: exit 0" + chr(10)
+                     + "</system-reminder>" + chr(10) + "密碼是 MERGED-FACT-77"})
+        m.insert(5, {"role": "user", "content":
+                     "<system-reminder>" + chr(10) + "alarm fired" + chr(10) + "</system-reminder>" + chr(10)
+                     + "(No new user message: the harness woke you because of the events above.)"})
+        hv.compact(m, keep=3)
+        listing = m[0]["content"].split("USER MESSAGES")[-1]
+        self.assertIn("MERGED-FACT-77", listing)
+        self.assertNotIn("Background task t1", listing)          # the reminder part is not copied
+        self.assertNotIn("alarm fired", listing)
+        self.assertNotIn("No new user message", listing)         # a wake-up is not something the user said
+
+    def test_repeated_compactions_keep_one_bounded_list(self):
+        """Found by the 小o review: the old list was carried with the old summary and a new
+        one added every time, so the head grew without limit."""
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(2, first="EARLIEST-FACT-001")
+        for rnd in range(12):
+            for i in range(30):
+                m += [{"role": "user", "content": f"第 {rnd} 輪第 {i} 句 " + "字" * 60},
+                      {"role": "assistant", "content": "好"}]
+            hv.compact(m, keep=4)
+        head = m[0]["content"]
+        self.assertEqual(head.count("USER MESSAGES (verbatim"), 1)
+        listing = head.split("USER MESSAGES (verbatim")[-1]
+        self.assertLessEqual(len(listing), hv.VERBATIM_BUDGET + 600)
+        self.assertIn("EARLIEST-FACT-001", listing)
+        self.assertIn("第 11 輪", listing)                        # the newest survive too
+        self.assertIn("more user messages omitted", listing)
+        omitted = int(re.search(r"\[(\d+) more user messages omitted", listing).group(1))
+        shown = sum(1 for x in listing.split(chr(10)) if x.startswith("- ") and "omitted" not in x)
+        still_typed_in_tail = sum(1 for x in m[1:] if x["role"] == "user")
+        self.assertEqual(omitted + shown, 1 + 2 + 12 * 30 - still_typed_in_tail)   # every message accounted for
+
+    def test_one_long_message_never_exceeds_the_per_message_limit(self):
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(3, first="Y" * 1000)
+        hv.compact(m, keep=2)
+        line = [x for x in m[0]["content"].split(chr(10)) if x.startswith("- Y")][0]
+        self.assertLessEqual(len(line), hv.VERBATIM_EACH + 2)
 
     def test_the_verbatim_list_is_bounded_and_keeps_both_ends(self):
         """A long session must not turn the summary into a second copy of the chat."""
@@ -1494,6 +1543,32 @@ class TestBareCommandPlanting(HookBase):
         finally:
             os.chdir(here)
         self.assertFalse(os.path.samefile(os.path.dirname(got), os.path.join(here, "tools")))
+
+    def test_a_unc_entry_is_refused_when_file_identity_cannot_be_read(self):
+        """Found by the 小o review: with no usable identity (a stat that fails, an index of
+        0) an alias could not be recognised and was treated as outside the project. A UNC
+        spelling that cannot be proven to be somewhere else is refused; a plain local
+        entry elsewhere is still accepted."""
+        b = chr(92)
+        d, r = os.path.splitdrive(os.path.abspath("."))
+        unc_here = b * 2 + "localhost" + b + d[0] + "$" + r
+        sys32 = os.path.dirname(self.real)
+        old = self.hh._identity
+        self.hh._identity = lambda path: None
+        try:
+            self.assertTrue(self.hh._inside_or_same(unc_here, os.getcwd()))
+            self.assertFalse(self.hh._inside_or_same(sys32, os.getcwd()))
+        finally:
+            self.hh._identity = old
+        # the project folder is identifiable but the UNC chain is not (access denied on the way)
+        self.hh._identity = lambda path: None if self.hh._is_unc(path) else old(path)
+        try:
+            self.assertTrue(self.hh._inside_or_same(unc_here, os.getcwd()))
+            self.assertFalse(self.hh._inside_or_same(sys32, os.getcwd()))
+            # a local entry that simply does not exist is outside; only UNC spellings fail closed
+            self.assertFalse(self.hh._inside_or_same(os.path.join(sys32, "no_such_dir_xyz"), os.getcwd()))
+        finally:
+            self.hh._identity = old
 
     def test_an_odd_pathext_does_not_make_a_valid_command_unfindable(self):
         """Found by the third 小o re-review: an empty PATHEXT, one without .EXE, or one with

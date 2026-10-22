@@ -922,14 +922,46 @@ def render_transcript(msgs):
             lines.append(f"[{role}] {_clip(content, 4000)}")
     return "\n".join(lines)
 
-def verbatim_user_messages(msgs):
-    """What the user typed in the summarised span, as it was. A model's summary is a
-    judgment call and was measured to drop short early facts (an 'FACTS: verbatim' order
-    included); the user's own words are small, so the harness keeps them itself. Harness
-    reminders are skipped. Over budget, both ends stay and the middle is cut."""
-    lines = [_clip(m["content"].strip(), VERBATIM_EACH).replace(chr(10), " ") for m in msgs
-             if m["role"] == "user" and isinstance(m.get("content"), str)
-             and m["content"].strip() and not m["content"].lstrip().startswith("<system-reminder>")]
+NL = chr(10)
+VERBATIM_MARK = "USER MESSAGES (verbatim, kept by the harness):"
+_REMINDER_BLOCK = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+_OMITTED = re.compile(r"^- \.\.\.\[(\d+) more user messages omitted\]\.\.\.$")
+
+def _user_words(content):
+    """What the person typed in one user message: the harness glues pending reminders in
+    front of the typed line, and a wake-up has no typed line at all."""
+    if not isinstance(content, str):
+        return ""
+    text = _REMINDER_BLOCK.sub("", content).strip()
+    return "" if text.startswith("(No new user message") else text
+
+def _hard_clip(text, n):
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+def split_verbatim(summary_text):
+    """A carried summary -> (the summary without its verbatim list, [list lines], omitted)."""
+    head, mark, tail = summary_text.partition(NL * 2 + VERBATIM_MARK + NL)
+    if not mark:
+        return summary_text, [], 0
+    tail = tail.split(NL + "</system-reminder>")[0]
+    lines, omitted = [], 0
+    for line in tail.split(NL):
+        m = _OMITTED.match(line)
+        if m:
+            omitted += int(m.group(1))
+        elif line.startswith("- "):
+            lines.append(line[2:])
+    return head, lines, omitted
+
+def verbatim_user_messages(msgs, earlier=(), earlier_omitted=0):
+    """What the user typed in the summarised span, as it was, merged with the list an
+    earlier compaction already kept. A model's summary is a judgment call and was measured
+    to drop short early facts (an 'FACTS: verbatim' order included); the user's own words
+    are small, so the harness keeps them itself. Total size is bounded across any number of
+    compactions: over budget, the oldest and the newest stay and the middle is cut."""
+    lines = list(earlier) + [_hard_clip(w.replace(NL, " "), VERBATIM_EACH)
+                             for w in (_user_words(m.get("content")) for m in msgs
+                                       if m["role"] == "user") if w]
     head, tail, used, lo, hi = [], [], 0, 0, len(lines) - 1
     while lo <= hi:
         from_head = len(head) <= len(tail)               # alternate: oldest, newest, ...
@@ -943,10 +975,11 @@ def verbatim_user_messages(msgs):
         else:
             tail.insert(0, line)
             hi -= 1
-    omitted = max(0, hi - lo + 1)
+    omitted = earlier_omitted + max(0, hi - lo + 1)
+    out = ["- " + x for x in head]
     if omitted:
-        head.append(f"...[{omitted} more user messages omitted]...")
-    return chr(10).join("- " + x for x in head + tail)
+        out.append(f"- ...[{omitted} more user messages omitted]...")
+    return NL.join(out + ["- " + x for x in tail])
 
 def compact(messages, keep=None):
     """Replace old messages with a summary; keep the last `keep` verbatim.
@@ -959,10 +992,11 @@ def compact(messages, keep=None):
     # An earlier summary is carried forward VERBATIM, never re-summarized: asking
     # a model to summarize its own summary silently drops facts (seen live).
     # Only the messages after it are summarized, then appended.
-    prior = ""
+    prior, earlier, earlier_omitted = "", [], 0
     if (messages and messages[0]["role"] == "user"
             and SUMMARY_MARK in (messages[0].get("content") or "")):
         prior = messages[0]["content"].replace("\n</system-reminder>", "")
+        prior, earlier, earlier_omitted = split_verbatim(prior)
     start = 1 if prior else 0
     if cut - start < 2:
         return False
@@ -977,10 +1011,9 @@ def compact(messages, keep=None):
         return False
     if not summary:
         return False
-    said = verbatim_user_messages(messages[start:cut])
+    said = verbatim_user_messages(messages[start:cut], earlier, earlier_omitted)
     if said:
-        summary += (chr(10) * 2 + "USER MESSAGES (verbatim, kept by the harness):"
-                    + chr(10) + said)
+        summary += NL * 2 + VERBATIM_MARK + NL + said
     body = (prior + "\n--- later ---\n" + summary) if prior else (
         "<system-reminder>\n" + SUMMARY_MARK + " Summary of everything "
         "before this point:\n" + summary)
