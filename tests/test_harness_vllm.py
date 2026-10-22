@@ -986,6 +986,38 @@ class TestCrashRecovery(Base):
         self.assertIn("INTERRUPTED", tools[1]["content"])
         self.assertEqual(tools[2]["content"], "result of plain")                       # the real one
 
+    def test_ctrl_c_keeps_a_finished_result_that_was_waiting_for_an_earlier_call(self):
+        """Found by the 小o review: the checkpoint wrote the waiting result, but the exit-time
+        save wrote only `messages`, where it was not, and repair then labelled it INTERRUPTED."""
+        import io as _io
+        saved = (sys.argv, sys.stdin, hv.call_llm, hv.execute_tool)
+        calls = [tool_call("c0", "agent", task="ok"), tool_call("c1", "agent", task="stopped"),
+                 tool_call("c2", command="plain")]
+        reply = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                              "finish_reason": "tool_calls"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+
+        def fake_exec(name, args, depth=0):
+            if args.get("task") == "stopped":
+                time.sleep(0.2)                                   # the plain call has finished by now
+                raise KeyboardInterrupt
+            return "result of " + str(args.get("task") or args.get("command"))
+        hv.execute_tool = fake_exec
+        sys.argv, sys.stdin = ["harness", "session.json"], _io.StringIO("go" + chr(10))
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                with self.assertRaises(KeyboardInterrupt):
+                    hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.call_llm, hv.execute_tool = saved
+        stored = self.on_disk()
+        self.assertTrue(self.valid(stored), stored)
+        tools = [m for m in stored if m["role"] == "tool"]
+        self.assertEqual([m["tool_call_id"] for m in tools], ["c0", "c1", "c2"])
+        self.assertEqual(tools[0]["content"], "result of ok")
+        self.assertIn("INTERRUPTED", tools[1]["content"])
+        self.assertEqual(tools[2]["content"], "result of plain")          # the real result, not INTERRUPTED
+
     def test_repair_puts_the_results_back_in_call_order(self):
         msgs = [{"role": "user", "content": "x"},
                 {"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b"), tool_call("c")]},

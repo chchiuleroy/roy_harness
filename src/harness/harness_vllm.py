@@ -1146,7 +1146,14 @@ def _run_loop(messages, tools, system, quiet, depth, label):
             waiting = [{"role": "tool", "tool_call_id": calls[k]["id"], "content": got[k]}
                        for k in sorted(got)]
             checkpoint(messages, depth, extra=waiting)
-        results = run_calls(calls, depth, pre, on_result=landed)
+        try:
+            results = run_calls(calls, depth, pre, on_result=landed)
+        except BaseException:
+            # an interrupt: finished results still waiting for an earlier call join the array
+            # (out of order is fine, repair puts them back) so the exit-time save keeps them
+            for k in sorted(got):
+                messages.append({"role": "tool", "tool_call_id": calls[k]["id"], "content": got[k]})
+            raise
         for j in range(sent[0], len(calls)):                # anything that was not reported
             messages.append({"role": "tool", "tool_call_id": calls[j]["id"],
                              "content": results[j]})
