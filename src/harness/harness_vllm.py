@@ -965,7 +965,7 @@ def split_verbatim(summary_text):
         if (isinstance(obj, dict) and isinstance(obj.get("lines"), list)
                 and all(isinstance(x, str) for x in obj["lines"])
                 and isinstance(obj.get("omitted"), int) and not isinstance(obj["omitted"], bool)
-                and obj["omitted"] >= 0):
+                and 0 <= obj["omitted"] <= 10 ** 9):
             return body[:pos].rstrip(NL), obj["lines"], obj["omitted"]
 
 def verbatim_user_messages(msgs, earlier=(), earlier_omitted=0):
@@ -974,7 +974,7 @@ def verbatim_user_messages(msgs, earlier=(), earlier_omitted=0):
     counter included). A model's summary is a judgment call and was measured to drop short
     early facts; what the user typed is small, so the harness keeps it itself. Over budget
     the oldest and the newest stay and the middle is counted, not kept."""
-    lines = list(earlier) + [_hard_clip(w.replace(NL, " "), VERBATIM_EACH)
+    lines = [_hard_clip(x, VERBATIM_EACH) for x in earlier] + [_hard_clip(w.replace(NL, " "), VERBATIM_EACH)
                              for w in (_user_words(m.get("content")) for m in msgs
                                        if m["role"] == "user") if w]
     room = VERBATIM_BUDGET - len(encode_verbatim([], 10 ** 9))
@@ -1026,6 +1026,8 @@ def compact(messages, keep=None):
         return False
     if not summary:
         return False
+    # the model's text is never a source of kept words: defuse our marker if it wrote one
+    summary = summary.replace(VERBATIM_MARK, VERBATIM_MARK.replace("USER MESSAGES", "USER-MESSAGES"))
     said = verbatim_user_messages(messages[start:cut], earlier, earlier_omitted)
     if said:
         summary += NL * 2 + said
