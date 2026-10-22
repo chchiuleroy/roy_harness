@@ -651,10 +651,18 @@ class TestCrashRecovery(Base):
         super().setUp()
         self.path = os.path.abspath("session.json")
         self._saved = (hv.SESSION_FILE, hv.call_llm, hv.run_calls)
+        # main() run in this process rebinds these module globals; put them back
+        self._globals = {n: getattr(hv, n) for n in ("MCP", "SKILLS", "HOOKS", "SESSION_ID", "MODE",
+                                                     "CURRENT_REQUEST", "PERMS", "execute_tool",
+                                                     "checkpoint", "save_session", "finish_session",
+                                                     "run_loop")}
         hv._CHECKPOINT_WARNED[0] = False
 
     def tearDown(self):
         hv.SESSION_FILE, hv.call_llm, hv.run_calls = self._saved
+        for n, v in self._globals.items():
+            setattr(hv, n, v)
+        hv._CHECKPOINT_WARNED[0] = False
         super().tearDown()
 
     def on_disk(self):
@@ -882,9 +890,9 @@ class TestCrashRecovery(Base):
                 time.sleep(0.3)
             return f"result of {args.get('task') or args.get('command')}"
 
-        def spy(messages, depth=0):
+        def spy(messages, depth=0, **kw):
             threads.append(th.current_thread() is main)
-            real_cp(messages, depth)
+            real_cp(messages, depth, **kw)
         hv.execute_tool, hv.checkpoint = fake_exec, spy
         msgs = [{"role": "user", "content": "go"}]
         try:
@@ -910,9 +918,9 @@ class TestCrashRecovery(Base):
         real_exec, real_cp = hv.execute_tool, hv.checkpoint
         tools_on_disk = []
 
-        def spy(messages, depth=0):
+        def spy(messages, depth=0, **kw):
             tools_on_disk.append(sum(m["role"] == "tool" for m in messages))
-            real_cp(messages, depth)
+            real_cp(messages, depth, **kw)
         hv.execute_tool, hv.checkpoint = (lambda name, args, depth=0: "r"), spy
         try:
             hv.run_loop([{"role": "user", "content": "go"}], hv.tools_for(0), "sys")
@@ -944,6 +952,158 @@ class TestCrashRecovery(Base):
         disk = self.on_disk()
         self.assertEqual([(m["role"], m.get("tool_call_id")) for m in disk[2:]], [("tool", "p0")])
         self.assertEqual(disk[2]["content"], "done one")
+
+    def test_a_finished_result_behind_an_interrupted_call_is_still_on_disk(self):
+        """Found by the 小o review: a plain call that finished while an EARLIER agent call was
+        still running waited in memory for its turn in call order; if the agent call was then
+        interrupted its real result was lost and repair labelled it INTERRUPTED."""
+        hv.SESSION_FILE = self.path
+        calls = [tool_call("c0", "agent", task="ok"), tool_call("c1", "agent", task="dies"),
+                 tool_call("c2", command="plain")]
+        reply = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                              "finish_reason": "tool_calls"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+        real_exec = hv.execute_tool
+
+        def fake_exec(name, args, depth=0):
+            if args.get("task") == "dies":
+                time.sleep(0.2)                               # the plain call is long finished by now
+                raise Crash()
+            return "result of " + str(args.get("task") or args.get("command"))
+        hv.execute_tool = fake_exec
+        try:
+            with self.assertRaises(Crash):
+                hv.run_loop([{"role": "user", "content": "go"}], hv.tools_for(0), "sys")
+        finally:
+            hv.execute_tool = real_exec
+        self.assertIn("result of plain", json.dumps(self.on_disk()))      # on disk, though out of order
+        loaded, repaired = hv.load_session(self.path)
+        self.assertEqual(repaired, 1)                                      # only the call that died
+        self.assertTrue(self.valid(loaded))
+        tools = [m for m in loaded if m["role"] == "tool"]
+        self.assertEqual([m["tool_call_id"] for m in tools], ["c0", "c1", "c2"])       # call order again
+        self.assertEqual(tools[0]["content"], "result of ok")
+        self.assertIn("INTERRUPTED", tools[1]["content"])
+        self.assertEqual(tools[2]["content"], "result of plain")                       # the real one
+
+    def test_repair_puts_the_results_back_in_call_order(self):
+        msgs = [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b"), tool_call("c")]},
+                {"role": "tool", "tool_call_id": "c", "content": "C"},
+                {"role": "tool", "tool_call_id": "a", "content": "A"},
+                {"role": "user", "content": "next"}]
+        self.assertEqual(hv.repair_interrupted(msgs), 1)
+        self.assertEqual([(m["role"], m.get("tool_call_id"), m["content"][:11]) for m in msgs[2:5]],
+                         [("tool", "a", "A"), ("tool", "b", "INTERRUPTED"), ("tool", "c", "C")])
+        again = json.loads(json.dumps(msgs))
+        self.assertEqual(hv.repair_interrupted(msgs), 0)
+        self.assertEqual(msgs, again)
+        ordered = [{"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b")]},
+                   {"role": "tool", "tool_call_id": "a", "content": "A"},
+                   {"role": "tool", "tool_call_id": "b", "content": "B"}]
+        copy = json.loads(json.dumps(ordered))
+        self.assertEqual(hv.repair_interrupted(ordered), 0)
+        self.assertEqual(ordered, copy)                                    # a healthy history is not touched
+
+    def test_failing_to_save_at_the_end_never_hides_the_real_error_or_skips_cleanup(self):
+        """Found by the 小o review: the exit-time save was unguarded, so a locked file replaced
+        the interrupt that was being handled and MCP.close() never ran."""
+        real = hv.save_session
+
+        def broken(messages, path):
+            raise PermissionError("file is in use")
+        hv.save_session = broken
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.finish_session([{"role": "user", "content": "x"}], self.path)    # must not raise
+        finally:
+            hv.save_session = real
+        self.assertIn("could not write", out.getvalue())
+        self.assertIn("file is in use", out.getvalue())
+
+    def test_repair_only_reorders_when_nothing_is_missing(self):
+        msgs = [{"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b")]},
+                {"role": "tool", "tool_call_id": "b", "content": "B"},
+                {"role": "tool", "tool_call_id": "a", "content": "A"}]
+        self.assertEqual(hv.repair_interrupted(msgs), 0)                   # nothing was missing ...
+        self.assertEqual([m["tool_call_id"] for m in msgs[1:]], ["a", "b"])    # ... but the order is fixed
+
+    def test_a_result_that_matches_no_call_is_kept_not_thrown_away(self):
+        """Data is never dropped by repair; a stray or duplicated result stays after the
+        proper ones."""
+        msgs = [{"role": "assistant", "content": "", "tool_calls": [tool_call("a")]},
+                {"role": "tool", "tool_call_id": "zzz", "content": "stray"},
+                {"role": "tool", "tool_call_id": "a", "content": "A"},
+                {"role": "tool", "tool_call_id": "a", "content": "A again"}]
+        self.assertEqual(hv.repair_interrupted(msgs), 0)
+        self.assertEqual([(m["tool_call_id"], m["content"]) for m in msgs[1:]],
+                         [("a", "A"), ("zzz", "stray"), ("a", "A again")])
+
+    def test_the_end_of_session_message_is_not_swallowed_by_an_earlier_warning(self):
+        """A checkpoint warning is said once; the final one says the conversation is NOT saved,
+        which the user must see even if a warning came earlier."""
+        real = hv.save_session
+
+        def broken(messages, path):
+            raise PermissionError("file is in use")
+        hv.save_session = broken
+        hv._CHECKPOINT_WARNED[0] = True
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.finish_session([{"role": "user", "content": "x"}], self.path)
+        finally:
+            hv.save_session = real
+        self.assertIn("could not write", out.getvalue())
+
+    def test_mcp_servers_are_closed_even_if_the_final_save_step_blows_up(self):
+        import io as _io
+        closed = []
+
+        class StubMcp:
+            warnings = []
+            def describe(self): return []
+            def close(self): closed.append(True)
+            def owns(self, name): return False
+            def tools(self): return []
+            def is_empty(self): return True
+        saved = (sys.argv, sys.stdin, hv.finish_session, hv.call_llm, hv.harness_mcp.connect_all)
+        hv.call_llm = lambda *a, **k: {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                                                    "finish_reason": "stop"}], "usage": {}}
+
+        def explode(messages, path):
+            raise RuntimeError("repair bug")
+        hv.finish_session = explode
+        hv.harness_mcp.connect_all = lambda *a, **k: StubMcp()
+        sys.argv, sys.stdin = ["harness", "session.json"], _io.StringIO("hi" + chr(10))
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.finish_session, hv.call_llm, hv.harness_mcp.connect_all = saved
+        self.assertEqual(closed, [True])
+
+    def test_main_survives_a_session_file_that_cannot_be_written(self):
+        import io as _io
+        saved = (sys.argv, sys.stdin, hv.save_session, hv.call_llm)
+        reply = {"choices": [{"message": {"role": "assistant", "content": "fine"},
+                              "finish_reason": "stop"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+
+        def broken(messages, path):
+            raise PermissionError("file is in use")
+        hv.save_session = broken
+        sys.argv, sys.stdin = ["harness", "session.json"], _io.StringIO("hello" + chr(10))
+        out = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.main()                                     # no PermissionError may escape
+        finally:
+            sys.argv, sys.stdin, hv.save_session, hv.call_llm = saved
+        self.assertIn("fine", out.getvalue())
+        self.assertIn("could not write", out.getvalue())
 
     def test_a_failed_checkpoint_is_reported_and_the_turn_goes_on(self):
         """The file is now written many times a turn; a locked file or a full disk must not

@@ -1143,7 +1143,9 @@ def _run_loop(messages, tools, system, quiet, depth, label):
                 messages.append({"role": "tool", "tool_call_id": calls[j]["id"],
                                  "content": got.pop(j)})
                 sent[0] += 1
-            checkpoint(messages, depth)
+            waiting = [{"role": "tool", "tool_call_id": calls[k]["id"], "content": got[k]}
+                       for k in sorted(got)]
+            checkpoint(messages, depth, extra=waiting)
         results = run_calls(calls, depth, pre, on_result=landed)
         for j in range(sent[0], len(calls)):                # anything that was not reported
             messages.append({"role": "tool", "tool_call_id": calls[j]["id"],
@@ -1182,25 +1184,36 @@ def save_session(messages, session_file):
         os.fsync(f.fileno())                                # on the disk, not just in the cache
     os.replace(tmp, session_file)                           # never half-written
 
-def checkpoint(messages, depth=0):
+def try_save(messages, session_file, once=True):
+    """save_session that reports a failure instead of raising it (a locked file or a full disk
+    must not end a turn whose tools already ran, nor hide the error that is being handled)."""
+    try:
+        save_session(messages, session_file)
+        return True
+    except OSError as e:
+        if not once or not _CHECKPOINT_WARNED[0]:
+            _CHECKPOINT_WARNED[0] = True
+            print(f"\n[harness] could not write {session_file} ({e}); "
+                  f"the work since the last successful save is not on disk")
+        return False
+
+def checkpoint(messages, depth=0, extra=()):
     """Write the main conversation down NOW. Called before the model is asked and before the
     tools run, so the file always says what was about to happen (write-ahead): after a crash
     the last assistant message with its tool_calls is on disk even though its results are not.
-    A subagent's array is thrown away at the end of its task and is never written."""
+    `extra` are finished tool results still waiting for their turn in call order; they are
+    written too (repair puts them back in order on load). A subagent's array is thrown away
+    at the end of its task and is never written."""
     if SESSION_FILE and depth == 0:
-        try:
-            save_session(messages, SESSION_FILE)
-        except OSError as e:                                # a locked file or a full disk
-            if not _CHECKPOINT_WARNED[0]:
-                _CHECKPOINT_WARNED[0] = True
-                print(f"\n[harness] could not write {SESSION_FILE} ({e}); "
-                      f"the turn goes on, and every later save will try again")
+        try_save(list(messages) + list(extra), SESSION_FILE)
 
 def repair_interrupted(messages):
-    """Give every tool_call that has no result an INTERRUPTED result, in place, right after
-    the results that do exist. A history with calls the harness never answered would show the
-    model a command it cannot tell was run (measured: it ran the command again). Nothing is
-    ever re-executed here: the model is told, and decides. -> number of results added."""
+    """Make every tool_call have a result directly after its assistant message, in call order,
+    in place. A call without a result gets an INTERRUPTED one: a history with calls the
+    harness never answered would show the model a command it cannot tell was run (measured:
+    it ran the command again). Results saved out of order (finished early, written down
+    while an earlier call still ran) are put back in call order. Nothing is ever re-executed
+    here: the model is told, and decides. -> number of INTERRUPTED results added."""
     out, fixed, i = [], 0, 0
     while i < len(messages):
         m = messages[i]
@@ -1209,18 +1222,27 @@ def repair_interrupted(messages):
         calls = m.get("tool_calls") if m.get("role") == "assistant" else None
         if not isinstance(calls, list) or not calls:
             continue
-        have = set()
+        block = []
         while i < len(messages) and messages[i].get("role") == "tool":
-            out.append(messages[i])
-            have.add(messages[i].get("tool_call_id"))
+            block.append(messages[i])
             i += 1
+        by_id = {}
+        for t in block:
+            by_id.setdefault(t.get("tool_call_id"), t)
+        placed, seen = set(), set()
         for c in calls:
             cid = c.get("id") if isinstance(c, dict) else None
-            if cid is not None and cid not in have:
+            if cid is None or cid in seen:
+                continue
+            seen.add(cid)
+            if cid in by_id:
+                out.append(by_id[cid])
+                placed.add(id(by_id[cid]))
+            else:
                 out.append({"role": "tool", "tool_call_id": cid, "content": INTERRUPTED})
-                have.add(cid)
                 fixed += 1
-    if fixed:
+        out.extend(t for t in block if id(t) not in placed)      # homeless or duplicate results stay
+    if out != messages:
         messages[:] = out
     return fixed
 
@@ -1233,7 +1255,7 @@ def load_session(session_file):
 def finish_session(messages, session_file):
     """What the `finally` of main() runs: an interrupt can leave calls without results."""
     repair_interrupted(messages)
-    save_session(messages, session_file)
+    try_save(messages, session_file, once=False)
 
 def run_slash(line, messages):
     """Run a slash command and write the result down: /clear and /compact change the
@@ -1368,11 +1390,13 @@ def main():
                 run_loop(messages, tools_for(0), system_prompt())
             except LLMError as e:
                 print(f"\n[harness] model call failed, turn abandoned: {e}")
-            save_session(messages, session_file)
+            checkpoint(messages)
             fire_stop()
     finally:
-        finish_session(messages, session_file)
-        MCP.close()
+        try:
+            finish_session(messages, session_file)
+        finally:
+            MCP.close()
     print("[session saved]")
 
 if __name__ == "__main__":
