@@ -272,25 +272,42 @@ def kill_tree(proc):
         proc.kill()
 
 
+def _inside_or_same(path, folder):
+    """True when `path` is `folder` or below it, after real-path and case folding (so a
+    junction, a mapped drive or an 8.3 short name of it counts too)."""
+    path, folder = (os.path.normcase(os.path.realpath(x)) for x in (path, folder))
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:                             # different drives
+        return False
+
+
 def resolve_command(command):
     """Where a configured command really lives. A name with a folder part is used as
-    given. A bare name is looked up on PATH only: on Windows CreateProcess would try the
-    current folder FIRST (measured: a hook.exe copied there ran for command `hook`), and
-    the model can create files in that folder. PATH entries that are relative (`.`,
-    `bin`) or are the current folder itself are skipped for the same reason. On Windows
-    only PATHEXT candidates count (npx ships an extensionless shim that cannot run next
-    to npx.cmd); elsewhere the file must be executable. -> a path, or None."""
+    given (write `./tool` to run something inside the project on purpose). A bare name is
+    looked up on PATH only: on Windows CreateProcess would try the current folder FIRST
+    (measured: a hook.exe copied there ran for command `hook`), and the model can create
+    files in that folder and everything below it. So PATH entries that are relative
+    (`.`, `bin`), the current folder itself, or anywhere below it (`.venv/Scripts`,
+    `node_modules/.bin`) are skipped. On Windows only PATHEXT candidates count (npx ships
+    an extensionless shim that cannot run next to npx.cmd); elsewhere the file must be
+    executable. -> a path, or None."""
     if os.path.dirname(command) or os.path.isabs(command):
         return command
     if os.name == "nt":
-        pathext = [e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
-        names = [command] if os.path.splitext(command)[1].lower() in pathext             else [command + e for e in pathext]
+        default = [".com", ".exe", ".bat", ".cmd"]
+        pathext = [e.strip().lower() for e in os.environ.get("PATHEXT", "").split(";")
+                   if e.strip()] or default
+        if ".exe" not in pathext:                  # CreateProcess adds .exe whatever PATHEXT says
+            pathext.append(".exe")
+        complete = set(pathext) | set(default)     # `whoami.exe` is a full name
+        names = [command] if os.path.splitext(command)[1].lower() in complete             else [command + e for e in pathext]
     else:
         names = [command]
-    here = os.path.normcase(os.path.realpath(os.getcwd()))
+    here = os.getcwd()
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         folder = folder.strip().strip(chr(34))
-        if not os.path.isabs(folder) or os.path.normcase(os.path.realpath(folder)) == here:
+        if not os.path.isabs(folder) or _inside_or_same(folder, here):
             continue
         for name in names:
             candidate = os.path.join(folder, name)
@@ -321,7 +338,8 @@ def _run_command(h, payload):
     data = json.dumps(payload).encode("ascii")
     program = resolve_command(h.command)
     if program is None:
-        return None, "", "", f"cannot start {h.command!r}: not found on PATH"
+        return None, "", "", (f"cannot start {h.command!r}: not found on PATH (folders "
+                             f"inside the project are ignored; write ./{h.command} to run a file there)")
     try:
         proc = subprocess.Popen([program, *h.args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -1280,6 +1280,23 @@ class TestBareCommandPlanting(HookBase):
     def plant(self):
         shutil.copy(self.other, "whoami.exe")      # a different program under the real name
 
+    def plant_as(self, name):
+        shutil.copy(self.other, name)
+
+    def alias_dirs(self, target):
+        """Other spellings of `target` that the OS accepts: a junction and, when the disk
+        has 8.3 names, the short path."""
+        links = os.path.join(tempfile.mkdtemp(), "j")
+        self.addCleanup(shutil.rmtree, os.path.dirname(links), True)
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", links, target],
+                              capture_output=True).returncode == 0
+        found = [links] if made else []
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1000)
+        if ctypes.windll.kernel32.GetShortPathNameW(target, buf, 1000) and                 os.path.normcase(buf.value) != os.path.normcase(target):
+            found.append(buf.value)
+        return found
+
     def test_the_name_is_looked_up_on_path_not_in_the_current_folder(self):
         self.plant()
         got = self.hh.resolve_command("whoami")
@@ -1331,6 +1348,56 @@ class TestBareCommandPlanting(HookBase):
         self.assertNotEqual(os.path.abspath(self.hh.resolve_command("whoami")),
                             os.path.abspath(os.path.join("bin", "whoami.exe")))
 
+    def test_a_path_entry_inside_the_project_folder_is_ignored_however_it_is_spelled(self):
+        """Found by the third 小o re-review: only the folder ITSELF was skipped, but the
+        model can write anywhere under it (venv\Scripts, node_modules\.bin), so an
+        absolute PATH entry below the current folder is just as plantable. Aliases
+        (junction, 8.3 short name) must not slip past the comparison."""
+        os.makedirs("tools")
+        shutil.copy(self.other, os.path.join("tools", "whoami.exe"))
+        inside = os.path.abspath("tools")
+        entries = [inside, *self.alias_dirs(inside), *self.alias_dirs(os.getcwd())]
+        self.assertGreaterEqual(len(entries), 2, "no alias could be built")
+        for entry in entries:
+            os.environ["PATH"] = entry
+            self.assertIsNone(self.hh.resolve_command("whoami"), entry)
+            os.environ["PATH"] = entry + os.pathsep + self._path
+            got = self.hh.resolve_command("whoami")
+            self.assertNotEqual(os.path.normcase(os.path.realpath(os.path.dirname(got))),
+                                os.path.normcase(os.path.realpath(inside)), entry)
+
+    def test_an_odd_pathext_does_not_make_a_valid_command_unfindable(self):
+        """Found by the third 小o re-review: an empty PATHEXT, one without .EXE, or one with
+        spaces after the semicolons rejected even `whoami.exe`."""
+        system32 = os.path.dirname(self.real)
+        os.environ["PATH"] = system32
+        saved = os.environ.get("PATHEXT")
+        self.addCleanup(lambda: os.environ.__setitem__("PATHEXT", saved) if saved is not None
+                        else os.environ.pop("PATHEXT", None))
+        for pathext in ("", ".COM", ".COM; .EXE", " .EXE ;; .CMD"):
+            os.environ["PATHEXT"] = pathext
+            for name in ("whoami", "whoami.exe"):
+                got = self.hh.resolve_command(name)
+                self.assertIsNotNone(got, (pathext, name))
+                self.assertTrue(got.lower().endswith("whoami.exe"), (pathext, got))
+
+    def test_a_cmd_shim_is_found_when_pathext_is_empty_or_has_stray_spaces(self):
+        """Without the strip and the default list, only the forced .exe would still work and
+        `.cmd` shims (npx, conda) would vanish for a PATHEXT like ' .CMD' or ''."""
+        folder = os.path.join(tempfile.mkdtemp(), "shims")
+        os.makedirs(folder)
+        self.addCleanup(shutil.rmtree, os.path.dirname(folder), True)
+        with open(os.path.join(folder, "shim.cmd"), "w") as f:
+            f.write("@echo off" + chr(10))
+        os.environ["PATH"] = folder
+        saved = os.environ.get("PATHEXT")
+        self.addCleanup(lambda: os.environ.__setitem__("PATHEXT", saved) if saved is not None
+                        else os.environ.pop("PATHEXT", None))
+        for pathext in (" .CMD", "", " .com ; .CMD "):
+            os.environ["PATHEXT"] = pathext
+            got = self.hh.resolve_command("shim")
+            self.assertTrue(got and got.lower().endswith("shim.cmd"), (pathext, got))
+
     def test_an_absolute_path_entry_elsewhere_is_still_used(self):
         other = os.path.join(tempfile.mkdtemp(), "tools")
         os.makedirs(other)
@@ -1359,6 +1426,7 @@ class TestBareCommandPlanting(HookBase):
         background process starts by bare name (found by the second 小o re-review)."""
         import types
         seen = []
+        self.plant_as("taskkill.exe")
         proc = types.SimpleNamespace(pid=4242, kill=lambda: None)
         old = subprocess.run
         subprocess.run = lambda argv, **kw: seen.append(argv[0])
@@ -1368,9 +1436,9 @@ class TestBareCommandPlanting(HookBase):
         finally:
             subprocess.run = old
         self.assertEqual(len(seen), 2)
-        for exe in seen:
-            self.assertTrue(os.path.isabs(exe), exe)
-            self.assertTrue(exe.lower().endswith("taskkill.exe"), exe)
+        want = os.path.join(os.environ["SystemRoot"], "System32", "taskkill.exe")
+        for exe in seen:                     # exactly the system copy, never the planted one
+            self.assertEqual(os.path.normcase(exe), os.path.normcase(want))
 
     def test_mcp_stdio_servers_are_resolved_the_same_way(self):
         import harness_mcp as hm

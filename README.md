@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（147 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 235 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（150 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 238 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-235 項 = 離線 212 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+238 項 = 離線 215 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -286,6 +286,14 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - 審查者的盤點：全部啟動點 6 處——hook、MCP（已修）、2 處 `taskkill`（本輪修）、前景與背景 shell（模型明確要求的 shell 路徑，本來就問人，不在範圍）。
 - 審查者 `rejected`：`_fit_menu` 減 1 在空集合下安全；測試清掉環境變數的處理不會洩漏；`./tool` 與絕對路徑照原樣保留。審查者的 `not_checked`：沙盒無法跑測試、沒有 POSIX 主機、沒測其他檔案系統、批次檔 metacharacter（args 來自可信設定，沒有模型資料進 argv）。這批修復**沒有再送下一輪**。
 - 小c 的核對：新增 4 項測試，突變 5 種全被抓，1 種（非 Windows 的可執行檢查）在 Windows 上測不到。
+
+**第三輪複審（2026-10-22，Codex 唯讀，範圍 `6e61229`）**：3 項 `confirmed`、1 項 `needs_validation`；審查者沙盒仍無法跑測試。逐條處理並先寫失敗測試。
+- **high**：我上一輪只排除「目前資料夾本身」，但模型在專案內任何子資料夾都寫得進去（`.venv/Scripts`、`node_modules/.bin`），指向它們的絕對 PATH 元素一樣能植入。我上一輪把這當成「使用者刻意設的」而不擋，審查者指出這破壞「PATH 上的程式模型改不了」的信任邊界；同意。修法：目前資料夾**以及其下任何位置**的 PATH 元素都略過（比較用真實路徑加大小寫摺疊，junction、`subst` 映射磁碟、8.3 短路徑都歸同一個）；要執行專案內的程式請寫明路徑（`./tool`），找不到時的錯誤訊息會這麼提示。
+- **medium**：PATHEXT 為空、缺 `.EXE` 或分號後有空白時，連明確寫 `whoami.exe` 都找不到。審查者本機重現。修法：PATHEXT 各項去空白、為空時用預設清單、永遠把 `.exe` 算進候選（CreateProcess 本來就會補 `.exe`）。
+- **low**：`taskkill` 測試只檢查「是絕對路徑且以 taskkill.exe 結尾」，換成任意路徑也會綠。修法：比對期望的 `SystemRoot` 下 `System32` 全路徑，並在資料夾放一個假 `taskkill.exe`。
+- **needs_validation（Windows 路徑別名能否繞過資料夾比較）**：我在本機驗證了 junction、`subst` 映射磁碟（`realpath` 都歸一）與 8.3 短路徑（這顆磁碟有短名，新測試涵蓋 junction 與短路徑）。**UNC 路徑沒驗證**（本機沒有可存取的 UNC 分享）。
+- 審查者的盤點：啟動點與上一輪相同，另未找到 `where`、`cmd /c`、`start`、`os.startfile`、`webbrowser`、`shutil.which`、`executable=` 的使用；`.ps1` 即使在 PATHEXT 內也不保證能由 `Popen` 直接啟動（不是本輪新增）。
+- 小c 的核對：新增 3 項測試並改寫 taskkill 測試；突變 7 種全被抓（其中 2 種第一次存活，補了「PATHEXT 只有 `.CMD` 且有空白或為空時 `.cmd` shim 仍找得到」的測試）。這批修復**沒有再送下一輪**；連續三輪每輪都找到新問題。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。

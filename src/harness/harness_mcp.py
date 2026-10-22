@@ -423,7 +423,8 @@ class StdioServer(_Server):
     def start(self):
         program = harness_hooks.resolve_command(self.spec.command)
         if program is None:
-            raise McpError(f"cannot start {self.spec.command!r}: not found on PATH")
+            raise McpError(f"cannot start {self.spec.command!r}: not found on PATH (folders "
+                           f"inside the project are ignored; write ./{self.spec.command} to run a file there)")
         try:
             self.proc = subprocess.Popen(
                 [program, *self.spec.args], stdin=subprocess.PIPE,
