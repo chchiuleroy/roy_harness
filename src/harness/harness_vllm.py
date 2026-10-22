@@ -1256,7 +1256,7 @@ def load_session(session_file):
 def finish_session(messages, session_file):
     """What the `finally` of main() runs: an interrupt can leave calls without results."""
     repair_interrupted(messages)
-    try_save(messages, session_file, once=False)
+    return try_save(messages, session_file, once=False)
 
 def run_slash(line, messages):
     """Run a slash command and write the result down: /clear and /compact change the
@@ -1395,10 +1395,10 @@ def main():
             fire_stop()
     finally:
         try:
-            finish_session(messages, session_file)
+            saved = finish_session(messages, session_file)
         finally:
             MCP.close()
-    print("[session saved]")
+    print("[session saved]" if saved else "[session NOT saved]")
 
 if __name__ == "__main__":
     main()

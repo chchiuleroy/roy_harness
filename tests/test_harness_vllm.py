@@ -1022,6 +1022,22 @@ class TestCrashRecovery(Base):
         self.assertIn("could not write", out.getvalue())
         self.assertIn("file is in use", out.getvalue())
 
+    def test_a_clean_exit_still_says_the_session_was_saved(self):
+        import io as _io
+        saved = (sys.argv, sys.stdin, hv.call_llm)
+        hv.call_llm = lambda *a, **k: {"choices": [{"message": {"role": "assistant", "content": "fine"},
+                                                    "finish_reason": "stop"}], "usage": {}}
+        sys.argv, sys.stdin = ["harness", "session.json"], _io.StringIO("hello" + chr(10))
+        out = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.call_llm = saved
+        self.assertIn("[session saved]", out.getvalue())
+        self.assertNotIn("NOT saved", out.getvalue())
+        self.assertEqual(self.on_disk()[-1]["content"], "fine")
+
     def test_a_new_failure_after_a_successful_save_warns_again(self):
         """Found by the 小o review: the warning flag never reset, so after one early failure every
         later one was silent -- and a crash then left the user believing the work was saved."""
@@ -1130,6 +1146,8 @@ class TestCrashRecovery(Base):
             sys.argv, sys.stdin, hv.save_session, hv.call_llm = saved
         self.assertIn("fine", out.getvalue())
         self.assertIn("could not write", out.getvalue())
+        self.assertNotIn("[session saved]", out.getvalue())               # found by the 小o review
+        self.assertIn("[session NOT saved]", out.getvalue())
 
     def test_a_failed_checkpoint_is_reported_and_the_turn_goes_on(self):
         """The file is now written many times a turn; a locked file or a full disk must not
