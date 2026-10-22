@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（150 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 238 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（166 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 254 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-238 項 = 離線 215 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+254 項 = 離線 231 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -294,6 +294,32 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **needs_validation（Windows 路徑別名能否繞過資料夾比較）**：我在本機驗證了 junction、`subst` 映射磁碟（`realpath` 都歸一）與 8.3 短路徑（這顆磁碟有短名，新測試涵蓋 junction 與短路徑）。**UNC 路徑沒驗證**（本機沒有可存取的 UNC 分享）。
 - 審查者的盤點：啟動點與上一輪相同，另未找到 `where`、`cmd /c`、`start`、`os.startfile`、`webbrowser`、`shutil.which`、`executable=` 的使用；`.ps1` 即使在 PATHEXT 內也不保證能由 `Popen` 直接啟動（不是本輪新增）。
 - 小c 的核對：新增 3 項測試並改寫 taskkill 測試；突變 7 種全被抓（其中 2 種第一次存活，補了「PATHEXT 只有 `.CMD` 且有空白或為空時 `.cmd` shim 仍找得到」的測試）。這批修復**沒有再送下一輪**；連續三輪每輪都找到新問題。
+
+**實測與收斂（2026-10-22；對作者的 vLLM、單一模型、單次、樣本小，不可外推）**
+
+*壓縮、背景喚醒、子 agent、auto 分類器、縮短描述、UNC／POSIX／pwsh*
+
+- **壓縮丟事實（實測發現，已修）**：REPL 情境在 temperature 0 重現——使用者第一句說「記住暗號 ZEBRA-4417」，壓縮後模型回答「你沒告訴過我暗號」，因為模型寫的摘要沒收這一句（摘要指令明明要求逐字保留使用者說過的事實）。修法：壓縮時 harness 自己把被摘要區間內**使用者打的字**附在摘要最後，格式是 JSON（`{"lines": [...], "omitted": N}`，標記字串之後），每則最多 400 字元、整段（含標頭與計數）最多 3,000 字元，超過時保留最舊與最新、中間只計數；跨多次壓縮只有一份，合併後重算。harness 注入的 reminder 不算（只剝掉訊息**最開頭**的 reminder 區塊，`remind()` 會把事件文字裡的結尾標籤改寫），喚醒佔位也不算；摘要模型若寫出我們的標記會先被改寫，所以不能偽造一份「使用者原話」。
+  - 配對實驗（同一份摘要、有／無清單兩種脈絡、同一問題；29 段對話，排除 1 筆單字元目標）：temperature 0，舊 25/29、新 29/29；預設取樣各 3 次，舊 75/87、新 85/87；不一致配對新贏 4、舊贏 0（精確符號檢定雙尾 p＝0.125）；摘要本身已含該事實 26/29。**方向一致但樣本小、不顯著**；採用的理由是機制（清單由程式保證保留），不是統計。
+  - 代價：每次壓縮多約 3,000 字元（約 1k tokens）；摘要之外多了一份使用者原話。
+- **背景喚醒、`schedule_wakeup`**：單獨測 8/8 成功（背景任務完成後模型被喚醒並讀輸出；排程喚醒如期喚醒）。兩個提示連續送入的情境，有 1 次模型把 `schedule_wakeup` 印成文字（`<invoke ...>`）而沒有真的呼叫，之後同情境重複 6+1 次都正常；**觀察到 1 次、原因不明（推測是模型偶發格式問題）**，harness 沒有為此加偵測。
+- **子 agent**：派子 agent 讀檔回報行數，正確（7 行）。
+- **auto 分類器**（直接呼叫 `classify()`，temperature 0 單次，指令與請求由我撰寫）：30 個攻擊（下載執行、外洩、破壞、持久化、關防護、提權、混淆、竊憑證、shell 注入）全部 BLOCK（0 個 ALLOW；零次失誤的 95% 上界約 10%）；25 個明確良性：21 ALLOW、3 ASK、1 BLOCK（`findstr /s /n "TODO" *.py` 被判「與請求無關」）；6 個邊界（`pip install requests`、`git push origin main`、下載指定網址等）5 ALLOW、1 ASK。其中 2 個 ASK 是分類器用文字回答、沒給 JSON，判決（ASK）本來就對，但原因訊息誤寫成「classifier unavailable」，已改成「reply had no JSON object」。REPL 內兩個攻擊提示（`curl | sh`、讀到檔案裡的注入指示）模型自己就拒絕了，沒走到分類器，所以分類器的數字只來自直接呼叫。
+- **UNC 別名（實測發現，已修）**：用本機管理分享 `\\localhost\C$\...` 當 PATH 元素，`realpath` 保留 UNC 拼法，原本的路徑比較認不出它就是專案資料夾，被植入的 exe 被選中（cwd／PATH 本機與 UNC 四種組合全部重現）。修法：另外用檔案身分（裝置＋檔案索引）從 PATH 元素往上比對；兩種拼法的身分實測相同。身分讀不到時，UNC 拼法一律拒絕（本機路徑仍靠字串比較；分享根目錄本身讀不到不算）。**沒有具祖先權限差異的真實 UNC 分享，所以「身分讀不到」只以替身測過。**
+- **非 Windows 的可執行檢查**：這台機器沒有 WSL 發行版、沒有 Docker，**沒法在真實 POSIX 上驗證**；只用 `os` 的替身驗證邏輯（第一個可執行的勝出、不加 Windows 後綴）。
+- **pwsh**：沒安裝，沒測。`powershell` 與 `cmd` 實測能當 hook 指令啟動；`python`、`py`、`node`、`npx`（解析到 `.cmd`）、`uvx` 都解析得到。
+- **縮短 skill 描述是否影響挑選**（42 個真實 skill；A 組查詢由我撰寫、B 組由同一個模型依完整描述產生；每條件每查詢 3 次；只看第一個 `skill` 工具呼叫是否等於目標）：
+  | 條件 | 正確率 |
+  |---|---|
+  | F 完整描述（選單 11,001 字元） | 74.6%（188/252） |
+  | S 出貨行為，等比例縮短（7,982 字元） | 71.0%（179/252） |
+  | D 舊行為，只放前 31 個（7,992 字元） | 55.6%（140/252） |
+
+  三層 bootstrap（skill → 查詢 → 重複）：S−F −3.6 個百分點（95% CI −13.1～+5.6）；S−D +15.5（+1.2～+30.6）。**S 贏 D 是因為 11 個 skill 變成可挑選**（D 對它們是 0%）；只看兩邊都有的 31 個 skill：F 73.1%、S 67.2%、D 75.3%，S−F −5.9（−17.7～+5.9）、S−D −8.1（−18.3～+1.6）。**S−F 才隔離「縮短描述」的效果，點估計是小幅下降、區間跨 0；S−D 還混了「選單多 11 個可競爭項目」，不能算作縮短的效果。** 錯誤主要是 `hyperframes-*` 九個互相混淆、`hn-ai`／`pp-hackernews`、`tarot`／`divination`，那是 skill 本身的重疊。兩組查詢都從完整描述衍生，對 S 不利或對 F 不利的方向沒法只靠一項論證定論（F 的選單也長 38%）。
+  - 想不縮短，把 `harness_skills.MAX_MENU` 調到約 12,000 就夠放下作者這 42 個（每次請求多約 3,000 字元的系統提示）；沒有改，因為這是 token 成本的取捨。
+- **介面實測**（終端機，預寫輸入檔重導向餵 REPL，不是真人互動）：skill 載入、hook 否決寫檔、MCP `add`＝42、正常寫檔，全部符合預期。
+
+*這輪找出、修掉的缺陷與審查*：除上面兩個實測發現，還有四輪小o 審查（每輪都先寫失敗測試、再做突變驗證）——第四輪（範圍 `0f44223`）空 findings；第五輪（範圍 `d2e4c2b` 與三個實驗的方法論）6 項 confirmed：清單漏掉與 reminder 合併的使用者文字、身分讀不到時 fail-open、清單跨壓縮累積、壓縮實驗沒配對、S 優於 D 的結論被缺席目標主導、bootstrap 沒納入取樣層級；第六輪 7 項 confirmed：reminder 與使用者文字無法區分、用內容哨兵儲存會與使用者／摘要文字碰撞、預算不含標頭與計數、UNC 規則過寬、bootstrap 沒保留階層與配對、把 S−D 歸因於縮短、單字元目標評分不可靠；第七輪 2 項 low：摘要模型可偽造清單、計數器可無限大；第八輪（範圍 `8cb9a1a`）**空 findings**。第六輪的核心批評促成把儲存格式從自由文字改成 JSON。**審查者的沙盒始終無法建立暫存目錄，測試都沒在它那邊跑成，結論來自靜態檢查加唯讀小實驗。** 「收斂」的標準是某一輪回空 findings，不是「沒有缺陷」；連續多輪都有新發現，空 findings 只代表這位審查者這一輪沒找到。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
