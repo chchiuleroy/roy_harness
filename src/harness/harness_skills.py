@@ -26,7 +26,7 @@ import harness_mcp
 MAX_SKILLS = 64             # my limits, not a spec's: the menu rides on every request
 MAX_DESCRIPTION = 300
 MIN_DESCRIPTION = 40         # over budget, descriptions shrink down to this, no further
-MAX_MENU = 8_000
+MAX_MENU = 12_000
 MAX_BODY = 20_000
 MAX_FILE = 1_000_000        # bytes read from one SKILL.md
 MAX_SCAN = 1_000            # folders examined in all roots together

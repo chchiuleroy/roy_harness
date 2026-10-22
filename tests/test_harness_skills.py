@@ -192,10 +192,10 @@ class TestLoading(SkillBase):
         """A skill dropped from the menu does not exist for the model; a skill with a
         shorter description still can be called, and its body is loaded in full. So over
         budget, every skill stays and the descriptions shrink in proportion."""
-        for i in range(50):
+        for i in range(60):
             self.mk(f"s{i:02d}", ("L" if i % 2 else "S") * (280 if i % 2 else 140))
         reg = self.load()
-        self.assertEqual(len(reg.skills), 50)
+        self.assertEqual(len(reg.skills), 60)
         self.assertLessEqual(len(reg.menu()), self.hs.MAX_MENU)
         self.assertGreater(len(reg.menu()), self.hs.MAX_MENU - 150)     # not shrunk needlessly
         longs = [len(s.description) for s in reg.skills.values() if s.description[0] == "L"]
@@ -206,6 +206,20 @@ class TestLoading(SkillBase):
         self.assertAlmostEqual(sum(longs) / sum(shorts), 2.0, delta=0.15)   # in proportion
         self.assertTrue(any("shortened" in w and "budget" in w for w in reg.warnings),
                         reg.warnings)
+
+    def test_a_real_sized_folder_fits_the_default_budget_without_shortening(self):
+        """Measured on the author's folder (2026-10-22): 42 skills with full descriptions make
+        an 11,001-character menu. Shortening them cost 3.6 points of selection accuracy (95% CI
+        -13.1 to +5.6) and 5.9 points on the skills that used to fit, for ~3,000 characters
+        saved, so the default budget is sized to leave such a folder alone."""
+        for i in range(42):
+            self.mk(f"skill-{i:02d}", chr(65 + i % 26) * 250)
+        reg = self.load()
+        self.assertEqual(len(reg.skills), 42)
+        self.assertEqual(reg.warnings, [])
+        self.assertTrue(all(s.description == chr(65 + n % 26) * 250
+                            for n, s in enumerate(reg.skills.values())))
+        self.assertGreater(len(reg.menu()), 8_000)                      # it WOULD have been shortened before
 
     def test_a_menu_that_fits_is_left_exactly_as_written(self):
         """Shortening is only for the over-budget case; a normal folder must not change."""
@@ -249,7 +263,7 @@ class TestLoading(SkillBase):
             self.hs.MAX_MENU = old
 
     def test_a_description_already_short_is_not_padded_or_cut_when_others_shrink(self):
-        for i in range(40):
+        for i in range(45):
             self.mk(f"w{i:02d}", "z" * 290)
         self.mk("aaa", "tiny")
         reg = self.load()
