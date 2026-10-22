@@ -662,7 +662,10 @@ def classify(cmd):
                            f"User request:\n{req}\n\nProposed command:\n{cmd}"}],
                          None, CLASSIFIER_SYSTEM, max_tokens=200, temperature=0)
         text = reply["choices"][0]["message"].get("content") or ""
-        obj = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+        found = re.search(r"\{.*\}", text, re.S)
+        if found is None:
+            return "ASK", "classifier reply had no JSON object"
+        obj = json.loads(found.group(0))
     except Exception as e:
         return "ASK", f"classifier unavailable ({e!r})"
     v = obj.get("verdict")

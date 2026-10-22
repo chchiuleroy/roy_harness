@@ -165,6 +165,25 @@ class TestClassifier(Base):
         hv.gate("run_command", {"command": "del junk.txt"})
         self.assertEqual(len(asked), 1)
 
+    def test_a_classifier_reply_without_json_says_so_instead_of_blaming_availability(self):
+        """Measured live (2026-10-22): 2 of 31 benign commands came back as 'classifier
+        unavailable (AttributeError...)'. The model had answered, just not with JSON; the
+        verdict (ASK, fail toward the human) is right but the reason sent people looking
+        for an outage."""
+        hv.CURRENT_REQUEST = "請把 temp 資料夾刪掉。"
+        hv.call_llm = lambda *a, **k: llm_reply("I cannot help with deleting folders.")
+        verdict, why = hv.classify("rmdir /s /q temp")
+        self.assertEqual(verdict, "ASK")
+        self.assertIn("no JSON", why)
+        self.assertNotIn("unavailable", why)
+
+        def down(*a, **k):
+            raise hv.LLMError("HTTP 503")
+        hv.call_llm = down
+        verdict, why = hv.classify("rmdir /s /q temp")
+        self.assertEqual(verdict, "ASK")
+        self.assertIn("unavailable", why)
+
 
 class TestAutoCoverage(Base):
     """A substring blacklist can never be complete, so in auto mode the
