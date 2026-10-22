@@ -1116,6 +1116,7 @@ def _run_loop(messages, tools, system, quiet, depth, label):
         if calls:
             entry["tool_calls"] = calls
         messages.append(entry)
+        checkpoint(messages, depth)                         # write-ahead: the call is down before it runs
         if entry["content"].strip():
             final_text = entry["content"]
             if not quiet and not streamed[0]:
@@ -1133,6 +1134,7 @@ def _run_loop(messages, tools, system, quiet, depth, label):
             pending = drain_reminders()
             if pending:
                 messages.append({"role": "user", "content": pending})
+        checkpoint(messages, depth)                         # results are down before the next call
     return final_text + "\n[harness] hit MAX_ROUNDS"
 
 # ------------------------------------------------------ ch 7: subagents
@@ -1148,11 +1150,65 @@ def run_subagent(task, depth=1):
 HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
         "/stop <id>  /undo  /perms  /cache  /hooks  /mcp  /skills  /skill <name>")
 
+SESSION_FILE = None                # set by main(); None = no checkpoints (tests, one-shot use)
+INTERRUPTED = ("INTERRUPTED: the harness stopped while this call was running. It may or may "
+               "not have run to completion. Check the current state (files, git status, "
+               "processes) before repeating it.")
+
 def save_session(messages, session_file):
     tmp = session_file + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(messages, f, indent=1, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())                                # on the disk, not just in the cache
     os.replace(tmp, session_file)                           # never half-written
+
+def checkpoint(messages, depth=0):
+    """Write the main conversation down NOW. Called before the model is asked and before the
+    tools run, so the file always says what was about to happen (write-ahead): after a crash
+    the last assistant message with its tool_calls is on disk even though its results are not.
+    A subagent's array is thrown away at the end of its task and is never written."""
+    if SESSION_FILE and depth == 0:
+        save_session(messages, SESSION_FILE)
+
+def repair_interrupted(messages):
+    """Give every tool_call that has no result an INTERRUPTED result, in place, right after
+    the results that do exist. A history with calls the harness never answered would show the
+    model a command it cannot tell was run (measured: it ran the command again). Nothing is
+    ever re-executed here: the model is told, and decides. -> number of results added."""
+    out, fixed, i = [], 0, 0
+    while i < len(messages):
+        m = messages[i]
+        out.append(m)
+        i += 1
+        calls = m.get("tool_calls") if m.get("role") == "assistant" else None
+        if not isinstance(calls, list) or not calls:
+            continue
+        have = set()
+        while i < len(messages) and messages[i].get("role") == "tool":
+            out.append(messages[i])
+            have.add(messages[i].get("tool_call_id"))
+            i += 1
+        for c in calls:
+            cid = c.get("id") if isinstance(c, dict) else None
+            if cid is not None and cid not in have:
+                out.append({"role": "tool", "tool_call_id": cid, "content": INTERRUPTED})
+                have.add(cid)
+                fixed += 1
+    if fixed:
+        messages[:] = out
+    return fixed
+
+def load_session(session_file):
+    """-> (messages, number of interrupted calls repaired)."""
+    with open(session_file, encoding="utf-8") as f:
+        messages = json.load(f)
+    return messages, repair_interrupted(messages)
+
+def finish_session(messages, session_file):
+    """What the `finally` of main() runs: an interrupt can leave calls without results."""
+    repair_interrupted(messages)
+    save_session(messages, session_file)
 
 def slash(cmd, messages):
     """Returns (handled, new_messages_or_None)."""
@@ -1200,6 +1256,8 @@ def slash(cmd, messages):
 def main():
     global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS
     session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
+    global SESSION_FILE
+    SESSION_FILE = session_file
     SESSION_ID = os.path.basename(session_file)
     try:
         HOOKS = harness_hooks.load()                        # ch 11: ./.harness.hooks.json
@@ -1212,9 +1270,11 @@ def main():
     messages = []
     load_perms()
     if os.path.exists(session_file):                        # resume = file read
-        with open(session_file, encoding="utf-8") as f:
-            messages = json.load(f)
+        messages, repaired = load_session(session_file)
         print(f"[resumed {session_file}: {len(messages)} messages]")
+        if repaired:
+            print(f"[repaired {repaired} tool call(s) the last run never finished; "
+                  f"the model is told they were INTERRUPTED]")
     elif os.path.exists(MEMORY_FILE):                       # ch 6: memory
         with open(MEMORY_FILE, encoding="utf-8") as f:
             remind(f"Project memory ({MEMORY_FILE}):\n" + f.read())
@@ -1271,6 +1331,7 @@ def main():
                 pending = drain_reminders()                 # pending notices
                 text = f"{pending}\n{line}" if pending else line
             messages.append({"role": "user", "content": text})
+            checkpoint(messages)                            # the line is safe before the model sees it
             try:
                 run_loop(messages, tools_for(0), system_prompt())
             except LLMError as e:
@@ -1278,7 +1339,7 @@ def main():
             save_session(messages, session_file)
             fire_stop()
     finally:
-        save_session(messages, session_file)
+        finish_session(messages, session_file)
         MCP.close()
     print("[session saved]")
 

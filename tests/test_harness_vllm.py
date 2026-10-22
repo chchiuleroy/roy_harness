@@ -630,6 +630,225 @@ class TestCompaction(Base):
 
 
 # ----------------------------------------------------------- provider dialects
+class Crash(BaseException):
+    """Stands in for a kill, a power cut or Ctrl-C: nothing in the harness may catch it."""
+
+
+def tool_call(cid, name="run_command", **args):
+    return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+class TestCrashRecovery(Base):
+    """A turn is not one event: the user's line, each model reply and each batch of tool
+    results are separate moments, and the work done by a tool is real before anyone writes
+    it down. Measured 2026-10-22: a Ctrl-C during a tool left an assistant message with
+    tool_calls and no results in session.json; the real model, shown that history, issued
+    the command again instead of answering whether it had worked."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.abspath("session.json")
+        self._saved = (hv.SESSION_FILE, hv.call_llm, hv.run_calls)
+
+    def tearDown(self):
+        hv.SESSION_FILE, hv.call_llm, hv.run_calls = self._saved
+        super().tearDown()
+
+    def on_disk(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def valid(self, msgs):
+        """Every tool_call has its result directly after it, and no result is homeless."""
+        i = 0
+        while i < len(msgs):
+            m = msgs[i]
+            if m["role"] == "tool":
+                return False
+            if m["role"] == "assistant" and m.get("tool_calls"):
+                want = [c["id"] for c in m["tool_calls"]]
+                got = []
+                j = i + 1
+                while j < len(msgs) and msgs[j]["role"] == "tool":
+                    got.append(msgs[j]["tool_call_id"])
+                    j += 1
+                if sorted(got) != sorted(want):
+                    return False
+                i = j
+            else:
+                i += 1
+        return True
+
+    # ------------------------------------------------------------------ repair
+    def test_a_call_without_a_result_gets_an_interrupted_result_right_after_its_message(self):
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b")]},
+                {"role": "tool", "tool_call_id": "a", "content": "done a"},
+                {"role": "user", "content": "still there?"}]
+        self.assertEqual(hv.repair_interrupted(msgs), 1)
+        self.assertTrue(self.valid(msgs))
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant", "tool", "tool", "user"])
+        self.assertEqual(msgs[2]["content"], "done a")                      # the real result is untouched
+        self.assertEqual(msgs[3]["tool_call_id"], "b")
+        self.assertIn("INTERRUPTED", msgs[3]["content"])
+        self.assertIn("may or may not have", msgs[3]["content"])
+
+    def test_repair_is_idempotent_and_leaves_a_healthy_history_alone(self):
+        healthy = [{"role": "user", "content": "x"},
+                   {"role": "assistant", "content": "", "tool_calls": [tool_call("a")]},
+                   {"role": "tool", "tool_call_id": "a", "content": "ok"},
+                   {"role": "assistant", "content": "done"}]
+        copy = json.loads(json.dumps(healthy))
+        self.assertEqual(hv.repair_interrupted(healthy), 0)
+        self.assertEqual(healthy, copy)
+        broken = [{"role": "user", "content": "x"},
+                  {"role": "assistant", "content": "", "tool_calls": [tool_call("a")]}]
+        self.assertEqual(hv.repair_interrupted(broken), 1)
+        once = json.loads(json.dumps(broken))
+        self.assertEqual(hv.repair_interrupted(broken), 0)
+        self.assertEqual(broken, once)
+
+    def test_every_orphan_in_a_long_history_is_repaired_in_place(self):
+        msgs = [{"role": "user", "content": "1"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("a")]},
+                {"role": "user", "content": "2"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("b"), tool_call("c")]},
+                {"role": "tool", "tool_call_id": "c", "content": "c ok"},
+                {"role": "assistant", "content": "fine"},
+                {"role": "user", "content": "3"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("d", "agent", task="t")]}]
+        self.assertEqual(hv.repair_interrupted(msgs), 3)
+        self.assertTrue(self.valid(msgs))
+        self.assertEqual(msgs[-1]["tool_call_id"], "d")                       # at the very end, too
+        self.assertEqual(msgs[2]["tool_call_id"], "a")                        # and in the middle
+
+    def test_text_only_and_malformed_entries_do_not_break_repair(self):
+        msgs = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "hi"},
+                {"role": "assistant", "content": "", "tool_calls": None},
+                {"role": "assistant", "content": "", "tool_calls": []},
+                {"role": "user", "content": "y"}]
+        self.assertEqual(hv.repair_interrupted(msgs), 0)
+
+    # ------------------------------------------------------------ write ahead
+    def run_one_turn(self, checks):
+        """One user line, one model reply asking for a tool, one tool run, one final reply;
+        `checks` is called at each of those moments with what is on disk."""
+        hv.SESSION_FILE = self.path
+        replies = [
+            {"choices": [{"message": {"role": "assistant", "content": "",
+                                      "tool_calls": [tool_call("c1", command="echo hi")]},
+                          "finish_reason": "tool_calls"}], "usage": {}},
+            {"choices": [{"message": {"role": "assistant", "content": "all done"},
+                          "finish_reason": "stop"}], "usage": {}}]
+
+        def fake_llm(messages, tools, system, **kw):
+            checks("llm", self.on_disk())
+            return replies.pop(0)
+
+        def fake_calls(calls, depth, label):
+            checks("tools", self.on_disk())
+            return ["hi"]
+        hv.call_llm, hv.run_calls = fake_llm, fake_calls
+        msgs = [{"role": "user", "content": "say hi"}]
+        hv.checkpoint(msgs)                                   # what main() does after reading the line
+        hv.run_loop(msgs, hv.tools_for(0), "sys")
+        return msgs
+
+    def test_the_users_line_and_the_models_request_are_on_disk_before_the_tool_runs(self):
+        seen = []
+
+        def checks(where, disk):
+            seen.append((where, [m["role"] for m in disk]))
+            if where == "llm" and len(seen) == 1:
+                self.assertEqual(disk[-1]["content"], "say hi")           # the user line, before any model call
+            if where == "tools":
+                self.assertEqual(disk[-1]["role"], "assistant")           # the call itself, before it runs
+                self.assertEqual(disk[-1]["tool_calls"][0]["id"], "c1")
+            if where == "llm" and len(seen) == 3:
+                self.assertEqual(disk[-1]["role"], "tool")                # the result, before the next call
+                self.assertEqual(disk[-1]["content"], "hi")
+        msgs = self.run_one_turn(checks)
+        self.assertEqual([w for w, _ in seen], ["llm", "tools", "llm"])
+        self.assertEqual([m["role"] for m in self.on_disk()], ["user", "assistant", "tool", "assistant"])
+        self.assertEqual(self.on_disk(), msgs)
+
+    def test_a_crash_inside_a_tool_leaves_a_file_that_loads_into_a_valid_history(self):
+        hv.SESSION_FILE = self.path
+        reply = {"choices": [{"message": {"role": "assistant", "content": "",
+                                          "tool_calls": [tool_call("c1", command="deploy")]},
+                              "finish_reason": "tool_calls"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+
+        def crash(calls, depth, label):
+            raise Crash()
+        hv.run_calls = crash
+        msgs = [{"role": "user", "content": "deploy it"}]
+        hv.checkpoint(msgs)
+        with self.assertRaises(Crash):
+            hv.run_loop(msgs, hv.tools_for(0), "sys")
+        stored = self.on_disk()                                  # as the file stood when the process died
+        self.assertEqual([m["role"] for m in stored], ["user", "assistant"])
+        self.assertFalse(self.valid(stored))                     # this IS the write-ahead record ...
+        loaded, repaired = hv.load_session(self.path)            # ... and loading turns it into a valid history
+        self.assertEqual(repaired, 1)
+        self.assertTrue(self.valid(loaded))
+        self.assertIn("INTERRUPTED", loaded[-1]["content"])
+        self.assertEqual(loaded[0]["content"], "deploy it")
+
+    def test_leaving_the_session_repairs_before_saving(self):
+        """Ctrl-C reaches the `finally` of main() with the array as the interrupt left it."""
+        msgs = [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "", "tool_calls": [tool_call("a")]}]
+        hv.finish_session(msgs, self.path)
+        self.assertTrue(self.valid(self.on_disk()))
+        self.assertTrue(self.valid(msgs))
+
+    def test_ctrl_c_in_the_middle_of_a_turn_still_leaves_a_valid_file_through_main(self):
+        """The real `finally` of main(), driven in this process: the interrupt arrives after the
+        model asked for a tool and before any result exists."""
+        import io
+        saved = (sys.argv, sys.stdin, hv.run_loop)
+
+        def interrupted(messages, tools, system, **kw):
+            messages.append({"role": "assistant", "content": "", "tool_calls": [tool_call("k1")]})
+            raise KeyboardInterrupt
+        sys.argv, sys.stdin, hv.run_loop = ["harness", "session.json"], io.StringIO("do it" + chr(10)), interrupted
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.run_loop = saved
+        stored = self.on_disk()
+        self.assertTrue(self.valid(stored), stored)
+        self.assertEqual(stored[-1]["tool_call_id"], "k1")
+        self.assertIn("INTERRUPTED", stored[-1]["content"])
+
+    def test_a_subagent_array_is_never_written_to_the_session_file(self):
+        hv.SESSION_FILE = self.path
+        hv.checkpoint([{"role": "user", "content": "main"}])
+        sub = [{"role": "user", "content": "sub task"}]
+        hv.checkpoint(sub, depth=1)
+        self.assertEqual([m["content"] for m in self.on_disk()], ["main"])
+
+    def test_without_a_session_file_nothing_is_written_and_nothing_breaks(self):
+        hv.SESSION_FILE = None
+        hv.checkpoint([{"role": "user", "content": "x"}])
+        self.assertFalse(os.path.exists(self.path))
+
+    # ------------------------------------------------------------- durability
+    def test_the_file_is_flushed_to_disk_before_it_replaces_the_old_one(self):
+        order = []
+        real_fsync, real_replace = os.fsync, os.replace
+        os.fsync = lambda fd: (order.append("fsync"), real_fsync(fd))[1]
+        os.replace = lambda a, b: (order.append("replace"), real_replace(a, b))[1]
+        try:
+            hv.save_session([{"role": "user", "content": "x"}], self.path)
+        finally:
+            os.fsync, os.replace = real_fsync, real_replace
+        self.assertEqual(order, ["fsync", "replace"])
+        self.assertEqual(self.on_disk(), [{"role": "user", "content": "x"}])
+
+
 class TestProviders(Base):
     """HARNESS_PROVIDER picks the dialect; each case guards a way a wrong
     dialect fails (a 400 from a hosted API, or a key sent to the wrong host)."""
@@ -1569,7 +1788,7 @@ class TestBareCommandPlanting(HookBase):
 
     def test_a_path_entry_inside_the_project_folder_is_ignored_however_it_is_spelled(self):
         """Found by the third 小o re-review: only the folder ITSELF was skipped, but the
-        model can write anywhere under it (venv\Scripts, node_modules\.bin), so an
+        model can write anywhere under it (venv/Scripts, node_modules/.bin), so an
         absolute PATH entry below the current folder is just as plantable. Aliases
         (junction, 8.3 short name) must not slip past the comparison."""
         os.makedirs("tools")
@@ -1587,7 +1806,7 @@ class TestBareCommandPlanting(HookBase):
 
     def test_a_unc_spelling_of_a_folder_inside_the_project_is_ignored_too(self):
         """Found by testing the UNC case the 小o re-reviews could not reach: the admin share
-        \\localhost\C$\... is the same folder, but realpath keeps the UNC spelling,
+        the local admin share (two backslashes, localhost, C$) is the same folder, but realpath keeps the UNC spelling,
         so the path comparison missed it and the planted exe was chosen. The folders must
         be compared by identity (volume + file index), which is the same for every
         spelling."""
@@ -2104,6 +2323,67 @@ def tool_call_reply(name, args):
             "id": "c1", "type": "function",
             "function": {"name": name, "arguments": json.dumps(args)}}]}}],
         "usage": {}}
+
+
+class _RecordingLLM(_LLMServer):
+    """Also records what session.json held at the moment each request arrived."""
+    disk = []
+
+    def do_POST(self):
+        try:
+            with open("session.json", encoding="utf-8") as f:
+                type(self).disk.append(json.load(f))
+        except (OSError, ValueError):
+            type(self).disk.append(None)
+        super().do_POST()
+
+
+class TestRecoveryEndToEnd(Base):
+    """main() as a real process: the line is on disk before the model hears it, and a file
+    left by a crash mid-turn resumes into a history the model can be shown."""
+
+    def setUp(self):
+        super().setUp()
+        _RecordingLLM.script, _RecordingLLM.bodies, _RecordingLLM.disk = [], [], []
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingLLM)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        super().tearDown()
+
+    def run_harness(self, stdin_text):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("VLLM_", "HARNESS_"))}
+        env.update(HARNESS_BASE_URL=f"http://127.0.0.1:{self.srv.server_address[1]}/v1",
+                   HARNESS_STREAM="0", PYTHONUTF8="1")
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", os.path.join(SRC, "harness_vllm.py"), "session.json"],
+            input=stdin_text, capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+
+    def test_the_users_line_is_on_disk_before_the_model_is_asked(self):
+        _RecordingLLM.script = [llm_reply("hello back")]
+        out = self.run_harness("remember: the code is KESTREL-81" + chr(10))
+        self.assertIn("hello back", out.stdout)
+        first = _RecordingLLM.disk[0]                       # the file as it stood when request 1 arrived
+        self.assertIsNotNone(first, out.stdout + out.stderr)
+        self.assertEqual(first[-1]["content"], "remember: the code is KESTREL-81")
+
+    def test_a_file_left_by_a_crash_resumes_with_the_call_marked_interrupted(self):
+        crashed = [{"role": "user", "content": "deploy it"},
+                   {"role": "assistant", "content": "", "tool_calls": [tool_call("c9", command="deploy.cmd")]}]
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(crashed, f)
+        _RecordingLLM.script = [llm_reply("I will check first.")]
+        out = self.run_harness("did the deploy run?" + chr(10))
+        self.assertIn("[repaired 1 tool call", out.stdout)
+        sent = _RecordingLLM.bodies[0]["messages"]
+        roles = [m["role"] for m in sent]
+        self.assertEqual(roles, ["system", "user", "assistant", "tool", "user"])
+        self.assertEqual(sent[3]["tool_call_id"], "c9")
+        self.assertIn("INTERRUPTED", sent[3]["content"])
+        final = json.load(open("session.json", encoding="utf-8"))
+        self.assertEqual(final[-1]["content"], "I will check first.")
+        self.assertEqual([m["role"] for m in final][:4], ["user", "assistant", "tool", "user"])
 
 
 class TestHooksEndToEnd(HookBase):
