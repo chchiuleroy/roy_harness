@@ -8,7 +8,9 @@ Live: HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests -v
 
 Each test's docstring says WHY the behaviour matters, not just what it is.
 """
+import contextlib
 import http.server
+import io
 import json
 import os
 import queue
@@ -649,6 +651,7 @@ class TestCrashRecovery(Base):
         super().setUp()
         self.path = os.path.abspath("session.json")
         self._saved = (hv.SESSION_FILE, hv.call_llm, hv.run_calls)
+        hv._CHECKPOINT_WARNED[0] = False
 
     def tearDown(self):
         hv.SESSION_FILE, hv.call_llm, hv.run_calls = self._saved
@@ -745,7 +748,7 @@ class TestCrashRecovery(Base):
             checks("llm", self.on_disk())
             return replies.pop(0)
 
-        def fake_calls(calls, depth, label):
+        def fake_calls(calls, depth, label, **kw):
             checks("tools", self.on_disk())
             return ["hi"]
         hv.call_llm, hv.run_calls = fake_llm, fake_calls
@@ -779,7 +782,7 @@ class TestCrashRecovery(Base):
                               "finish_reason": "tool_calls"}], "usage": {}}
         hv.call_llm = lambda *a, **k: reply
 
-        def crash(calls, depth, label):
+        def crash(calls, depth, label, **kw):
             raise Crash()
         hv.run_calls = crash
         msgs = [{"role": "user", "content": "deploy it"}]
@@ -822,6 +825,174 @@ class TestCrashRecovery(Base):
         self.assertTrue(self.valid(stored), stored)
         self.assertEqual(stored[-1]["tool_call_id"], "k1")
         self.assertIn("INTERRUPTED", stored[-1]["content"])
+
+    # ------------------------------------------------ results as they arrive
+    def two_calls(self):
+        return [tool_call("c1", command="first"), tool_call("c2", command="second")]
+
+    def test_a_result_is_on_disk_before_the_next_tool_in_the_same_batch_starts(self):
+        """Found by the 小o review: results were added only after the whole batch returned,
+        so an interrupt in the second tool also erased the first tool's known result."""
+        hv.SESSION_FILE = self.path
+        calls = self.two_calls()
+        reply = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                              "finish_reason": "tool_calls"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+        real_exec = hv.execute_tool
+
+        def fake_exec(name, args, depth=0):
+            if args.get("command") == "second":
+                disk = self.on_disk()
+                self.assertEqual([m["role"] for m in disk], ["user", "assistant", "tool"])
+                self.assertEqual(disk[-1]["content"], "first done")        # already recorded
+                raise Crash()
+            return "first done"
+        hv.execute_tool = fake_exec
+        msgs = [{"role": "user", "content": "two things"}]
+        try:
+            with self.assertRaises(Crash):
+                hv.run_loop(msgs, hv.tools_for(0), "sys")
+        finally:
+            hv.execute_tool = real_exec
+        loaded, repaired = hv.load_session(self.path)
+        self.assertEqual(repaired, 1)                                      # only the one that was running
+        self.assertEqual([(m["role"], m.get("tool_call_id")) for m in loaded[2:]],
+                         [("tool", "c1"), ("tool", "c2")])
+        self.assertEqual(loaded[2]["content"], "first done")               # the real result survived
+        self.assertIn("INTERRUPTED", loaded[3]["content"])
+
+    def test_results_land_in_call_order_and_only_from_the_main_thread(self):
+        """`agent` calls run in a pool and can finish in any order; the file and the array must
+        still read c0, c1, c2, and nothing may touch them from a worker thread."""
+        import threading as th
+        hv.SESSION_FILE = self.path
+        calls = [tool_call("c0", "agent", task="slow"), tool_call("c1", "agent", task="fast"),
+                 tool_call("c2", command="plain")]
+        replies = [{"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                                 "finish_reason": "tool_calls"}], "usage": {}},
+                   {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}], "usage": {}}]
+        hv.call_llm = lambda *a, **k: replies.pop(0)
+        real_exec, real_cp = hv.execute_tool, hv.checkpoint
+        main = th.current_thread()
+        threads = []
+
+        def fake_exec(name, args, depth=0):
+            if args.get("task") == "slow":
+                time.sleep(0.3)
+            return f"result of {args.get('task') or args.get('command')}"
+
+        def spy(messages, depth=0):
+            threads.append(th.current_thread() is main)
+            real_cp(messages, depth)
+        hv.execute_tool, hv.checkpoint = fake_exec, spy
+        msgs = [{"role": "user", "content": "go"}]
+        try:
+            hv.run_loop(msgs, hv.tools_for(0), "sys")
+        finally:
+            hv.execute_tool, hv.checkpoint = real_exec, real_cp
+        order = [m["tool_call_id"] for m in msgs if m["role"] == "tool"]
+        self.assertEqual(order, ["c0", "c1", "c2"])
+        self.assertTrue(all(threads), threads)
+        self.assertTrue(self.valid(self.on_disk()))
+
+    def test_results_are_saved_as_each_one_exists_in_a_mixed_batch(self):
+        """Plain calls run in this thread while agents run in the pool. A result that exists is
+        written down at once if it is next in call order, and held back until it is."""
+        hv.SESSION_FILE = self.path
+        calls = [tool_call("c0", "agent", task="a0"), tool_call("c1", "agent", task="a1"),
+                 tool_call("c2", command="plain")]
+        replies = [{"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                                 "finish_reason": "tool_calls"}], "usage": {}},
+                   {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}], "usage": {}}]
+        hv.call_llm = lambda *a, **k: replies.pop(0)
+        real_exec, real_cp = hv.execute_tool, hv.checkpoint
+        tools_on_disk = []
+
+        def spy(messages, depth=0):
+            tools_on_disk.append(sum(m["role"] == "tool" for m in messages))
+            real_cp(messages, depth)
+        hv.execute_tool, hv.checkpoint = (lambda name, args, depth=0: "r"), spy
+        try:
+            hv.run_loop([{"role": "user", "content": "go"}], hv.tools_for(0), "sys")
+        finally:
+            hv.execute_tool, hv.checkpoint = real_exec, real_cp
+        # 0: the call itself, before anything runs; 0: c2 (plain) exists first but waits for c0 and
+        # c1; 1: c0 lands alone; 3: c1 and c2 together; (then the final reply's own save)
+        self.assertEqual(tools_on_disk[:4], [0, 0, 1, 3])
+
+    def test_a_plain_call_before_a_crash_in_a_mixed_batch_is_on_disk(self):
+        hv.SESSION_FILE = self.path
+        calls = [tool_call("p0", command="one"), tool_call("a1", "agent", task="x"),
+                 tool_call("a2", "agent", task="y"), tool_call("p3", command="boom")]
+        reply = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls},
+                              "finish_reason": "tool_calls"}], "usage": {}}
+        hv.call_llm = lambda *a, **k: reply
+        real_exec = hv.execute_tool
+
+        def fake_exec(name, args, depth=0):
+            if args.get("command") == "boom":
+                raise Crash()
+            return "done " + str(args.get("command") or args.get("task"))
+        hv.execute_tool = fake_exec
+        try:
+            with self.assertRaises(Crash):
+                hv.run_loop([{"role": "user", "content": "go"}], hv.tools_for(0), "sys")
+        finally:
+            hv.execute_tool = real_exec
+        disk = self.on_disk()
+        self.assertEqual([(m["role"], m.get("tool_call_id")) for m in disk[2:]], [("tool", "p0")])
+        self.assertEqual(disk[2]["content"], "done one")
+
+    def test_a_failed_checkpoint_is_reported_and_the_turn_goes_on(self):
+        """The file is now written many times a turn; a locked file or a full disk must not
+        end a turn whose tools have already run."""
+        hv.SESSION_FILE = self.path
+        real = hv.save_session
+
+        def broken(messages, path):
+            raise PermissionError("file is in use")
+        hv.save_session = broken
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.checkpoint([{"role": "user", "content": "x"}])
+                hv.checkpoint([{"role": "user", "content": "y"}])
+        finally:
+            hv.save_session = real
+        self.assertIn("could not write", out.getvalue())
+        self.assertEqual(out.getvalue().count("could not write"), 1)        # said once, not every time
+
+    # ------------------------------------------------------- slash commands
+    def test_clear_and_compact_are_written_down_at_once(self):
+        """Found by the 小o review: /clear and /compact changed the array in memory only, so a
+        crash right after /clear brought the cleared conversation back."""
+        hv.SESSION_FILE = self.path
+        msgs = [{"role": "user", "content": "old " + str(i)} if i % 2 == 0
+                else {"role": "assistant", "content": "a"} for i in range(14)]
+        hv.save_session(msgs, self.path)
+        hv.call_llm = lambda *a, **k: {"choices": [{"message": {"role": "assistant", "content": "SUMMARY"},
+                                                    "finish_reason": "stop"}], "usage": {}}
+        msgs = hv.run_slash("/compact", msgs)
+        self.assertEqual(self.on_disk(), msgs)
+        self.assertLess(len(msgs), 14)
+        msgs = hv.run_slash("/clear", msgs)
+        self.assertEqual(msgs, [])
+        self.assertEqual(self.on_disk(), [])
+
+    def test_main_runs_slash_commands_through_that_path(self):
+        import io as _io
+        saved = (sys.argv, sys.stdin, hv.finish_session)
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "old conversation"}], f)
+        hv.finish_session = lambda messages, path: None          # prove the checkpoint did it, not the exit save
+        sys.argv, sys.stdin = ["harness", "session.json"], _io.StringIO("/clear" + chr(10))
+        try:
+            hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.finish_session = saved
+        self.assertEqual(self.on_disk(), [])
 
     def test_a_subagent_array_is_never_written_to_the_session_file(self):
         hv.SESSION_FILE = self.path

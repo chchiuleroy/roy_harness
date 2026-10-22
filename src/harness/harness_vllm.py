@@ -1042,10 +1042,13 @@ def compact(messages, keep=None):
     return True
 
 # ------------------------------------------------------- ch 4: the loop
-def run_calls(calls, depth, label):
+def run_calls(calls, depth, label, on_result=None):
     """Run one assistant message's tool calls. Several `agent` calls run in
-    parallel (each has its own array); everything else runs in order."""
+    parallel (each has its own array); everything else runs in order.
+    on_result(i, result) is called as each result exists, from THIS thread (never from the
+    pool), so a caller can write results down while later calls are still running."""
     results = [None] * len(calls)
+    report = on_result or (lambda i, r: None)
     def one(i):
         fn = calls[i]["function"]
         print(f"  [{label}tool] {fn['name']}({fn['arguments'][:110]})")
@@ -1061,11 +1064,14 @@ def run_calls(calls, depth, label):
             for i in range(len(calls)):
                 if i not in futs:
                     results[i] = one(i)
+                    report(i, results[i])
             for i, f in futs.items():
                 results[i] = f.result()
+                report(i, results[i])
     else:
         for i in range(len(calls)):
             results[i] = one(i)
+            report(i, results[i])
     return results
 
 _sub_counter = [0]
@@ -1127,9 +1133,21 @@ def _run_loop(messages, tools, system, quiet, depth, label):
                 final_text += "\n[harness] reply hit max_tokens"
             return final_text
 
-        for c, result in zip(calls, run_calls(calls, depth, pre)):
-            messages.append({"role": "tool", "tool_call_id": c["id"],
-                             "content": result})
+        got, sent = {}, [0]
+
+        def landed(i, result):
+            """A tool result exists: add every result that is next in call order, and save."""
+            got[i] = result
+            while sent[0] in got:
+                j = sent[0]
+                messages.append({"role": "tool", "tool_call_id": calls[j]["id"],
+                                 "content": got.pop(j)})
+                sent[0] += 1
+            checkpoint(messages, depth)
+        results = run_calls(calls, depth, pre, on_result=landed)
+        for j in range(sent[0], len(calls)):                # anything that was not reported
+            messages.append({"role": "tool", "tool_call_id": calls[j]["id"],
+                             "content": results[j]})
         if depth == 0:                                      # ch 8: main loop only
             pending = drain_reminders()
             if pending:
@@ -1151,6 +1169,7 @@ HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
         "/stop <id>  /undo  /perms  /cache  /hooks  /mcp  /skills  /skill <name>")
 
 SESSION_FILE = None                # set by main(); None = no checkpoints (tests, one-shot use)
+_CHECKPOINT_WARNED = [False]
 INTERRUPTED = ("INTERRUPTED: the harness stopped while this call was running. It may or may "
                "not have run to completion. Check the current state (files, git status, "
                "processes) before repeating it.")
@@ -1169,7 +1188,13 @@ def checkpoint(messages, depth=0):
     the last assistant message with its tool_calls is on disk even though its results are not.
     A subagent's array is thrown away at the end of its task and is never written."""
     if SESSION_FILE and depth == 0:
-        save_session(messages, SESSION_FILE)
+        try:
+            save_session(messages, SESSION_FILE)
+        except OSError as e:                                # a locked file or a full disk
+            if not _CHECKPOINT_WARNED[0]:
+                _CHECKPOINT_WARNED[0] = True
+                print(f"\n[harness] could not write {SESSION_FILE} ({e}); "
+                      f"the turn goes on, and every later save will try again")
 
 def repair_interrupted(messages):
     """Give every tool_call that has no result an INTERRUPTED result, in place, right after
@@ -1209,6 +1234,15 @@ def finish_session(messages, session_file):
     """What the `finally` of main() runs: an interrupt can leave calls without results."""
     repair_interrupted(messages)
     save_session(messages, session_file)
+
+def run_slash(line, messages):
+    """Run a slash command and write the result down: /clear and /compact change the
+    conversation, and a crash right after them must not bring the old one back."""
+    _, fresh = slash(line, messages)
+    if fresh is not None:
+        messages = fresh
+    checkpoint(messages)
+    return messages
 
 def slash(cmd, messages):
     """Returns (handled, new_messages_or_None)."""
@@ -1321,9 +1355,7 @@ def main():
                 if line in ("/quit", ""):
                     break
                 if line.startswith("/"):
-                    _, fresh = slash(line, messages)
-                    if fresh is not None:
-                        messages = fresh
+                    messages = run_slash(line, messages)
                     continue
                 if not submit_filter(line):                 # ch 11: UserPromptSubmit
                     continue
