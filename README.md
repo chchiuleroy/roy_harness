@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（143 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 231 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（147 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 235 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-231 項 = 離線 208 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+235 項 = 離線 212 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -278,6 +278,14 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **needs_validation → 實測成立**：Windows 的 CreateProcess 在 PATH 之前先找目前資料夾，所以 hook 或 MCP stdio 設定寫裸命令（`python`、`whoami`）時，模型在專案資料夾放同名 `.exe` 就會被執行。審查者無法在唯讀沙盒驗證；我把 `hostname.exe` 複製成 `whoami.exe` 放進資料夾，hook 實際跑的是被植入的那個（先寫成失敗測試）。注意這台機器的環境變數 `NoDefaultCurrentDirectoryInExePath=1` 會讓問題不出現，要在父行程拿掉才重現，所以預設的 Windows 才會中。修法：`resolve_command`——裸名稱只查 PATH（照 `PATHEXT`），不看目前資料夾；帶路徑的照原樣；找不到就明確失敗。hook 與 MCP 都改用。
 - 審查者的 `not_checked`：沙盒無法建立暫存目錄，離線測試它那邊全沒跑成；沒有建真實 symlink／junction／短檔名／ADS／UNC；沒跑突變工具（假綠判斷來自逐測試核對）；沒連真實 MCP／HTTP 伺服器。這批修復**沒有再送下一輪**。
 - 小c 自己的核對：新增 8 項測試，突變 8 種全被抓（其中 2 種第一次存活，補了預算掃描與 MCP 找不到命令兩個測試後被抓）。
+
+**第二輪複審（2026-10-21，Codex 唯讀，範圍 `fbd38be`）**：3 項 `confirmed`、3 項 `rejected`；逐條處理並先寫失敗測試。
+- **PATH 含相對目錄（審查者評 high，我評 medium）**：`resolve_command` 只跳過空的 PATH 元素，PATH 裡有 `.` 或 `bin` 時，專案資料夾又回到搜尋裡。審查者在行程內實測：PATH 設成 `.` 後，`resolve_command("MEMO.md")` 回傳 `.` 加反斜線再加檔名的相對路徑。我把嚴重度調低是因為需要使用者的 PATH 本來就含 `.`；修法：相對的 PATH 元素與「目前資料夾本身」都略過。限制：PATH 裡指向專案**子資料夾**的絕對路徑沒有擋（那是使用者刻意設的）。
+- **medium（回歸）**：Windows 上先試無副檔名的檔案，而 Node 的 `npm`／`npx` 在同資料夾有無副檔名的 Unix shim 與 `.cmd`；裸 `npx` 被解析到 shim，`Popen` 得到 WinError 193。修法：Windows 只認 PATHEXT 候選；非 Windows 要求檔案可執行。**非 Windows 的可執行檢查沒有在 POSIX 主機上跑過**（突變測不到）。
+- **high（漏修同類路徑）**：Hook 逾時與停止背景程序用裸 `taskkill` 清行程樹，同樣會先找目前資料夾，被植入的 `taskkill.exe` 會被執行。修法：用 `SystemRoot` 下 `System32` 的 `taskkill.exe` 全路徑，`harness_vllm._kill_tree` 改成呼叫 `harness_hooks.kill_tree`（原本兩份重複的程式）。
+- 審查者的盤點：全部啟動點 6 處——hook、MCP（已修）、2 處 `taskkill`（本輪修）、前景與背景 shell（模型明確要求的 shell 路徑，本來就問人，不在範圍）。
+- 審查者 `rejected`：`_fit_menu` 減 1 在空集合下安全；測試清掉環境變數的處理不會洩漏；`./tool` 與絕對路徑照原樣保留。審查者的 `not_checked`：沙盒無法跑測試、沒有 POSIX 主機、沒測其他檔案系統、批次檔 metacharacter（args 來自可信設定，沒有模型資料進 argv）。這批修復**沒有再送下一輪**。
+- 小c 的核對：新增 4 項測試，突變 5 種全被抓，1 種（非 Windows 的可執行檢查）在 Windows 上測不到。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。

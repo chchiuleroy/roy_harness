@@ -1271,6 +1271,8 @@ class TestBareCommandPlanting(HookBase):
         saved = os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
         if saved is not None:
             self.addCleanup(os.environ.__setitem__, "NoDefaultCurrentDirectoryInExePath", saved)
+        self._path = os.environ.get("PATH", "")
+        self.addCleanup(os.environ.__setitem__, "PATH", self._path)
         system32 = os.path.join(os.environ["SystemRoot"], "System32")
         self.real = os.path.join(system32, "whoami.exe")
         self.other = os.path.join(system32, "hostname.exe")
@@ -1313,6 +1315,62 @@ class TestBareCommandPlanting(HookBase):
         with self.assertRaises(hm.McpError) as ctx:
             hm.StdioServer("x", hm.Spec(type="stdio", command="no-such-prog-xyz")).start()
         self.assertIn("not found on PATH", str(ctx.exception))
+
+    def test_a_relative_or_current_folder_path_entry_does_not_bring_the_folder_back(self):
+        """Found by the second 小o re-review: only an EMPTY PATH element was skipped, so
+        a `.` (or `bin`) entry put the model-writable project folder back in the search."""
+        self.plant()
+        here = os.getcwd()
+        for entry in (".", "", os.curdir + os.sep, here):
+            os.environ["PATH"] = entry + os.pathsep + self._path
+            got = self.hh.resolve_command("whoami")
+            self.assertNotEqual(os.path.abspath(got), os.path.abspath("whoami.exe"), entry)
+        os.makedirs("bin")
+        shutil.copy(self.other, os.path.join("bin", "whoami.exe"))
+        os.environ["PATH"] = "bin" + os.pathsep + self._path             # relative: refused
+        self.assertNotEqual(os.path.abspath(self.hh.resolve_command("whoami")),
+                            os.path.abspath(os.path.join("bin", "whoami.exe")))
+
+    def test_an_absolute_path_entry_elsewhere_is_still_used(self):
+        other = os.path.join(tempfile.mkdtemp(), "tools")
+        os.makedirs(other)
+        self.addCleanup(shutil.rmtree, os.path.dirname(other), True)
+        shutil.copy(self.other, os.path.join(other, "mytool.exe"))
+        os.environ["PATH"] = other
+        self.assertEqual(os.path.normcase(self.hh.resolve_command("mytool")),
+                         os.path.normcase(os.path.join(other, "mytool.exe")))
+
+    def test_an_extensionless_file_is_not_taken_for_a_program_on_windows(self):
+        """`npx` and `npm` ship an extensionless Unix shim next to npx.cmd; CreateProcess
+        cannot run the shim (WinError 193), so only PATHEXT candidates count."""
+        folder = os.path.join(tempfile.mkdtemp(), "nodejs")
+        os.makedirs(folder)
+        self.addCleanup(shutil.rmtree, os.path.dirname(folder), True)
+        for name in ("tool", "tool.cmd", "lonely"):
+            with open(os.path.join(folder, name), "w") as f:
+                f.write("@echo off" + chr(10))
+        os.environ["PATH"] = folder
+        self.assertTrue(self.hh.resolve_command("tool").lower().endswith("tool.cmd"))
+        self.assertIsNone(self.hh.resolve_command("lonely"))
+        self.assertTrue(self.hh.resolve_command("tool.cmd").lower().endswith("tool.cmd"))
+
+    def test_process_tree_cleanup_runs_the_system_taskkill_not_a_bare_name(self):
+        """The same planting works through `taskkill`, which a hook timeout or a stopped
+        background process starts by bare name (found by the second 小o re-review)."""
+        import types
+        seen = []
+        proc = types.SimpleNamespace(pid=4242, kill=lambda: None)
+        old = subprocess.run
+        subprocess.run = lambda argv, **kw: seen.append(argv[0])
+        try:
+            self.hh.kill_tree(proc)
+            hv._kill_tree(proc)
+        finally:
+            subprocess.run = old
+        self.assertEqual(len(seen), 2)
+        for exe in seen:
+            self.assertTrue(os.path.isabs(exe), exe)
+            self.assertTrue(exe.lower().endswith("taskkill.exe"), exe)
 
     def test_mcp_stdio_servers_are_resolved_the_same_way(self):
         import harness_mcp as hm

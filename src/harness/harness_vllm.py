@@ -477,11 +477,7 @@ def run_shell(command, timeout=300):
     return out
 
 def _kill_tree(proc):
-    if sys.platform == "win32":                     # terminate() leaves children
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       capture_output=True)
-    else:
-        proc.kill()
+    harness_hooks.kill_tree(proc)
 
 def wake():
     EVENTS.put(("wake", None))

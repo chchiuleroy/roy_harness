@@ -262,11 +262,12 @@ def is_protected(path, cfg):
 
 
 def kill_tree(proc):
-    # same as harness_vllm._kill_tree; that module imports this one, so it cannot
-    # be imported back (ponytail: merge into one shared helper if a third user appears)
     if sys.platform == "win32":                    # terminate() leaves children
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       capture_output=True)
+        # the system copy by full path: a bare name would be looked up in the current
+        # folder first, where the model can plant a taskkill.exe
+        taskkill = os.path.join(os.environ.get("SystemRoot", "C:/Windows"),
+                                "System32", "taskkill.exe")
+        subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
     else:
         proc.kill()
 
@@ -275,17 +276,25 @@ def resolve_command(command):
     """Where a configured command really lives. A name with a folder part is used as
     given. A bare name is looked up on PATH only: on Windows CreateProcess would try the
     current folder FIRST (measured: a hook.exe copied there ran for command `hook`), and
-    the model can create files in that folder. -> a path, or None when PATH has none."""
+    the model can create files in that folder. PATH entries that are relative (`.`,
+    `bin`) or are the current folder itself are skipped for the same reason. On Windows
+    only PATHEXT candidates count (npx ships an extensionless shim that cannot run next
+    to npx.cmd); elsewhere the file must be executable. -> a path, or None."""
     if os.path.dirname(command) or os.path.isabs(command):
         return command
-    exts = [""] if os.path.splitext(command)[1] else         [""] + [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    if os.name == "nt":
+        pathext = [e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        names = [command] if os.path.splitext(command)[1].lower() in pathext             else [command + e for e in pathext]
+    else:
+        names = [command]
+    here = os.path.normcase(os.path.realpath(os.getcwd()))
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         folder = folder.strip().strip(chr(34))
-        if not folder:
+        if not os.path.isabs(folder) or os.path.normcase(os.path.realpath(folder)) == here:
             continue
-        for ext in exts:
-            candidate = os.path.join(folder, command + ext)
-            if os.path.isfile(candidate):
+        for name in names:
+            candidate = os.path.join(folder, name)
+            if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
                 return candidate
     return None
 
