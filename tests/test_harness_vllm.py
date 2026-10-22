@@ -1022,6 +1022,32 @@ class TestCrashRecovery(Base):
         self.assertIn("could not write", out.getvalue())
         self.assertIn("file is in use", out.getvalue())
 
+    def test_a_new_failure_after_a_successful_save_warns_again(self):
+        """Found by the 小o review: the warning flag never reset, so after one early failure every
+        later one was silent -- and a crash then left the user believing the work was saved."""
+        hv.SESSION_FILE = self.path
+        real = hv.save_session
+        broken = [True]
+
+        def flaky(messages, path):
+            if broken[0]:
+                raise PermissionError("file is in use")
+            real(messages, path)
+        hv.save_session = flaky
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                hv.checkpoint([{"role": "user", "content": "1"}])        # fails: warns
+                hv.checkpoint([{"role": "user", "content": "2"}])        # still failing: quiet
+                broken[0] = False
+                hv.checkpoint([{"role": "user", "content": "3"}])        # works: the file is current again
+                broken[0] = True
+                hv.checkpoint([{"role": "user", "content": "4"}])        # a NEW failure: warns again
+        finally:
+            hv.save_session = real
+        self.assertEqual(out.getvalue().count("could not write"), 2)
+        self.assertEqual(self.on_disk()[0]["content"], "3")
+
     def test_repair_only_reorders_when_nothing_is_missing(self):
         msgs = [{"role": "assistant", "content": "", "tool_calls": [tool_call("a"), tool_call("b")]},
                 {"role": "tool", "tool_call_id": "b", "content": "B"},

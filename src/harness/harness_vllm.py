@@ -1189,6 +1189,7 @@ def try_save(messages, session_file, once=True):
     must not end a turn whose tools already ran, nor hide the error that is being handled)."""
     try:
         save_session(messages, session_file)
+        _CHECKPOINT_WARNED[0] = False                       # current again: a new failure speaks up
         return True
     except OSError as e:
         if not once or not _CHECKPOINT_WARNED[0]:
