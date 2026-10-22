@@ -303,12 +303,15 @@ def _inside_or_same(path, folder):
     current, unknown = path, False
     while True:
         here = _identity(current)
+        parent = os.path.dirname(current)
+        at_root = parent == current or not parent
         if here is None:
-            unknown = True           # a link in the chain cannot be identified
+            # a link in the chain cannot be identified (the drive or share root excepted:
+            # it could only equal the project if the project's own identity were unreadable)
+            unknown = unknown or not at_root
         elif here == target:
             return True
-        parent = os.path.dirname(current)
-        if parent == current or not parent:
+        if at_root:
             return unknown and _is_unc(path)
         current = parent
 
