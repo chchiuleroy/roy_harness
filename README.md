@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（166 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 254 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（197 項；另有 `tests/test_harness_mcp.py` 與 `tests/test_harness_mcp_live.py`，與 `tests/test_harness_skills.py`，合計 286 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -229,7 +229,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 11 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器，約 90 秒
 ```
 
-254 項 = 離線 231 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+286 項 = 離線 263 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -320,6 +320,22 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **介面實測**（終端機，預寫輸入檔重導向餵 REPL，不是真人互動）：skill 載入、hook 否決寫檔、MCP `add`＝42、正常寫檔，全部符合預期。
 
 *這輪找出、修掉的缺陷與審查*：除上面兩個實測發現，還有四輪小o 審查（每輪都先寫失敗測試、再做突變驗證）——第四輪（範圍 `0f44223`）空 findings；第五輪（範圍 `d2e4c2b` 與三個實驗的方法論）6 項 confirmed：清單漏掉與 reminder 合併的使用者文字、身分讀不到時 fail-open、清單跨壓縮累積、壓縮實驗沒配對、S 優於 D 的結論被缺席目標主導、bootstrap 沒納入取樣層級；第六輪 7 項 confirmed：reminder 與使用者文字無法區分、用內容哨兵儲存會與使用者／摘要文字碰撞、預算不含標頭與計數、UNC 規則過寬、bootstrap 沒保留階層與配對、把 S−D 歸因於縮短、單字元目標評分不可靠；第七輪 2 項 low：摘要模型可偽造清單、計數器可無限大；第八輪（範圍 `8cb9a1a`）**空 findings**。第六輪的核心批評促成把儲存格式從自由文字改成 JSON。**審查者的沙盒始終無法建立暫存目錄，測試都沒在它那邊跑成，結論來自靜態檢查加唯讀小實驗。** 「收斂」的標準是某一輪回空 findings，不是「沒有缺陷」；連續多輪都有新發現，空 findings 只代表這位審查者這一輪沒找到。
+
+**崩潰恢復（2026-10-22）**
+
+*動機（實測）*：工具執行到一半按 Ctrl-C，`finally` 會把當時的對話原樣存檔，結尾是帶 `tool_calls` 的 assistant 訊息、沒有任何工具結果。拿這種歷史問真實 vLLM，伺服器不報錯，但模型回了一個新的 `run_command`（把指令再發一次），沒有回答「剛才那個指令成功了嗎」（1 次）。另外，原本只在「一輪結束」與離開時存檔，當機會遺失整輪。
+
+*做法（想法來自 Pi Durable 的「先提交意圖、再執行外部效果、再提交結果」，見 wiki `entity_pi_agent`；這裡只借這個紀律，不借它的儲存引擎）*：
+- **先寫再執行**：`checkpoint()` 在三個時刻把主對話存檔——使用者那行加進去之後（模型還沒看到之前）、帶 `tool_calls` 的 assistant 訊息加進去之後（呼叫在執行前就落地）、**每個工具結果一產生就存**（依呼叫順序併入；已完成但還在等前面呼叫的結果也一併寫入）。子 agent 的陣列從不寫檔。`/clear`、`/compact` 之後也存。
+- **重開時修補，不重跑**：載入（與離開）時，沒有結果的呼叫補一則 `INTERRUPTED`（「程式在這個呼叫期間中斷，可能跑完也可能沒有，重做前請先檢查狀態」）；亂序存的結果重排回呼叫順序；對不上任何呼叫或重複的結果保留不丟。**絕不自動重新執行任何呼叫**——非冪等的指令（`git commit`、`pip install`、`rm`）重跑會出事，而且會繞過人工核准。
+- **存檔本身**：寫檔前 `flush` 加 `fsync`，再原子取代；存檔失敗（鎖住的檔案、滿的磁碟）只在第一次警告、不中止回合，之後又成功存過再失敗會再警告；離開時存檔失敗一律說 `[session NOT saved]`；`MCP.close()` 一定會跑。
+- **要不要接資料庫**：目前不需要。存一次整個 JSON 的成本（含 `fsync`，實測 Windows 筆電 SSD 上的中位數）：72 KB 3.2 ms、361 KB 6.0 ms、722 KB 8.7 ms（壓縮門檻 96,000 tokens 時的大小）；SQLite 開 WAL 加 `synchronous=FULL` 附加一則訊息 0.7 ms、不隨 session 變大。差距是毫秒，對比一次模型呼叫的秒級可以忽略。SQLite 的耐久性也沒有比 fsync 過的單一檔案強（Pi Durable 官方文件自己寫：WAL 加 `synchronous=NORMAL` 只保證行程崩潰，斷電時最新的 commit 可能遺失）。真正會讓資料庫值得的條件是：多個行程共用狀態、要跨 session 查詢或審計、不壓縮的超長 session、需要把多筆記錄做成一個原子 commit——這些都不是現在這個單人命令列 harness 的情況（它們是 OpenHands 治理平台那邊的問題，那邊本來就用 Postgres）。
+
+*驗證*：新增約 30 項測試（含真實子行程與腳本化伺服器的端對端：使用者那行在模型被呼叫前已在磁碟、崩潰遺留的檔案續跑時送給模型的歷史已修補）；突變驗證每一輪都先寫失敗測試、再把關鍵行拿掉看測試會不會紅，過程中出現過的存活突變都補測到被抓。真實 vLLM 上（同一個孤兒歷史、3 次）：3/3 先用 `dir`／`type` 檢查 `done.txt` 的狀態再回答，沒有盲目重發；其中 1 次發現檔案不存在後自己改用別的指令重做（驗證後重做，合理）；另 2 次的「成功」是同一資料夾裡前一次已建立檔案（受污染），不能當作原指令成功的證據。
+
+*審查（小o，唯讀、契約 v1.1，沙盒始終無法建暫存目錄所以測試沒在它那邊跑成，結論來自靜態檢查加不落盤的小實驗）*：連續六輪，每輪都先寫失敗測試再修——第 1 輪 2 項（`/clear`、`/compact` 沒存；多工具批次裡後段中斷會丟掉前段已完成的結果）、第 2 輪 2 項（並行批次裡已完成的後段結果會被丟掉；存檔失敗的容錯被 `main()` 的直接存檔抵銷）、第 3 輪 1 項（成功存檔後警告旗標沒重設，之後的失敗靜默）、第 4 輪 1 項（最終存檔失敗後仍印 `[session saved]`）、第 5 輪 1 項（Ctrl-C 時已被 checkpoint 保存、但還在等前序呼叫的真實結果，被離開時的存檔覆寫成 `INTERRUPTED`，這是**實際遺失使用者已取得結果**的缺陷，是我只測了硬崩潰、沒測 Ctrl-C 路徑造成的）、第 6 輪**空 findings**。
+
+*限度*：背景任務、monitor、排程喚醒、待處理 reminder 都在記憶體，崩潰後遺失；子 agent 的中途進度不存（崩潰時主 agent 只會留下一個被標成中斷的 `agent` 呼叫）；MCP 伺服器重啟；`agent` 並行池的結果要等取回才寫入；工具副作用完成到結果落盤之間有一個無法消除的小視窗（`INTERRUPTED` 的語意本來就涵蓋「可能已執行」）；多個行程共用同一個 session 檔仍會互相覆蓋（既有限制）；`fsync` 的耐久性沒有以斷電實測；只在 Windows 11 測過。
 
 **量測結果（單一模型、少量樣本，不可外推）**
 - 壓縮：live 連續 5 次，早期暗號都保留。
