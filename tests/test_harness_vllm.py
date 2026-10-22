@@ -371,6 +371,58 @@ class TestCompaction(Base):
                     self.assertIn(x["tool_call_id"], seen_calls,
                                   f"orphan tool result with keep={keep}")
 
+    def chat(self, n_pairs, first="請記住暗號 QUARTZ-2290，之後我會問你。"):
+        m = [{"role": "user", "content": first}, {"role": "assistant", "content": "好的。"}]
+        for i in range(n_pairs):
+            m += [{"role": "user", "content": f"問題 {i}"}, {"role": "assistant", "content": f"答 {i}"}]
+        return m
+
+    def test_what_the_user_said_survives_even_when_the_summary_forgets_it(self):
+        """Measured live (2026-10-22): the summariser, told to keep every user-stated fact
+        verbatim, still dropped 'ZEBRA-4417' from a short early message (reproduced at
+        temperature 0), and 2 of 20 other early facts. The summary is a model's judgment;
+        what the user typed is cheap to keep as it is, so the harness does that itself."""
+        hv.call_llm = lambda *a, **k: llm_reply("TASK: explain standard errors. FACTS: none.")
+        m = self.chat(6)
+        self.assertTrue(hv.compact(m, keep=4))
+        self.assertIn("QUARTZ-2290", m[0]["content"])
+        self.assertIn("問題 0", m[0]["content"])
+        listing = m[0]["content"].split("USER MESSAGES")[-1]
+        self.assertNotIn("問題 5", listing)          # still in the kept tail; no second copy
+
+    def test_harness_reminders_are_not_copied_into_the_verbatim_list(self):
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(5)
+        m.insert(3, {"role": "user", "content": "<system-reminder>Background task t1 finished: exit 0</system-reminder>"})
+        hv.compact(m, keep=3)
+        self.assertNotIn("Background task t1", m[0]["content"].split("USER MESSAGES")[-1])
+
+    def test_the_verbatim_list_is_bounded_and_keeps_both_ends(self):
+        """A long session must not turn the summary into a second copy of the chat."""
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(400, first="FIRST-FACT-001")
+        m[-2]["content"] = "LAST-FACT-999"
+        hv.compact(m, keep=4)
+        listing = m[0]["content"].split("USER MESSAGES")[-1]
+        self.assertLessEqual(len(listing), hv.VERBATIM_BUDGET + 400)
+        self.assertIn("FIRST-FACT-001", listing)
+        self.assertIn("問題 396", listing)
+        long = self.chat(3, first="X" * 5000)
+        hv.compact(long, keep=2)
+        self.assertLess(len(long[0]["content"]), hv.VERBATIM_BUDGET + 3000)
+        self.assertNotIn("X" * (hv.VERBATIM_EACH + 50), long[0]["content"])   # one message is clipped
+
+    def test_a_second_compaction_keeps_the_first_summary_and_adds_its_own_list(self):
+        hv.call_llm = lambda *a, **k: llm_reply("SUMMARY")
+        m = self.chat(6)
+        hv.compact(m, keep=4)
+        m += [{"role": "user", "content": "新事實 NEW-FACT-31"}, {"role": "assistant", "content": "好"}]
+        m += [{"role": "user", "content": f"再問 {i}"} for i in range(4)]
+        hv.compact(m, keep=2)
+        head = m[0]["content"]
+        self.assertIn("QUARTZ-2290", head)
+        self.assertIn("NEW-FACT-31", head)
+
     def test_summary_replaces_old_and_keeps_recent_verbatim(self):
         hv.call_llm = lambda *a, **k: llm_reply("SUMMARY with ZEBRA-7421")
         m = self.fake_history()
@@ -1260,6 +1312,50 @@ class TestHookRobustness(HookBase):
         self.assertEqual(_HookServer.seen[0][1]["x"], lone)
 
 
+class TestPosixResolutionLogic(HookBase):
+    """The non-Windows branch of resolve_command, run on any machine by giving the module
+    a stand-in for `os` that says it is POSIX and decides which files are executable.
+    This checks OUR logic (first EXECUTABLE match wins, no PATHEXT suffixes). It does not
+    check what a real POSIX kernel means by 'executable'; that needs a POSIX host, and
+    this machine has none (no WSL distro, no Docker)."""
+    def setUp(self):
+        super().setUp()
+        import types
+        self.folders = []
+        base = tempfile.mkdtemp()                  # outside the working folder, or it is skipped
+        self.addCleanup(shutil.rmtree, base, True)
+        for name in ("first", "second"):
+            folder = os.path.join(base, name)
+            os.makedirs(folder)
+            self.folders.append(folder)
+            with open(os.path.join(folder, "tool"), "w") as f:
+                f.write("x")
+        self.executable = set()
+        real = os
+        self.fake = types.SimpleNamespace(
+            name="posix", path=real.path, pathsep=real.pathsep, getcwd=real.getcwd,
+            stat=real.stat,
+            environ={"PATH": real.pathsep.join(self.folders), "PATHEXT": ".EXE"},
+            access=lambda path, mode: path in self.executable, X_OK=real.X_OK)
+        self.real_os = self.hh.os
+        self.hh.os = self.fake
+        self.addCleanup(setattr, self.hh, "os", self.real_os)
+
+    def test_the_first_executable_match_wins_not_the_first_file(self):
+        later = os.path.join(self.folders[1], "tool")
+        self.executable.add(later)
+        self.assertEqual(self.hh.resolve_command("tool"), later)
+
+    def test_a_file_that_is_not_executable_anywhere_is_not_found(self):
+        self.assertIsNone(self.hh.resolve_command("tool"))
+
+    def test_no_windows_suffixes_are_tried(self):
+        with open(os.path.join(self.folders[0], "tool.exe"), "w") as f:
+            f.write("x")
+        self.executable.add(os.path.join(self.folders[0], "tool.exe"))
+        self.assertIsNone(self.hh.resolve_command("tool"))
+
+
 @unittest.skipUnless(os.name == "nt", "only Windows looks in the current folder first")
 class TestBareCommandPlanting(HookBase):
     """On Windows CreateProcess looks for a bare command name in the current folder BEFORE
@@ -1365,6 +1461,39 @@ class TestBareCommandPlanting(HookBase):
             got = self.hh.resolve_command("whoami")
             self.assertNotEqual(os.path.normcase(os.path.realpath(os.path.dirname(got))),
                                 os.path.normcase(os.path.realpath(inside)), entry)
+
+    def test_a_unc_spelling_of_a_folder_inside_the_project_is_ignored_too(self):
+        """Found by testing the UNC case the 小o re-reviews could not reach: the admin share
+        \\localhost\C$\... is the same folder, but realpath keeps the UNC spelling,
+        so the path comparison missed it and the planted exe was chosen. The folders must
+        be compared by identity (volume + file index), which is the same for every
+        spelling."""
+        b = chr(92)
+        drive, rest = os.path.splitdrive(os.getcwd())
+
+        def unc(path):
+            d, r = os.path.splitdrive(os.path.abspath(path))
+            return b * 2 + "localhost" + b + d[0] + "$" + r
+
+        probe = unc(os.getcwd())
+        if not os.path.isdir(probe):
+            self.skipTest("no accessible local admin share on this machine")
+        os.makedirs("tools")
+        shutil.copy(self.other, os.path.join("tools", "whoami.exe"))
+        for entry in (unc("tools"), unc("."), unc(os.getcwd())):
+            os.environ["PATH"] = entry + os.pathsep + self._path
+            got = self.hh.resolve_command("whoami")
+            self.assertNotIn("tools", os.path.basename(os.path.dirname(got)), entry)
+            self.assertFalse(os.path.samefile(os.path.dirname(got), os.path.abspath("tools")), entry)
+        # and the other way round: the process runs from a UNC spelling of the project
+        here = os.getcwd()
+        os.chdir(unc(here))
+        try:
+            os.environ["PATH"] = os.path.abspath(os.path.join(here, "tools")) + os.pathsep + self._path
+            got = self.hh.resolve_command("whoami")
+        finally:
+            os.chdir(here)
+        self.assertFalse(os.path.samefile(os.path.dirname(got), os.path.join(here, "tools")))
 
     def test_an_odd_pathext_does_not_make_a_valid_command_unfindable(self):
         """Found by the third 小o re-review: an empty PATHEXT, one without .EXE, or one with

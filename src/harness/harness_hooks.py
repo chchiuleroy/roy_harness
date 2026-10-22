@@ -272,14 +272,38 @@ def kill_tree(proc):
         proc.kill()
 
 
-def _inside_or_same(path, folder):
-    """True when `path` is `folder` or below it, after real-path and case folding (so a
-    junction, a mapped drive or an 8.3 short name of it counts too)."""
-    path, folder = (os.path.normcase(os.path.realpath(x)) for x in (path, folder))
+def _identity(path):
+    """(device, file index) of an existing path, or None. Every spelling of one folder
+    (a junction, a mapped drive, an 8.3 short name, the local machine's UNC admin
+    share) gives the same pair; a path string does not."""
     try:
-        return os.path.commonpath([path, folder]) == folder
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def _inside_or_same(path, folder):
+    """True when `path` is `folder` or below it, however either is spelled. By path
+    (real path + case folding) and, because realpath keeps a UNC spelling as it is, also
+    by identity: walk up from `path` and compare each ancestor's identity with `folder`'s."""
+    a, b = (os.path.normcase(os.path.realpath(x)) for x in (path, folder))
+    try:
+        if os.path.commonpath([a, b]) == b:
+            return True
     except ValueError:                             # different drives
+        pass
+    target = _identity(folder)
+    if target is None:
         return False
+    current = path
+    while True:
+        if _identity(current) == target:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current or not parent:
+            return False
+        current = parent
 
 
 def resolve_command(command):
