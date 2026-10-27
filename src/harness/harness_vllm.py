@@ -652,9 +652,16 @@ def memory_protected(path):
     """AGENT.md is loaded as the user's standing instructions (system prompt) at every start,
     so a file the model can rewrite is a persistence path. Compared as the OS will see the
     file (./, .., case, Windows trailing dots and spaces), not as a substring: only the one
-    file the harness reads, so subagent.md and docs/AGENT.md stay writable."""
-    return (harness_hooks.canonical(path)
-            == harness_hooks.canonical(os.path.join(os.getcwd(), MEMORY_FILE)))
+    file the harness reads, so subagent.md and docs/AGENT.md stay writable. A second name for
+    the same data (hard link, a share reached by drive letter and by UNC) has a different
+    path, so a file that already exists is also compared by identity."""
+    if (harness_hooks.canonical(path)
+            == harness_hooks.canonical(os.path.join(os.getcwd(), MEMORY_FILE))):
+        return True
+    try:
+        return os.path.samefile(path, MEMORY_FILE)
+    except (OSError, ValueError):                   # one of them does not exist (yet)
+        return False
 READ_STATE = {}                    # path -> time when the model last read it
 RISKY = ("rm ", "del ", "rmdir", "sudo", "--force", "push", "curl", "wget",
          "> /", "format ")
@@ -1236,6 +1243,8 @@ INTERRUPTED = ("INTERRUPTED: the harness stopped while this call was running. It
 
 def save_session(messages, session_file):
     tmp = session_file + ".tmp"
+    if memory_protected(tmp) or memory_protected(session_file):    # checkpoints bypass gate()
+        raise OSError(f"refusing to write {MEMORY_FILE} (the project memory) as a session file")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(messages, f, indent=1, ensure_ascii=False)
         f.flush()
