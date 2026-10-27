@@ -130,9 +130,9 @@ MAX_MEMORY_CHARS = 20_000          # it rides along on every request, so it has 
 MEMORY = ""                        # AGENT.md as it stood at startup (see system_prompt)
 
 def load_memory():
-    """AGENT.md, read once at startup. A snapshot on purpose: the file is not write-protected,
-    so re-reading it per request would let the model rewrite its own standing instructions
-    mid-session and have them take effect at once."""
+    """AGENT.md, read once at startup. A snapshot on purpose: the model's file tools cannot
+    write it (see memory_protected) but a shell string check is best effort, so re-reading it
+    per request would let a rewrite take effect at once instead of at the next start."""
     if not os.path.exists(MEMORY_FILE):
         return ""
     with open(MEMORY_FILE, encoding="utf-8") as f:
@@ -647,6 +647,14 @@ PROTECTED = (".env", ".ssh", "id_rsa", ".aws/credentials",
              ".harness_permissions", ".harness_backup", ".harness.hooks", ".harness.mcp")
 STATE_FILES = (".harness_permissions", ".harness_backup", ".harness.env",
                ".harness.hooks", ".harness.mcp")
+
+def memory_protected(path):
+    """AGENT.md is loaded as the user's standing instructions (system prompt) at every start,
+    so a file the model can rewrite is a persistence path. Compared as the OS will see the
+    file (./, .., case, Windows trailing dots and spaces), not as a substring: only the one
+    file the harness reads, so subagent.md and docs/AGENT.md stay writable."""
+    return (harness_hooks.canonical(path)
+            == harness_hooks.canonical(os.path.join(os.getcwd(), MEMORY_FILE)))
 READ_STATE = {}                    # path -> time when the model last read it
 RISKY = ("rm ", "del ", "rmdir", "sudo", "--force", "push", "curl", "wget",
          "> /", "format ")
@@ -757,9 +765,9 @@ def gate(name, args):
         if sys.platform == "win32" and ":" in os.path.splitdrive(path)[1]:
             return f"BLOCKED: {path}: NTFS alternate data streams are not allowed."
         if (harness_hooks.is_protected(path, HOOKS) or harness_mcp.is_protected(path, MCP)
-                or harness_skills.is_protected(path, SKILLS)):
+                or harness_skills.is_protected(path, SKILLS) or memory_protected(path)):
             return (f"BLOCKED: {path} is a protected path (hook or MCP config, a script "
-                    f"they run, or a skills folder).")
+                    f"they run, a skills folder, or the project memory {MEMORY_FILE}).")
         if not inside_root(path):                       # layer 4: confinement
             return f"BLOCKED: writes are confined to the project root {root()}."
         if name == "edit_file":
@@ -777,7 +785,8 @@ def gate(name, args):
         if (any(s in low for s in STATE_FILES)          # best effort: a shell can
                 or harness_hooks.mentions_protected_name(low, HOOKS)
                 or harness_mcp.mentions_protected_name(low, MCP)
-                or harness_skills.mentions_protected(low, SKILLS)):
+                or harness_skills.mentions_protected(low, SKILLS)
+                or harness_hooks.mentions_any(low, {MEMORY_FILE.lower()})):
             return ("BLOCKED: harness state files (permissions, backups, "   # still
                     "local env) are off limits to commands.")                # obfuscate
         if cmd.strip().lower().startswith(("sleep", "start-sleep", "timeout")):
@@ -1362,6 +1371,8 @@ def slash(cmd, messages):
 def main():
     global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS, MEMORY
     session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
+    if memory_protected(session_file):      # checkpoints rewrite the session without gate()
+        raise SystemExit(f"the session file cannot be the project memory file ({MEMORY_FILE})")
     global SESSION_FILE
     SESSION_FILE = session_file
     SESSION_ID = os.path.basename(session_file)
