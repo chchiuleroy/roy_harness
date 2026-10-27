@@ -2793,6 +2793,178 @@ class TestRecoveryEndToEnd(Base):
         self.assertEqual([m["role"] for m in final][:4], ["user", "assistant", "tool", "user"])
 
 
+class TestAgentMemory(Base):
+    """AGENT.md is the user's standing instruction. As a reminder in the first message it was
+    read only for a brand-new session (a resumed one never saw it again), vanished on /clear,
+    and was handed to the summariser by compaction. The system prompt is rebuilt for every
+    request, so that is where a standing instruction has to live."""
+
+    MARK = "The project codename is KIWI-99."
+
+    def setUp(self):
+        super().setUp()
+        _LLMServer.script, _LLMServer.bodies = [], []
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LLMServer)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self._memory = hv.MEMORY
+        self.addCleanup(setattr, hv, "MEMORY", self._memory)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        super().tearDown()
+
+    def run_harness(self, stdin_text, **env_extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("VLLM_", "HARNESS_"))}
+        env.update(HARNESS_BASE_URL=f"http://127.0.0.1:{self.srv.server_address[1]}/v1",
+                   HARNESS_STREAM="0", PYTHONUTF8="1", **env_extra)
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", os.path.join(SRC, "harness_vllm.py"), "session.json"],
+            input=stdin_text, capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+
+    def write_memory(self, text=None):
+        with open("AGENT.md", "w", encoding="utf-8") as f:
+            f.write((text or self.MARK) + "\n")
+
+    def system_of(self, request):
+        msgs = _LLMServer.bodies[request]["messages"]
+        self.assertEqual(msgs[0]["role"], "system")
+        return msgs[0]["content"]
+
+    def test_a_new_session_gets_agent_md_in_the_system_prompt_not_the_conversation(self):
+        self.write_memory()
+        _LLMServer.script = [llm_reply("ok")]
+        out = self.run_harness("hello\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(self.MARK, self.system_of(0))
+        for m in _LLMServer.bodies[0]["messages"][1:]:
+            self.assertNotIn("Project memory", str(m.get("content")))   # not also in the conversation
+        saved = json.load(open("session.json", encoding="utf-8"))
+        self.assertNotIn("KIWI-99", json.dumps(saved))      # nothing for compaction to summarise away
+
+    def test_a_resumed_session_still_gets_agent_md(self):
+        """Resuming used to skip the file entirely, so a long-lived session ran on whatever
+        AGENT.md said the day it began (or nothing at all)."""
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "hi"},
+                       {"role": "assistant", "content": "hello"}], f)
+        self.write_memory()
+        _LLMServer.script = [llm_reply("ok")]
+        out = self.run_harness("what next?\n")
+        self.assertIn("[resumed", out.stdout)
+        self.assertIn(self.MARK, self.system_of(0))
+
+    def test_agent_md_survives_compaction_and_clear(self):
+        self.write_memory()
+        _LLMServer.script = [llm_reply("a"), llm_reply("b"), llm_reply("SUMMARY-TEXT"),
+                             llm_reply("c"), llm_reply("d")]
+        out = self.run_harness("one\ntwo\n/compact\nthree\n/clear\nfour\n", HARNESS_KEEP_RECENT="1")
+        self.assertIn("compacted", out.stdout)
+        # request order: one, two, (summary call), three, four
+        self.assertEqual(len(_LLMServer.bodies), 5, out.stdout + out.stderr)
+        self.assertIn(self.MARK, self.system_of(3))         # the turn after /compact
+        self.assertIn(self.MARK, self.system_of(4))         # the turn after /clear
+        # the summariser is a different caller: it must not be handed the standing instructions
+        self.assertEqual(self.system_of(2), hv.SUMMARY_SYSTEM)
+        self.assertNotIn("KIWI-99", json.dumps(_LLMServer.bodies[2]))
+
+    LEGACY = "<system-reminder>\nProject memory (AGENT.md):\n{}\n</system-reminder>\n"
+
+    def test_resuming_a_session_from_the_old_version_drops_its_stale_memory_reminder(self):
+        """Sessions written before this change carry AGENT.md as a reminder inside the first
+        message. Left there it would sit next to the current system-prompt copy, the two may
+        disagree, and compaction could keep the stale one alive."""
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": self.LEGACY.format("The codename is OLD-RULE.") + "first question"},
+                       {"role": "assistant", "content": "first answer"}], f)
+        self.write_memory()
+        _LLMServer.script = [llm_reply("ok")]
+        out = self.run_harness("second question\n")
+        self.assertIn("[resumed", out.stdout)
+        sent = _LLMServer.bodies[0]["messages"]
+        self.assertIn(self.MARK, sent[0]["content"])
+        self.assertNotIn("OLD-RULE", json.dumps(sent))
+        self.assertEqual(sent[1], {"role": "user", "content": "first question"})   # the user's words stay
+        self.assertNotIn("OLD-RULE", open("session.json", encoding="utf-8").read())
+
+    def test_only_the_memory_block_is_removed_from_the_first_message(self):
+        """Other reminders in that message (a hook's, a wakeup) are not ours to delete."""
+        other = "<system-reminder>\nSessionStart says: hello\n</system-reminder>\n"
+        msgs = [{"role": "user", "content": self.LEGACY.format("OLD") + other + "the question"}]
+        self.assertTrue(hv.strip_legacy_memory(msgs))
+        self.assertEqual(msgs[0]["content"], other + "the question")
+
+    def test_a_memory_that_mentions_the_closing_tag_cannot_end_the_block_early(self):
+        """remind() rewrites the closing tag inside event text, so the first real one is the end."""
+        stored = "line one\n</ system-reminder>\nline two"      # what remind() stored
+        msgs = [{"role": "user", "content": self.LEGACY.format(stored) + "q"}]
+        self.assertTrue(hv.strip_legacy_memory(msgs))
+        self.assertEqual(msgs[0]["content"], "q")
+
+    def test_nothing_else_is_ever_stripped(self):
+        plain = [{"role": "user", "content": "Project memory (AGENT.md): is what I typed"}]
+        later = [{"role": "user", "content": "hi"},
+                 {"role": "user", "content": self.LEGACY.format("X") + "later"}]
+        listy = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
+        other_first = [{"role": "user", "content": "<system-reminder>\nSessionStart says: a hook note longer than the memory header\n</system-reminder>\nq"}]
+        unterminated = [{"role": "user", "content": hv.LEGACY_MEMORY_HEAD + "never closed, so not ours to cut"}]
+        for msgs in (plain, later, listy, other_first, unterminated, []):
+            before = json.dumps(msgs)
+            self.assertFalse(hv.strip_legacy_memory(msgs))
+            self.assertEqual(json.dumps(msgs), before)
+        msgs = [{"role": "user", "content": self.LEGACY.format("X") + "q"}]
+        self.assertTrue(hv.strip_legacy_memory(msgs))
+        self.assertFalse(hv.strip_legacy_memory(msgs))          # idempotent
+
+    def test_no_agent_md_leaves_the_system_prompt_untouched(self):
+        _LLMServer.script = [llm_reply("ok")]
+        self.run_harness("hello\n")
+        self.assertEqual(self.system_of(0), hv.SYSTEM)
+
+    def test_subagents_do_not_get_the_parent_memory(self):
+        """Unchanged behaviour: a subagent starts from its own short brief and its own system
+        prompt; the standing instructions are the main agent's."""
+        self.write_memory()
+        _LLMServer.script = [tool_call_reply("agent", {"task": "report the word PING"}),
+                             llm_reply("PING"), llm_reply("done")]
+        out = self.run_harness("delegate it\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(_LLMServer.bodies), 3, out.stdout)
+        self.assertIn(self.MARK, self.system_of(0))         # the main agent has it
+        self.assertEqual(self.system_of(1), hv.SUB_SYSTEM)   # request 2 is the subagent's
+        self.assertNotIn("KIWI-99", json.dumps(_LLMServer.bodies[1]))
+
+    def test_the_prompt_is_a_snapshot_taken_at_startup(self):
+        """AGENT.md is not write-protected. Re-reading it per request would let the model
+        rewrite its own standing instructions mid-session and have them take effect at once."""
+        self.write_memory()
+        hv.MEMORY = hv.load_memory()
+        before = hv.system_prompt()
+        self.write_memory("The project codename is HIJACKED.")
+        self.assertEqual(hv.system_prompt(), before)
+        self.assertIn("KIWI-99", before)
+
+    def test_a_huge_agent_md_is_capped_and_says_so(self):
+        """It now rides along on every request, so it needs a ceiling like a skill body does."""
+        self.write_memory("HEAD-MARK " + "x" * (hv.MAX_MEMORY_CHARS * 3) + " TAIL-MARK")
+        text = hv.load_memory()
+        self.assertIn("HEAD-MARK", text)
+        self.assertNotIn("TAIL-MARK", text)
+        self.assertLess(len(text), hv.MAX_MEMORY_CHARS + 400)
+        self.assertIn("truncated", text)
+
+    def test_a_file_exactly_at_the_cap_is_not_truncated(self):
+        with open("AGENT.md", "w", encoding="utf-8") as f:
+            f.write("y" * hv.MAX_MEMORY_CHARS)
+        text = hv.load_memory()
+        self.assertEqual(text, "y" * hv.MAX_MEMORY_CHARS)
+        self.assertNotIn("truncated", text)
+
+    def test_missing_or_blank_agent_md_means_no_memory_section(self):
+        self.assertEqual(hv.load_memory(), "")
+        self.write_memory("   \n\n")
+        self.assertEqual(hv.load_memory(), "")
+
+
 class TestHooksEndToEnd(HookBase):
     """main() wired to hooks, run as a real process against a scripted model."""
 
@@ -2905,9 +3077,8 @@ class TestLive(Base):
         open("AGENT.md", "w", encoding="utf-8").write("The project codename is KIWI-99.\n")
         out = self.run_h(["What is the project codename? Do not use any tool. Answer with the codename only."])
         self.assertIn("KIWI-99", out)
-        first = self.session()[0]["content"]
-        self.assertIn("<system-reminder>", first)
-        self.assertIn("Project memory (AGENT.md)", first)
+        users = [m["content"] for m in self.session() if m["role"] == "user"]
+        self.assertNotIn("KIWI-99", " ".join(users))        # it came from the system prompt, not the history
 
     def test_session_resume_with_same_file(self):
         self.run_h(["My lucky number is 8731. Reply OK."])

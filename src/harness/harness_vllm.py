@@ -125,7 +125,23 @@ MAX_RETRIES = 5
 BACKOFF = float(os.environ.get("HARNESS_BACKOFF", "1.0"))
 EOF_GRACE = float(os.environ.get(
     "HARNESS_EOF_GRACE", "0" if sys.stdin and sys.stdin.isatty() else "60"))
-MEMORY_FILE = "AGENT.md"           # ch 6: project memory, injected at start
+MEMORY_FILE = "AGENT.md"           # ch 6: project memory, in the system prompt
+MAX_MEMORY_CHARS = 20_000          # it rides along on every request, so it has a ceiling
+MEMORY = ""                        # AGENT.md as it stood at startup (see system_prompt)
+
+def load_memory():
+    """AGENT.md, read once at startup. A snapshot on purpose: the file is not write-protected,
+    so re-reading it per request would let the model rewrite its own standing instructions
+    mid-session and have them take effect at once."""
+    if not os.path.exists(MEMORY_FILE):
+        return ""
+    with open(MEMORY_FILE, encoding="utf-8") as f:
+        text = f.read().strip()
+    if len(text) > MAX_MEMORY_CHARS:
+        cut = len(text) - MAX_MEMORY_CHARS
+        text = (text[:MAX_MEMORY_CHARS]
+                + f"\n[{MEMORY_FILE} truncated: {cut} more characters not shown]")
+    return text
 # cmd.exe/ping/dir write in the OEM code page (cp950 here), not UTF-8 -- even
 # under `python -X utf8`. Decoding them as UTF-8 turns Chinese into U+FFFD.
 SHELL_ENC = "oem" if sys.platform == "win32" else "utf-8"
@@ -154,10 +170,36 @@ SKILLS_NOTE = (
     "the skills below, call the skill tool with its name to load its full instructions, "
     "then follow them.\nAvailable skills:\n")
 
+MEMORY_NOTE = (
+    "\nProject memory, written by the user in " + MEMORY_FILE + "; it stands for the whole "
+    "session:\n")
+
+LEGACY_MEMORY_HEAD = f"<system-reminder>\nProject memory ({MEMORY_FILE}):\n"
+
+def strip_legacy_memory(messages):
+    """Sessions saved before AGENT.md moved into the system prompt carry it as a reminder at
+    the start of the first user message. Resumed as they are, that stale copy would sit next
+    to the current one and could disagree. Only that one block goes: other reminders and the
+    user's own words in the message stay. remind() rewrites a closing tag inside event text,
+    so the first real one ends the block."""
+    if not messages or messages[0].get("role") != "user":
+        return False
+    text = messages[0].get("content")
+    if not isinstance(text, str) or not text.startswith(LEGACY_MEMORY_HEAD):
+        return False
+    end = text.find("\n</system-reminder>", len(LEGACY_MEMORY_HEAD))
+    if end < 0:
+        return False
+    rest = text[end + len("\n</system-reminder>"):]
+    messages[0]["content"] = rest[1:] if rest.startswith("\n") else rest
+    return True
+
 def system_prompt():
-    """The menu of skills lives here, not in the first message: compaction summarises
-    old messages away, but this is rebuilt for every request."""
-    return (SYSTEM + (MCP_NOTE if not MCP.is_empty() else "")
+    """The skill menu and the project memory live here, not in the first message:
+    compaction summarises old messages away and /clear drops them, a resumed session never
+    re-reads them, but this is rebuilt for every request."""
+    return (SYSTEM + (MEMORY_NOTE + MEMORY if MEMORY else "")
+            + (MCP_NOTE if not MCP.is_empty() else "")
             + (SKILLS_NOTE + SKILLS.menu() if not SKILLS.is_empty() else ""))
 SUB_SYSTEM = (
     "You are a focused subagent. Complete the task with your tools, then "
@@ -1318,7 +1360,7 @@ def slash(cmd, messages):
     return True, None
 
 def main():
-    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS
+    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS, MEMORY
     session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
     global SESSION_FILE
     SESSION_FILE = session_file
@@ -1336,13 +1378,16 @@ def main():
     if os.path.exists(session_file):                        # resume = file read
         messages, repaired = load_session(session_file)
         print(f"[resumed {session_file}: {len(messages)} messages]")
+        if strip_legacy_memory(messages):
+            print(f"[removed the old {MEMORY_FILE} reminder from the first message; "
+                  f"the current file is in the system prompt now]")
         if repaired:
             print(f"[repaired {repaired} tool call(s) the last run never finished; "
                   f"the model is told they were INTERRUPTED]")
-    elif os.path.exists(MEMORY_FILE):                       # ch 6: memory
-        with open(MEMORY_FILE, encoding="utf-8") as f:
-            remind(f"Project memory ({MEMORY_FILE}):\n" + f.read())
-    MCP = harness_mcp.connect_all(mcp_cfg)                  # a server that fails is skipped
+    MEMORY = load_memory()                                  # ch 6: memory, in the system prompt
+    if MEMORY:
+        print(f"  [memory] {MEMORY_FILE} loaded ({len(MEMORY)} chars)")
+    MCP =harness_mcp.connect_all(mcp_cfg)                  # a server that fails is skipped
     for line in MCP.describe():
         print(f"  [mcp] {line}")
     for warning in MCP.warnings:
