@@ -660,8 +660,10 @@ def memory_protected(path):
         return True
     try:
         return os.path.samefile(path, MEMORY_FILE)
-    except (OSError, ValueError):                   # one of them does not exist (yet)
+    except (FileNotFoundError, NotADirectoryError):  # one of them does not exist (yet)
         return False
+    except (OSError, ValueError):                   # could not tell: a guard that cannot tell refuses
+        return True
 READ_STATE = {}                    # path -> time when the model last read it
 RISKY = ("rm ", "del ", "rmdir", "sudo", "--force", "push", "curl", "wget",
          "> /", "format ")

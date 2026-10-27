@@ -3050,6 +3050,21 @@ class TestMemoryFileIsProtected(Base):
             self.skipTest("the admin share is not reachable on this machine")
         self.assertTrue(self.blocked("write_file", unc))
 
+    def test_when_the_identity_cannot_be_read_the_answer_is_protected(self):
+        """Only "one of the two files does not exist" means there is nothing to alias. A
+        permission or I/O error means we could not tell, and a guard that cannot tell has to
+        refuse: the write it refuses would most likely have failed for the same reason."""
+        from unittest import mock
+        for err in (PermissionError(13, "denied"), OSError(5, "I/O error"),
+                    OSError(123, "invalid name"), ValueError("embedded null byte")):
+            with mock.patch.object(os.path, "samefile", side_effect=err):
+                self.assertTrue(hv.memory_protected("ordinary.txt"), repr(err))
+                self.assertTrue(self.blocked("write_file", "ordinary.txt"), repr(err))
+        for err in (FileNotFoundError(2, "no such file"), NotADirectoryError(20, "not a directory")):
+            with mock.patch.object(os.path, "samefile", side_effect=err):
+                self.assertFalse(hv.memory_protected("ordinary.txt"), repr(err))
+                self.assertIsNone(hv.gate("write_file", {"path": "ordinary.txt", "content": "x"}))
+
     def test_the_session_writer_will_not_write_through_a_link_to_it(self):
         """save_session opens `<session>.tmp` for writing before it renames it over the session
         file, with no gate() in between. If that temp name is another name for AGENT.md, the
