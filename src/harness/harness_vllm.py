@@ -25,6 +25,7 @@ Usage: python harness_vllm.py [session.json]      (slash commands: /help)
 import concurrent.futures
 import http.client
 import json
+import math
 import os
 import queue
 import random
@@ -145,6 +146,72 @@ def load_memory():
 # cmd.exe/ping/dir write in the OEM code page (cp950 here), not UTF-8 -- even
 # under `python -X utf8`. Decoding them as UTF-8 turns Chinese into U+FFFD.
 SHELL_ENC = "oem" if sys.platform == "win32" else "utf-8"
+
+# ------------------------------------------------ session statistics
+class Stats:
+    """What this run did, counted where each thing happens. Never rebuilt from the transcript
+    afterwards: a file that merely says "ERROR" is not a failed call, parallel subagents write
+    their results out of order, a refused call is not what it looks like once it is text, and
+    compaction replaces old messages. Per process only: a resumed session starts at zero.
+    `sub.X` is the part of X done by subagents (X itself counts everyone)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()               # parallel subagents count at the same time
+        self.reset()
+
+    def reset(self):
+        with self._lock:
+            self._c = {}
+            self._t0 = time.time()
+
+    def add(self, name, n=1):
+        with self._lock:
+            self._c[name] = self._c.get(name, 0) + n
+
+    def count(self, name, depth=0, n=1):
+        with self._lock:                            # total and subagent part in one step
+            self._c[name] = self._c.get(name, 0) + n
+            if depth > 0:
+                self._c["sub." + name] = self._c.get("sub." + name, 0) + n
+
+    def summary(self):
+        with self._lock:
+            c, t0 = dict(self._c), self._t0
+        g = lambda k: c.get(k, 0)                   # noqa: E731
+        return {
+            "seconds": round(time.time() - t0, 1),
+            "model_calls": g("model_calls"), "tokens_in": g("tokens_in"),
+            "tokens_out": g("tokens_out"), "rounds_without_usage": g("rounds_without_usage"),
+            "llm_retries": g("llm_retries"), "compactions": g("compactions"),
+            "tool_calls": g("tool_calls"), "tool_errors": g("tool_errors"),
+            "by_tool": {k[5:]: v for k, v in sorted(c.items()) if k.startswith("tool.")},
+            "gate_blocked": g("gate_blocked"), "denied_by_user": g("denied_by_user"),
+            "asked_human": g("asked_human"), "human_declined": g("human_declined"),
+            "classifier": {v: g("classifier." + v) for v in ("allow", "ask", "block")},
+            "hook_vetoes": g("hook_vetoes"), "hook_failures": g("hook_failures"),
+            "subagents": {k: g("sub." + k) for k in (
+                "model_calls", "tokens_in", "tokens_out", "tool_calls", "tool_errors")},
+        }
+
+    def line(self):
+        return "[stats] " + json.dumps(self.summary(), sort_keys=True)
+
+
+STATS = Stats()
+
+def whole(v):
+    """A token count from a server: a whole, non-negative number, else None (strings, lists,
+    NaN, infinity, fractions and negatives are not counts)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not (math.isfinite(v) and v == int(v)):
+        return None
+    return int(v) if v >= 0 else None
+
+def tool_error(text, depth=0):
+    """Return an error the harness itself reports for a tool call, and count it."""
+    STATS.count("tool_errors", depth)
+    return text
 
 SYSTEM = (
     "You are a capable engineering agent working on the user's machine.\n"
@@ -397,6 +464,7 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
             wait = min(30.0, BACKOFF * 2 ** (attempt - 1)) * (0.5 + random.random())
         void = " -- the partial text above is void" if emitted[0] else ""
         emitted[0] = False
+        STATS.add("llm_retries")
         print(f"\n  [retry {attempt}/{MAX_RETRIES - 1}] {why}; waiting {wait:.1f}s{void}")
         time.sleep(wait)
     raise LLMError("unreachable")
@@ -548,7 +616,7 @@ def start_background(command):
 def start_alarm(seconds, reason):
     seconds = float(seconds)
     if not 0 < seconds <= 86400:
-        return "ERROR: seconds must be in (0, 86400]"
+        return tool_error("ERROR: seconds must be in (0, 86400]")
     tid = _new_id("a")
     stop = threading.Event()
     TASKS[tid] = {"kind": "alarm", "desc": f"in {seconds:g}s: {reason}",
@@ -565,7 +633,7 @@ def start_alarm(seconds, reason):
 def start_monitor(command, interval=5.0, timeout=3600.0):
     interval, timeout = float(interval), float(timeout)
     if interval < 0.1 or timeout <= 0:
-        return "ERROR: interval must be >= 0.1 and timeout > 0"
+        return tool_error("ERROR: interval must be >= 0.1 and timeout > 0")
     tid = _new_id("m")
     stop = threading.Event()
     TASKS[tid] = {"kind": "monitor", "desc": f"every {interval:g}s until exit 0: {command}",
@@ -754,10 +822,14 @@ def read_only(cmd):
 
 def ask_human(what, always=True):
     options = "y once / a always / N" if always else "y once / N"
+    STATS.add("asked_human")
     ans = read_line(f"\n  [approve?] {what}\n  ({options}) > ").strip().lower()
     if ans == "a" and not always:                       # nothing to remember here
         ans = "y"
-    return ans if ans in ("y", "a") else "n"            # EOF or junk => deny
+    if ans not in ("y", "a"):                           # EOF or junk => deny
+        STATS.add("human_declined")
+        return "n"
+    return ans
 
 def gate(name, args):
     """Reflexes + modes + grants + classifier + human. Returns error str or None."""
@@ -811,6 +883,7 @@ def gate(name, args):
         if needs_check:
             if MODE == "auto":                          # layer 3
                 verdict, why = classify(cmd)
+                STATS.add("classifier." + verdict.lower())
                 print(f"  [classifier] {verdict}: {why}")
                 if verdict == "ALLOW":
                     return None
@@ -845,13 +918,20 @@ def _fire(event, depth=0, **fields):
                "hook_event_name": event, **fields}
     if depth > 0:
         payload["agent_id"] = f"subagent-depth-{depth}"
-    return harness_hooks.run(event, payload, HOOKS)
+    res = harness_hooks.run(event, payload, HOOKS)
+    if res.blocked:
+        STATS.add("hook_vetoes")
+    STATS.add("hook_failures", len(res.failures))
+    return res
 
 def _hook_failed_and_user_declined(res, what):
     """A failed PRE hook is not a verdict: ask, like the classifier does."""
-    return bool(res.failures) and ask_human(
+    declined = bool(res.failures) and ask_human(
         f"hook failed ({'; '.join(res.failures)}); {what} anyway?",
         always=False) == "n"
+    if declined:
+        STATS.add("denied_by_user")
+    return declined
 
 def submit_filter(line):
     """UserPromptSubmit hooks: True = send the prompt on. Context becomes a reminder."""
@@ -889,8 +969,10 @@ def execute_tool(name, args, depth=0):
 
 def _execute_tool(name, args, depth=0):
     err = gate(name, args)                                  # ch 13 first
-    if err:
+    if err:                                                 # gate() words every refusal itself
+        STATS.add("denied_by_user" if err.startswith("DENIED") else "gate_blocked")
         return err
+
     try:
         if name == "read_file":
             with open(args["path"], encoding="utf-8") as f:
@@ -910,9 +992,9 @@ def _execute_tool(name, args, depth=0):
                 text = f.read()
             n = text.count(args["old_text"])
             if n != 1:                                      # ch 14: loud edits
-                return (f"ERROR: old_text found {n} times in {args['path']} "
-                        f"(need exactly 1). Re-read the file and retry with "
-                        f"a longer, unique snippet.")
+                return tool_error(f"ERROR: old_text found {n} times in {args['path']} "
+                                  f"(need exactly 1). Re-read the file and retry with "
+                                  f"a longer, unique snippet.", depth)
             backup_before_write(args["path"])
             with open(args["path"], "w", encoding="utf-8", newline="") as f:
                 f.write(text.replace(args["old_text"], args["new_text"]))
@@ -926,10 +1008,11 @@ def _execute_tool(name, args, depth=0):
         if name == "task_output":
             t = TASKS.get(args["task_id"])
             if not t:
-                return f"ERROR: no task {args['task_id']}"
+                return tool_error(f"ERROR: no task {args['task_id']}", depth)
             return f"[{t['status']}] " + truncate("".join(t["output"]))
         if name == "task_stop":
-            return stop_task(args["task_id"])
+            text = stop_task(args["task_id"])
+            return tool_error(text, depth) if text.startswith("ERROR") else text   # stop_task words its own error
         if name == "todo_write":                            # ch 8 self-steer
             remind("Your current todo list:\n" + args["todos"])
             return "todo list updated"
@@ -944,15 +1027,17 @@ def _execute_tool(name, args, depth=0):
             return run_subagent(args["task"], depth + 1)
         if name == "skill" and not SKILLS.is_empty():       # ch 11: instructions on demand
             if depth > 0:
-                return "ERROR: skills are not available to subagents"
-            return SKILLS.load(args.get("name"))
+                return tool_error("ERROR: skills are not available to subagents", depth)
+            text = SKILLS.load(args.get("name"))
+            return tool_error(text, depth) if text.startswith("ERROR") else text   # the skill module words its own errors
         if MCP.owns(name):                                  # ch 11: the dispatch table over the network
             if depth > 0:
-                return "ERROR: MCP tools are not available to subagents"
-            return truncate(MCP.call(name, args))
-        return f"ERROR: unknown tool {name}"
+                return tool_error("ERROR: MCP tools are not available to subagents", depth)
+            text = truncate(MCP.call(name, args))
+            return tool_error(text, depth) if text.startswith("ERROR") else text   # harness_mcp words its own errors
+        return tool_error(f"ERROR: unknown tool {name}", depth)
     except Exception as e:
-        return f"ERROR: {e}"                                # ch 4: errors are fuel
+        return tool_error(f"ERROR: {e}", depth)             # ch 4: errors are fuel
 
 # ------------------------------------------------------- ch 6: compaction
 SUMMARY_SYSTEM = (
@@ -1099,6 +1184,7 @@ def compact(messages, keep=None):
         "before this point:\n" + summary)
     head = {"role": "user", "content": body + "\n</system-reminder>"}
     messages[:] = [head] + messages[cut:]
+    STATS.add("compactions")
     return True
 
 # ------------------------------------------------------- ch 4: the loop
@@ -1112,10 +1198,12 @@ def run_calls(calls, depth, label, on_result=None):
     def one(i):
         fn = calls[i]["function"]
         print(f"  [{label}tool] {fn['name']}({fn['arguments'][:110]})")
+        STATS.count("tool_calls", depth)
+        STATS.add("tool." + fn["name"])
         try:
             args = json.loads(fn["arguments"])
         except json.JSONDecodeError as e:                   # errors are fuel
-            return f"ERROR: arguments were not valid JSON: {e}"
+            return tool_error(f"ERROR: arguments were not valid JSON: {e}", depth)
         return execute_tool(fn["name"], args, depth)
     agent_ids = [i for i, c in enumerate(calls) if c["function"]["name"] == "agent"]
     if len(agent_ids) > 1:
@@ -1168,13 +1256,19 @@ def _run_loop(messages, tools, system, quiet, depth, label):
         if streamed[0]:
             print()
         u = reply.get("usage") or {}
+        STATS.count("model_calls", depth)
+        tokens_in, tokens_out = whole(u.get("prompt_tokens")), whole(u.get("completion_tokens"))
+        if tokens_in is None or tokens_out is None:         # either half missing makes a total too low
+            STATS.add("rounds_without_usage")
+        STATS.count("tokens_in", depth, tokens_in or 0)
+        STATS.count("tokens_out", depth, tokens_out or 0)
         cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
         ttft = reply.get("_ttft")
         print(f"  [{pre}usage] in={u.get('prompt_tokens')} cached={cached} "
               f"out={u.get('completion_tokens')}"
               + (f" ttft={ttft:.2f}s" if ttft is not None else ""))
-        if u.get("prompt_tokens"):
-            _LAST_IN[id(messages)] = u["prompt_tokens"]
+        if tokens_in:                                       # a string here used to crash the next compaction check
+            _LAST_IN[id(messages)] = tokens_in
         choice = reply["choices"][0]
         msg = choice["message"]
         calls = msg.get("tool_calls") or []
@@ -1235,7 +1329,7 @@ def run_subagent(task, depth=1):
 
 # ----------------------------------------- ch 1 + 6: sessions and memory
 HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
-        "/stop <id>  /undo  /perms  /cache  /hooks  /mcp  /skills  /skill <name>")
+        "/stop <id>  /undo  /perms  /cache  /stats  /hooks  /mcp  /skills  /skill <name>")
 
 SESSION_FILE = None                # set by main(); None = no checkpoints (tests, one-shot use)
 _CHECKPOINT_WARNED = [False]
@@ -1360,6 +1454,8 @@ def slash(cmd, messages):
         print(undo_last())
     elif word == "/perms":
         print(json.dumps(PERMS, indent=1, ensure_ascii=False))
+    elif word == "/stats":
+        print("\n" + STATS.line())
     elif word == "/cache":
         print(server_cache_status())
     elif word == "/hooks":
@@ -1471,7 +1567,10 @@ def main():
         try:
             saved = finish_session(messages, session_file)
         finally:
-            MCP.close()
+            try:
+                print("\n" + STATS.line())              # its own line; also when Ctrl-C ends the run
+            finally:
+                MCP.close()
     print("[session saved]" if saved else "[session NOT saved]")
 
 if __name__ == "__main__":

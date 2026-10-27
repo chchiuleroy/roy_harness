@@ -2992,6 +2992,375 @@ class TestAgentMemory(Base):
         self.assertEqual(hv.load_memory(), "")
 
 
+def multi_call_reply(calls, usage=None):
+    """One assistant message carrying several tool calls: [(name, args), ...]."""
+    return {"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": n, "arguments": json.dumps(a)}}
+            for i, (n, a) in enumerate(calls, 1)]}}], "usage": usage or {}}
+
+
+def with_usage(reply, prompt, out):
+    reply["usage"] = {"prompt_tokens": prompt, "completion_tokens": out}
+    return reply
+
+
+class TestSessionStats(HookBase):
+    """Counted where each thing happens, never recovered by reading the transcript back: a
+    tool result that merely STARTS with "ERROR" (a file that says so) is not an error, tool
+    results arrive out of order from parallel subagents, a vetoed or refused call never
+    reaches the transcript as the thing it was, and compaction replaces old messages. Any
+    after-the-fact count would be wrong in exactly the runs worth measuring."""
+
+    def setUp(self):
+        super().setUp()
+        _LLMServer.script, _LLMServer.bodies = [], []
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LLMServer)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        hv.STATS.reset()
+        self._rl = hv.read_line
+
+    def tearDown(self):
+        hv.read_line = self._rl
+        self.srv.shutdown()
+        super().tearDown()
+
+    def run_harness(self, stdin_text, **env_extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("VLLM_", "HARNESS_"))}
+        env.update(HARNESS_BASE_URL=f"http://127.0.0.1:{self.srv.server_address[1]}/v1",
+                   HARNESS_STREAM="0", PYTHONUTF8="1", **env_extra)
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", os.path.join(SRC, "harness_vllm.py"), "session.json"],
+            input=stdin_text, capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+
+    @staticmethod
+    def stats_lines(out):
+        return [json.loads(line.split("[stats] ", 1)[1])
+                for line in out.stdout.splitlines() if line.startswith("[stats] ")]
+
+    def test_a_scripted_session_is_counted_exactly(self):
+        open("data.txt", "w", encoding="utf-8").write("ERROR: boom\n")   # output that LOOKS like a failure
+        _LLMServer.script = [
+            with_usage(multi_call_reply([("read_file", {"path": "data.txt"}),
+                                         ("write_file", {"path": ".env", "content": "x"})]), 100, 10),
+            with_usage(multi_call_reply([("edit_file", {"path": "data.txt", "old_text": "zzz",
+                                                        "new_text": "y"})]), 120, 11),
+            with_usage(llm_reply("done"), 140, 12)]
+        out = self.run_harness("do it\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        final = self.stats_lines(out)[-1]
+        self.assertEqual(final["model_calls"], 3)
+        self.assertEqual((final["tokens_in"], final["tokens_out"]), (360, 33))
+        self.assertEqual(final["tool_calls"], 3)
+        self.assertEqual(final["by_tool"], {"read_file": 1, "write_file": 1, "edit_file": 1})
+        self.assertEqual(final["gate_blocked"], 1)           # .env is a protected path
+        self.assertEqual(final["tool_errors"], 1)            # edit_file: old_text not found, nothing else
+        self.assertEqual((final["denied_by_user"], final["asked_human"], final["hook_vetoes"]), (0, 0, 0))
+        self.assertEqual(final["rounds_without_usage"], 0)
+        self.assertEqual(final["subagents"]["model_calls"], 0)
+        self.assertIsInstance(final["seconds"], float)
+
+    def test_the_users_own_stop_command_is_not_a_tool_error(self):
+        """Found by the 小o review: the error was counted inside stop_task(), which /stop also calls,
+        so a typo at the prompt became a failed tool call that no model made."""
+        hv.slash("/stop nope", [])
+        self.assertEqual(hv.STATS.summary()["tool_errors"], 0)
+
+    def test_a_subagents_task_stop_error_is_the_subagents(self):
+        _LLMServer.script = [
+            multi_call_reply([("agent", {"task": "stop a task"})]),
+            multi_call_reply([("task_stop", {"task_id": "zz"})]),
+            llm_reply("sub report"), llm_reply("main done")]
+        final = self.stats_lines(self.run_harness("delegate\n"))[-1]
+        self.assertEqual((final["tool_errors"], final["subagents"]["tool_errors"]), (1, 1))
+
+    def test_a_declined_prompt_after_a_failed_hook_counts_as_a_denial_too(self):
+        """Same user decision as the PreToolUse case, on the other event."""
+        hv.HOOKS = self.one("UserPromptSubmit", "import sys\nsys.exit(1)")
+        hv.read_line = lambda prompt: "n"
+        self.assertFalse(hv.submit_filter("hello"))
+        s = hv.STATS.summary()
+        self.assertEqual((s["hook_failures"], s["asked_human"], s["human_declined"], s["denied_by_user"]),
+                         (1, 1, 1, 1))
+
+    def test_a_total_and_its_subagent_part_are_updated_in_one_step(self):
+        """summary() or reset() slipping between the two updates would show a subagent count
+        larger than its total. One lock acquisition per event means that cannot happen."""
+        class CountingLock:
+            def __init__(self): self.taken = 0
+            def __enter__(self): self.taken += 1
+            def __exit__(self, *a): return False
+        stats = hv.Stats()
+        stats._lock = CountingLock()
+        stats.count("tool_calls", depth=1)
+        self.assertEqual(stats._lock.taken, 1)
+        self.assertEqual((stats._c["tool_calls"], stats._c["sub.tool_calls"]), (1, 1))
+
+    def test_mcp_servers_are_still_closed_when_the_summary_cannot_be_printed(self):
+        """The summary now sits in the same `finally` as the MCP shutdown; a broken stdout must
+        not cost the shutdown (the exit path promises MCP.close() always runs)."""
+        closed = []
+
+        class StubMcp:
+            warnings = []
+            def describe(self): return []
+            def close(self): closed.append(True)
+            def owns(self, name): return False
+            def tools(self): return []
+            def is_empty(self): return True
+        saved = (sys.argv, sys.stdin, hv.call_llm, hv.harness_mcp.connect_all)
+        hv.call_llm = lambda *a, **k: llm_reply("ok")
+
+        def broken():
+            raise BrokenPipeError("stdout is closed")
+        hv.STATS.line = broken
+        hv.harness_mcp.connect_all = lambda *a, **k: StubMcp()
+        sys.argv, sys.stdin = ["harness", "session.json"], io.StringIO("hi" + chr(10))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(BrokenPipeError):
+                    hv.main()
+        finally:
+            del hv.STATS.line
+            sys.argv, sys.stdin, hv.call_llm, hv.harness_mcp.connect_all = saved
+        self.assertEqual(closed, [True])
+
+    def test_odd_usage_values_neither_crash_the_run_nor_poison_the_summary(self):
+        """A compatibility layer may send strings, lists, floats or NaN. Whole numbers count; the
+        rest are treated as no usage at all, and the line stays strict JSON."""
+        open("note.txt", "w", encoding="utf-8").write("x")
+        read = [("read_file", {"path": "note.txt"})]
+        nan = float("nan")
+        _LLMServer.script = [
+            multi_call_reply(read, usage={"prompt_tokens": "abc", "completion_tokens": [1]}),
+            multi_call_reply(read, usage={"prompt_tokens": 12.0, "completion_tokens": 3.0}),
+            multi_call_reply(read, usage={"prompt_tokens": 7.5, "completion_tokens": -2}),
+            multi_call_reply(read, usage={"prompt_tokens": True, "completion_tokens": False}),
+            with_usage(llm_reply("done"), nan, float("inf"))]
+        out = self.run_harness("go\n")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        line = [l for l in out.stdout.splitlines() if l.startswith("[stats] ")][-1]
+
+        def reject(constant):
+            raise ValueError(constant)
+        s = json.loads(line.split("[stats] ", 1)[1], parse_constant=reject)   # NaN / Infinity would raise
+        self.assertEqual(s["model_calls"], 5)
+        self.assertEqual((s["tokens_in"], s["tokens_out"]), (12, 3))
+        self.assertEqual(s["rounds_without_usage"], 4)         # "abc", 7.5, True, NaN
+
+    def test_a_round_with_only_half_of_the_usage_is_flagged_too(self):
+        """Found by the second 小o review: a valid prompt count with a missing or invalid
+        completion count undercounted tokens_out and still looked like a round with usage."""
+        open("note.txt", "w", encoding="utf-8").write("x")
+        read = [("read_file", {"path": "note.txt"})]
+        _LLMServer.script = [
+            multi_call_reply(read, usage={"prompt_tokens": 50}),
+            multi_call_reply(read, usage={"prompt_tokens": 5, "completion_tokens": "x"}),
+            multi_call_reply(read, usage={"completion_tokens": 4}),
+            with_usage(llm_reply("done"), 1, 2)]
+        final = self.stats_lines(self.run_harness("go\n"))[-1]
+        self.assertEqual(final["rounds_without_usage"], 3)
+        self.assertEqual((final["tokens_in"], final["tokens_out"]), (56, 6))   # each side counts on its own
+
+    def test_seconds_measure_time_since_the_run_began_and_reset_starts_over(self):
+        hv.STATS.add("model_calls", 5)
+        time.sleep(0.25)
+        s = hv.STATS.summary()
+        self.assertGreaterEqual(s["seconds"], 0.2)
+        self.assertEqual(s["model_calls"], 5)
+        hv.STATS.reset()
+        s = hv.STATS.summary()
+        self.assertLess(s["seconds"], 0.2)
+        self.assertEqual(s["model_calls"], 0)
+
+    def test_an_interrupted_run_still_prints_its_summary(self):
+        """The runs worth measuring are often the ones that went wrong; Ctrl-C must not hide them."""
+        saved = (sys.argv, sys.stdin, hv.call_llm, hv.execute_tool)
+        hv.call_llm = lambda *a, **k: with_usage(
+            multi_call_reply([("run_command", {"command": "dir"})]), 40, 4)
+
+        def stop(name, args, depth=0):
+            raise KeyboardInterrupt
+        hv.execute_tool = stop
+        sys.argv, sys.stdin = ["harness", "session.json"], io.StringIO("go" + chr(10))
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                with self.assertRaises(KeyboardInterrupt):
+                    hv.main()
+        finally:
+            sys.argv, sys.stdin, hv.call_llm, hv.execute_tool = saved
+        lines = [l for l in buf.getvalue().splitlines() if l.startswith("[stats] ")]
+        self.assertEqual(len(lines), 1, buf.getvalue())
+        s = json.loads(lines[0].split("[stats] ", 1)[1])
+        self.assertEqual((s["model_calls"], s["tokens_in"], s["tool_calls"]), (1, 40, 1))
+
+    def test_the_summary_is_printed_once_at_exit_and_on_demand(self):
+        _LLMServer.script = [llm_reply("hi")]
+        out = self.run_harness("hello\n/stats\n")
+        lines = self.stats_lines(out)
+        self.assertEqual(len(lines), 2, out.stdout)           # /stats, then the exit summary
+        self.assertEqual(lines[0]["model_calls"], 1)
+        self.assertEqual(lines[1]["model_calls"], 1)
+        self.assertIn("/stats", hv.HELP)
+
+    def test_statistics_describe_this_run_not_the_whole_session_file(self):
+        _LLMServer.script = [llm_reply("one"), llm_reply("two")]
+        first = self.stats_lines(self.run_harness("first\n"))[-1]
+        second = self.stats_lines(self.run_harness("second\n"))[-1]
+        self.assertEqual((first["model_calls"], second["model_calls"]), (1, 1))
+
+    def test_a_missing_usage_block_is_counted_not_hidden(self):
+        """Some servers send no usage. Tokens then undercount, and the summary has to say so."""
+        _LLMServer.script = [llm_reply("no usage here")]
+        final = self.stats_lines(self.run_harness("hi\n"))[-1]
+        self.assertEqual((final["tokens_in"], final["tokens_out"]), (0, 0))
+        self.assertEqual(final["rounds_without_usage"], 1)
+
+    def test_parallel_subagents_are_counted_apart_from_the_main_agent(self):
+        sub = lambda r: with_usage(r, 10, 1)                  # noqa: E731
+        _LLMServer.script = [
+            with_usage(multi_call_reply([("agent", {"task": "A"}), ("agent", {"task": "B"})]), 50, 5),
+            sub(llm_reply("A done")), sub(llm_reply("B done")),
+            with_usage(llm_reply("all done"), 70, 7)]
+        final = self.stats_lines(self.run_harness("fan out\n"))[-1]
+        self.assertEqual(final["model_calls"], 4)             # totals include the subagents
+        self.assertEqual(final["subagents"]["model_calls"], 2)
+        self.assertEqual((final["tokens_in"], final["tokens_out"]), (140, 14))
+        self.assertEqual((final["subagents"]["tokens_in"], final["subagents"]["tokens_out"]), (20, 2))
+        self.assertEqual(final["tool_calls"], 2)               # the two agent calls themselves
+        self.assertEqual(final["by_tool"], {"agent": 2})
+        self.assertEqual(final["subagents"]["tool_calls"], 0)
+
+    def test_a_subagent_tool_call_is_counted_as_the_subagents(self):
+        open("note.txt", "w", encoding="utf-8").write("x")
+        _LLMServer.script = [
+            multi_call_reply([("agent", {"task": "read note.txt"})]),
+            multi_call_reply([("read_file", {"path": "note.txt"})]),     # the subagent's own call
+            llm_reply("sub report"), llm_reply("main done")]
+        final = self.stats_lines(self.run_harness("delegate\n"))[-1]
+        self.assertEqual(final["tool_calls"], 2)
+        self.assertEqual(final["by_tool"], {"agent": 1, "read_file": 1})
+        self.assertEqual(final["subagents"]["tool_calls"], 1)
+        self.assertEqual(final["subagents"]["model_calls"], 2)
+
+    def test_a_subagents_error_is_counted_for_the_subagent_and_in_the_total(self):
+        _LLMServer.script = [
+            multi_call_reply([("agent", {"task": "try something"})]),
+            multi_call_reply([("no_such_tool", {})]),                     # the subagent's own failing call
+            llm_reply("sub report"), llm_reply("main done")]
+        final = self.stats_lines(self.run_harness("delegate\n"))[-1]
+        self.assertEqual((final["tool_errors"], final["subagents"]["tool_errors"]), (1, 1))
+        self.assertEqual((final["tool_calls"], final["subagents"]["tool_calls"]), (2, 1))
+
+    def test_arguments_that_are_not_json_count_as_an_error_not_a_call_that_ran(self):
+        bad = multi_call_reply([("read_file", {})])
+        bad["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = "{not json"
+        _LLMServer.script = [bad, llm_reply("ok")]
+        final = self.stats_lines(self.run_harness("go\n"))[-1]
+        self.assertEqual((final["tool_calls"], final["tool_errors"]), (1, 1))
+
+    def test_compaction_is_counted_and_the_summary_request_is_not_a_round(self):
+        _LLMServer.script = [llm_reply("a"), llm_reply("b"), llm_reply("SUMMARY"), llm_reply("c")]
+        final = self.stats_lines(self.run_harness("one\ntwo\n/compact\nthree\n",
+                                                  HARNESS_KEEP_RECENT="1"))[-1]
+        self.assertEqual(final["compactions"], 1)
+        self.assertEqual(final["model_calls"], 3)             # three user turns; the summariser is not one
+
+    def test_retries_are_counted_and_the_call_still_counts_once(self):
+        import io
+        import urllib.error
+        calls = []
+
+        def flaky(body, shown):
+            calls.append(1)
+            if len(calls) < 3:
+                raise urllib.error.HTTPError("http://127.0.0.1:1/", 503, "busy", {}, io.BytesIO(b""))
+            return llm_reply("ok")
+        post, backoff = hv._post, hv.BACKOFF
+        hv._post, hv.BACKOFF = flaky, 0.001
+        try:
+            hv.call_llm([{"role": "user", "content": "hi"}], None, "sys")
+        finally:
+            hv._post, hv.BACKOFF = post, backoff
+        self.assertEqual(hv.STATS.summary()["llm_retries"], 2)
+        self.assertEqual(hv.STATS.summary()["model_calls"], 0)   # rounds are counted by the loop, not the wire
+
+    def test_a_refusal_by_the_gate_is_counted_apart_from_a_denial_by_the_user(self):
+        hv.MODE = "safe"
+        hv.read_line = lambda prompt: "n"
+        self.assertIn("DENIED", hv.execute_tool("write_file", {"path": "x.txt", "content": "c"}))
+        self.assertIn("BLOCKED", hv.execute_tool("write_file", {"path": ".env", "content": "c"}))
+        s = hv.STATS.summary()
+        self.assertEqual((s["denied_by_user"], s["gate_blocked"]), (1, 1))
+        self.assertEqual((s["asked_human"], s["human_declined"]), (1, 1))   # the .env write never asked
+        self.assertEqual(s["tool_errors"], 0)
+
+    def test_approving_counts_the_question_but_not_a_decline(self):
+        hv.MODE = "safe"
+        hv.read_line = lambda prompt: "y"
+        hv.execute_tool("write_file", {"path": "x.txt", "content": "c"})
+        s = hv.STATS.summary()
+        self.assertEqual((s["asked_human"], s["human_declined"], s["denied_by_user"]), (1, 0, 0))
+
+    def test_every_classifier_verdict_is_counted(self):
+        real = hv.classify
+        hv.MODE = "auto"
+        hv.read_line = lambda prompt: "n"
+        try:
+            for verdict in ("ALLOW", "ASK", "BLOCK"):
+                hv.classify = lambda cmd, v=verdict: (v, "test")
+                hv.gate("run_command", {"command": "echo hi > a.txt"})
+        finally:
+            hv.classify = real
+        self.assertEqual(hv.STATS.summary()["classifier"], {"allow": 1, "ask": 1, "block": 1})
+
+    def test_hook_vetoes_and_hook_failures_are_counted(self):
+        hv.HOOKS = self.one("PreToolUse", EXIT2)
+        self.assertIn("BLOCKED by hook", hv.execute_tool("write_file", {"path": "x.txt", "content": "c"}))
+        self.assertEqual(hv.STATS.summary()["hook_vetoes"], 1)
+        hv.read_line = lambda prompt: "n"
+        hv.HOOKS = self.one("PreToolUse", "import sys\nsys.exit(1)")
+        self.assertIn("DENIED", hv.execute_tool("write_file", {"path": "y.txt", "content": "c"}))
+        s = hv.STATS.summary()
+        self.assertEqual((s["hook_vetoes"], s["hook_failures"], s["denied_by_user"]), (1, 1, 1))
+
+    def test_loading_a_skill_that_does_not_exist_is_counted_as_an_error(self):
+        """Counted by prefix like the MCP case: SKILLS.load reports its failures as `ERROR...`."""
+        import harness_skills as hs
+        os.makedirs(os.path.join("skills", "alpha"))
+        with open(os.path.join("skills", "alpha", "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: alpha\ndescription: Does alpha\n---\nBODY\n")
+        old = hv.SKILLS
+        hv.SKILLS = hs.load_all()
+        try:
+            self.assertIn("BODY", hv.execute_tool("skill", {"name": "alpha"}))
+            self.assertEqual(hv.STATS.summary()["tool_errors"], 0)
+            self.assertTrue(hv.execute_tool("skill", {"name": "nope"}).startswith("ERROR"))
+        finally:
+            hv.SKILLS = old
+        self.assertEqual(hv.STATS.summary()["tool_errors"], 1)
+
+    def test_an_mcp_error_result_is_counted_as_an_error(self):
+        """The one place counted by prefix: harness_mcp marks every failure it reports with
+        `ERROR`, and a server's own text that starts with it would be counted too."""
+        class Reg:
+            def owns(self, name): return True
+            def trust_of(self, name): return "always"
+            def call(self, name, args): return args.get("say", "ERROR (tool reported): nope")
+            def is_empty(self): return False
+        old = hv.MCP
+        hv.MCP = Reg()
+        try:
+            hv.execute_tool("srv__t", {"say": "all fine"})
+            self.assertEqual(hv.STATS.summary()["tool_errors"], 0)
+            hv.execute_tool("srv__t", {})
+        finally:
+            hv.MCP = old
+        self.assertEqual(hv.STATS.summary()["tool_errors"], 1)
+
+
 class TestMemoryFileIsProtected(Base):
     """AGENT.md is now a system prompt. A file the model can rewrite and that the harness
     then loads as the user's standing instructions is a persistence path: the model (or a

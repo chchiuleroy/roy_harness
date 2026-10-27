@@ -3,7 +3,7 @@
 把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent，從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層，見下），並補上原書玩具版沒有的章節（壓縮、串流重試、背景任務與喚醒、權限分層、並行子 agent）。
 
 - 主程式：[`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 1130 行，只用標準函式庫，零依賴）；網路政策在同資料夾的 [`harness_net.py`](src/harness/harness_net.py)，Hook 在 [`harness_hooks.py`](src/harness/harness_hooks.py)，MCP 在 [`harness_mcp.py`](src/harness/harness_mcp.py)，Skill 在 [`harness_skills.py`](src/harness/harness_skills.py)
-- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（225 項，其中 16 項是 live；另有 `tests/test_harness_mcp.py` 42 項、`tests/test_harness_mcp_live.py` 5 項（全是 live）、`tests/test_harness_skills.py` 42 項（其中 2 項是 live），合計 314 項）
+- 測試：[`tests/test_harness_vllm.py`](tests/test_harness_vllm.py)（250 項，其中 16 項是 live；另有 `tests/test_harness_mcp.py` 42 項、`tests/test_harness_mcp_live.py` 5 項（全是 live）、`tests/test_harness_skills.py` 42 項（其中 2 項是 live），合計 339 項）
 - 原書與其玩具版程式在上游 repo [IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字授權是 CC BY-NC-ND，不可改作）。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。
@@ -43,7 +43,7 @@ VLLM_BASE_URL=http://your-vllm-host:8000/v1
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 ```
 
-斜線指令：`/help /quit /clear /compact /mode [safe|normal|auto] /tasks /stop <id> /undo /perms /cache`。空白行也會離開。
+斜線指令：`/help /quit /clear /compact /mode [safe|normal|auto] /tasks /stop <id> /undo /perms /cache /stats`。空白行也會離開。
 
 ## 功能與對應章節
 
@@ -55,7 +55,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | 7 | **子 agent 巢狀（深度 2）與並行** | 同一回覆的多個 `agent` 呼叫並行；子 agent 沒有 `todo_write`／`schedule_wakeup`／`monitor`（避免干擾主迴圈） |
 | 8 | 引導佇列 | 事件變成 `<system-reminder>` 區塊：附在下一則使用者訊息的**開頭**（使用者文字之前）；工具迴圈中則接在工具結果之後、獨立成一則 user 訊息；喚醒事件沒有使用者文字，自己成為一則 user 訊息 |
 | 9 | 背景任務、`task_stop`、`schedule_wakeup`、`monitor` | 事件（任務結束、鬧鐘、監控條件成立）會**自己啟動新回合**，不需使用者輸入；`/tasks`、`/stop` 讓人看得到也殺得掉 |
-| 12 | 除錯 | `HARNESS_DEBUG=1` 把每次完整請求存到 `debug/`；每輪印 token 用量；`/cache` 查伺服器快取狀態 |
+| 12 | 除錯 | `HARNESS_DEBUG=1` 把每次完整請求存到 `debug/`；每輪印 token 用量；`/cache` 查伺服器快取狀態；`/stats` 與結束時的統計行（見下） |
 | 13 | 安全分層 | 見下 |
 
 共 11 個工具：`read_file write_file edit_file run_command task_output task_stop todo_write ask_user schedule_wakeup monitor agent`。
@@ -71,6 +71,32 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | 4 縮小爆炸半徑 | 寫入限制在專案根目錄；子程序環境變數會移除含 `KEY／TOKEN／SECRET／PASSWORD／CREDENTIAL` 的項目；寫入前先備份，`/undo` 可還原；`HARNESS_SANDBOX` 可外掛 sandbox 指令前綴（**未實測**，見限制） |
 
 「可證明只讀」是白名單：`dir type findstr where echo`（Windows 另含 `find`），且指令中不得含 `& | < > ^ ( ) %`。
+
+### 執行統計（`/stats`）
+
+結束時印一行（主迴圈與收尾階段收到 Ctrl-C 也會印；啟動期間載入 hook、MCP、skill 時的 Ctrl-C 不會），`/stats` 隨時可查：`[stats] {...}`。它獨佔一行，JSON，鍵排序固定，沒發生的項目也列出 0，方便程式直接解析。**只描述這個行程這一次執行**，續接舊 session 從零開始；行程被強制殺掉或當機時不會印。**解析時請取最後一個 `[stats] ` 行**：執行途中模型的文字可能剛好以同樣的前綴開頭，但結束行之後不會再有模型輸出。
+
+| 欄位 | 意義 |
+|---|---|
+| `seconds` | 從啟動起算的秒數 |
+| `model_calls` | 代理迴圈的輪數（主 agent 加子 agent）。**不含**壓縮的摘要請求與 `auto` 分類器的請求，重試中失敗的嘗試也不算 |
+| `tokens_in` `tokens_out` | 伺服器回報的 `usage` 加總；沒回報 `usage`、或回報的不是非負整數（字串、小數、負數、NaN、布林）的輪次不計，那種輪次數在 `rounds_without_usage`，所以這兩個數字可能偏低 |
+| `llm_retries` `compactions` | 實際重試的次數（任何模型請求的重試都算，包含摘要與分類器的）、壓縮成功的次數 |
+| `tool_calls` `by_tool` | 模型發出的工具呼叫數（含引數不是合法 JSON 的），以及各工具名稱的次數 |
+| `tool_errors` | harness 自己回報的錯誤：引數不是 JSON、`old_text` 找不到恰好一次、不存在的工具或任務、子 agent 呼叫不給它的工具、工具丟出例外、MCP 與 skill 回報的失敗。**不含**被閘門拒絕或被使用者拒絕的，也不含使用者自己下的 `/stop` 打錯 |
+| `gate_blocked` `denied_by_user` | 閘門直接拒絕的次數；使用者回答不同意（包含 hook 失敗後使用者不同意）的次數 |
+| `asked_human` `human_declined` | 問了使用者幾次、其中幾次被拒或沒有回答 |
+| `classifier` | `auto` 模式分類器的判決次數：`allow`、`ask`、`block` |
+| `hook_vetoes` `hook_failures` | hook 否決的次數、hook 失敗的次數（任何事件） |
+| `subagents` | 上面幾項裡子 agent 做的部分：`model_calls`、`tokens_in`、`tokens_out`、`tool_calls`、`tool_errors`（主表的數字**包含**它們） |
+
+**怎麼數**：在事件發生的地方累加，不是事後從對話紀錄還原。事後還原會錯在最值得量的那幾種執行：只是內容以 `ERROR` 開頭的檔案會被當成失敗、平行子 agent 的結果順序是亂的、被拒絕的呼叫在紀錄裡只剩一段文字、壓縮會換掉舊訊息。測試用「讀一個內容就是 `ERROR: boom` 的檔案」證明讀它不算錯誤。
+
+**限度**：
+- `tool_errors` 有兩處只能用 `ERROR` 開頭判斷：MCP 與 skill 的失敗字串由那兩個模組自己產生，不改它們就無法精確區分；伺服器自己的正常文字若以 `ERROR` 開頭也會被算進去。
+- 計數器有鎖（平行子 agent 會同時計數），但這一點沒有測試能抓到拿掉鎖的情況。
+- 這些是計數，不是品質：沒有對錯判斷、沒有成功率；要比較模型或伺服器，需要固定的任務集與重複試驗（還沒做）。
+- 只在 Windows 11 對單一模型測過。
 
 ### 環境變數
 
@@ -229,7 +255,7 @@ python -X utf8 -m unittest discover -s tests -v              # 離線，約 80 �
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺服器（約 90 秒是測試還只有 76 項時量的，現在沒有重量）
 ```
 
-314 項 = 離線 291 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。**沒設 `HARNESS_LIVE` 時實際跑 290 項、略過 24 項**：23 項 live，加 1 項離線的符號連結測試（需要建立符號連結的權限，作者這台機器沒有，所以該測試**從未實跑**）。這是 2026-10-27 在作者機器上逐模組計數的結果（vllm 225、mcp 42、mcp_live 5、skills 42）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+339 項 = 離線 316 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。**沒設 `HARNESS_LIVE` 時實際跑 315 項、略過 24 項**：23 項 live，加 1 項離線的符號連結測試（需要建立符號連結的權限，作者這台機器沒有，所以該測試**從未實跑**）。這是 2026-10-27 在作者機器上逐模組計數的結果（vllm 250、mcp 42、mcp_live 5、skills 42）；設好 live 環境後完整跑過一次：339 項、206 秒、全過、略過 2 項（符號連結測試，以及模型沒有嘗試被注入的指令那一項）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
