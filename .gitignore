@@ -13,3 +13,6 @@ debug/
 # python
 __pycache__/
 *.pyc
+
+# benchmark runs (traces, large)
+bench_runs/

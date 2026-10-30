@@ -248,6 +248,12 @@ skills/
 4. **cmd 的 `find` 會解析到 Git 內附的 GNU find**（PATH 順序），在 C 槽遞迴列檔。已改為子程序 PATH 把 `System32` 放最前面。
 5. **子程序輸出是 OEM 碼頁（cp950）**，即使 Python 用 `-X utf8` 也一樣；用 UTF-8 解碼會變成 U+FFFD 亂碼，模型還會「猜」出看似正確的內容。已改用 `encoding="oem"`。
 
+## 評測與自我改進（`bench/`）
+
+`bench/` 是 2026-10-30 加的：12 個題型、確定性評分器、按題型切 train／val／test，每次試驗開一個真實的 harness 行程，同時量 Agent 層（答對沒）與 Harness 層（行程正常、session 有存、沒逾時）。優化迴圈（依 Self-Harness 的 weakness mining → proposal → validation）只讓提案模型改 `AGENT.md` 與 `skills/`，harness 程式碼、`gate()`、Hook 都不動。
+
+**結果（同一個 Qwen3.6-35B-A3B 當執行器與提案者，實測）**：三次嘗試（v1、v2、v3）選出的候選都沒有證明比裸 harness 好（通過率差的 95% 區間含 0；v2 的下界剛好是 0.0，且該次 test 的差異有一筆是主機睡眠造成的逾時假象），而 token 成本確定增加（約 ×1.3–1.5）。最後一次用全新 seed：候選 96.3% 對裸 harness 90.7%，+5.6 pp [−3.7, +14.8]，token ×1.34。完整的預先登記、偏離紀錄、已知限度與審查結果見 [`bench/README.md`](bench/README.md)；`bench_runs/` 的原始軌跡不進 repo。
+
 ## 測試
 
 ```bash
@@ -256,6 +262,8 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 ```
 
 339 項 = 離線 316 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。**沒設 `HARNESS_LIVE` 時實際跑 315 項、略過 24 項**：23 項 live，加 1 項離線的符號連結測試（需要建立符號連結的權限，作者這台機器沒有，所以該測試**從未實跑**）。這是 2026-10-27 在作者機器上逐模組計數的結果（vllm 250、mcp 42、mcp_live 5、skills 42）；設好 live 環境後完整跑過一次：339 項、206 秒、全過、略過 2 項（符號連結測試，以及模型沒有嘗試被注入的指令那一項）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+
+2026-10-30 起另有 `bench/` 的離線測試 47 項（`tests/test_bench_*.py`）；整套 `discover` 實測 386 項、OK、略過 24 項（略過的原因沒有逐一核對，推測是 live 與符號連結測試）。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -406,7 +414,11 @@ roy_harness/
 ├─ tests/test_harness_mcp_live.py   MCP 對真實 FastMCP 的 live 測試
 ├─ tests/fake_mcp_server.py         假 stdio 伺服器（新版／舊版／雙版…）
 ├─ tests/live_fastmcp_server.py     真實 FastMCP 伺服器（live 測試用）
-└─ tests/test_harness_skills.py     Skill 測試（含 live）
+├─ tests/test_harness_skills.py     Skill 測試（含 live）
+├─ tests/test_bench_tasks.py        bench 評分器測試（正解通過、無作為失敗、典型錯誤失敗、突變）
+├─ tests/test_bench_optimize.py     bench 接受規則、摘要、分析測試
+└─ bench/                           評測與自我改進迴圈（見上節；結果夾 bench_runs/ 不進 repo）
+   ├─ README.md  tasks.py  run_bench.py  analyze.py  optimize.py
 ```
 
 ## 出處與授權
