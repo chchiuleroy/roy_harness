@@ -248,6 +248,24 @@ skills/
 4. **cmd 的 `find` 會解析到 Git 內附的 GNU find**（PATH 順序），在 C 槽遞迴列檔。已改為子程序 PATH 把 `System32` 放最前面。
 5. **子程序輸出是 OEM 碼頁（cp950）**，即使 Python 用 `-X utf8` 也一樣；用 UTF-8 解碼會變成 U+FFFD 亂碼，模型還會「猜」出看似正確的內容。已改用 `encoding="oem"`。
 
+## 網頁 GUI（`harness_gui.py`）
+
+```bash
+python src/harness/harness_gui.py            # 印出帶 token 的網址並開瀏覽器；--port 改埠（預設 8791）、--no-browser 不開
+```
+
+多個 session 分頁、左側 session 列表（含續跑）、核准視窗、右側面板（模式、背景任務與停止鈕、`/skills` `/mcp` 等指令按鈕、統計）。**只用標準函式庫**，跟 harness 一樣不需要安裝任何東西。
+
+**架構**：GUI 不 import harness。每個 session 是一個子行程 `harness_vllm.py --jsonl <session 檔>`，工作目錄是你選的專案資料夾；harness 的 stdout 一行一個 JSON 事件（`assistant_delta`、`tool_call`、`tool_result`、`ask`、`usage`、`state`……），stdin 一行一個 JSON 指令（`user`、`answer`）。選一個行程一個 session，是因為 harness 的狀態（模式、MCP、skill、權限）都是模組全域，同一行程塞不下兩個 session；順帶，GUI 掛了不影響 agent、agent 崩了 GUI 還在。不帶 `--jsonl` 的終端機模式輸出與原本逐字相同；jsonl 模式下沒改成結構化事件的 `print()` 會變成 `log` 事件，不會破壞資料流。session 檔放在 `~/.roy_harness_gui/sessions/`（可用 `HARNESS_GUI_HOME` 改），**刻意放在專案資料夾外**，模型的 `write_file` 碰不到。
+
+**核准綁問題 id**：harness 每問一個問題就發一個 `ask`（帶 `rid`），只有帶同一個 `rid` 的 `answer` 才算數；等核准時使用者另外打的訊息不會被當成答案（排隊等這題結束後才處理），過期或錯誤的 id 被丟掉。這是 GUI 版相對終端機版多出來的保護（終端機版下一行輸入就是答案）。
+
+**這個伺服器等於「讓 harness 執行指令的遠端入口」**，所以雖然只綁 `127.0.0.1`，仍做了：每次啟動隨機 token（所有 API 都要帶 `Authorization: Bearer`）；檢查 `Host`（擋 DNS rebinding）與 `Origin`（擋別的網頁）；POST 只收 `application/json`；頁面帶 per-request nonce 的 CSP，頁面本身只用 `textContent`／DOM 節點寫入模型輸出（測試掃原始碼確認沒有 `innerHTML` 等）；請求 body 上限 1 MB。token 放在網址的 `#` 後面，頁面載入後立刻從網址移除。
+
+**停止**是強制結束整棵行程樹，不是「只中斷這一輪」；安全性靠 harness 既有的寫前日誌與重開時補 `INTERRUPTED`（見上）。切換模式送的是 `/mode x`，要等這一輪結束才生效。
+
+**驗證**：`tests/test_harness_gui.py` 22 項（離線，真實 harness 子行程對假模型）。突變驗證：拿掉 token／Host／Origin／Content-Type 檢查、讓任何一行都能當核准答案、讓錯誤 id 也能當答案、拿掉啟動鎖，共 7 種，測試都失敗。**第三方審查一次**（小o，唯讀；它的沙盒沒有可寫暫存目錄，所以測試它只看到一項通過，結論是讀程式碼得來的）：確認 4 項缺陷，全部處理——並行續跑會起兩個行程（加啟動鎖）、session 結束後核准卡片還留在畫面（移除）、終端機模式多了不該有的 `flush`（只在原本就有的地方保留）、POST 在驗證前先讀 body（加 30 秒讀取逾時；**殘餘風險**：沒有連線數上限，本機行程仍可開很多慢速連線占住執行緒，但不能藉此通過授權）。修復沒有再複審。另外用瀏覽器窗格對假模型實際操作過一輪（建立 session、送訊息、核准、重新整理後重播、停止、續跑），截圖看過；**沒有對真實 vLLM 跑過 GUI**，也只在暗色模式、1024 寬看過。
+
 ## 評測與自我改進（`bench/`）
 
 `bench/` 是 2026-10-30 加的：12 個題型、確定性評分器、按題型切 train／val／test，每次試驗開一個真實的 harness 行程，同時量 Agent 層（答對沒）與 Harness 層（行程正常、session 有存、沒逾時）。優化迴圈（依 Self-Harness 的 weakness mining → proposal → validation）只讓提案模型改 `AGENT.md` 與 `skills/`，harness 程式碼、`gate()`、Hook 都不動。
@@ -393,6 +411,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
 - Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；第三方審查一次（見下）。
+- GUI：只在 Windows 11、對假模型測過；停止是強制結束、不能只中斷一輪；每個 session 只留最近 20,000 筆事件（頁面重新整理靠重播）；沒有 per-session 的模型或 provider 設定；token 外洩（例如把帶 token 的網址貼出去）等於交出執行權，重啟伺服器才會換新。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 
@@ -409,7 +428,10 @@ roy_harness/
 ├─ src/harness/harness_hooks.py Hook 載入與執行
 ├─ src/harness/harness_mcp.py   MCP 客戶端（stdio、Streamable HTTP、兩代協定）
 ├─ src/harness/harness_skills.py Skill：選單、skill 工具、保護
+├─ src/harness/harness_gui.py   網頁 GUI 伺服器（多 session、一個 session 一個子行程）
+├─ src/harness/harness_gui.html GUI 前端（單檔）
 ├─ tests/test_harness_vllm.py
+├─ tests/test_harness_gui.py        GUI 與 --jsonl 測試（含存取控制、核准綁 id、停止續跑）
 ├─ tests/test_harness_mcp.py        MCP 離線測試（假伺服器）
 ├─ tests/test_harness_mcp_live.py   MCP 對真實 FastMCP 的 live 測試
 ├─ tests/fake_mcp_server.py         假 stdio 伺服器（新版／舊版／雙版…）
