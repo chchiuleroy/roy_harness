@@ -20,7 +20,8 @@ Env: HARNESS_PROVIDER (vllm|llamacpp|sglang|openai|anthropic-compat), HARNESS_BA
      HARNESS_DEBUG, HARNESS_MODE
      (safe|normal|auto), HARNESS_COMPACT_TOKENS, HARNESS_KEEP_RECENT, HARNESS_STREAM,
      HARNESS_BACKOFF, HARNESS_EOF_GRACE, HARNESS_SANDBOX (JSON list: command prefix).
-Usage: python harness_vllm.py [session.json]      (slash commands: /help)
+Usage: python harness_vllm.py [--jsonl] [session.json]      (slash commands: /help)
+       --jsonl: JSON events on stdout, JSON commands on stdin (what harness_gui.py runs)
 """
 import concurrent.futures
 import http.client
@@ -198,6 +199,60 @@ class Stats:
 
 
 STATS = Stats()
+
+# ------------------------- output: text for a terminal, one JSON object per line for a GUI
+JSONL = False                      # --jsonl (harness_gui): stdout carries events, never raw text
+_OUT = None                        # the real stdout, as bytes, while JSONL is on
+_OUT_LOCK = threading.Lock()       # parallel subagents print at the same time
+EVENT_CLIP = 6_000                 # a tool call or result in an event; the model still sees all of it
+
+def emit(kind, term=None, end="\n", flush=False, **data):
+    """A terminal gets `term` exactly as print() always gave it (flush only where print had it).
+    With --jsonl the same moment is one event line {"kind": ..., **data}: the GUI never has to
+    parse the terminal text."""
+    if not JSONL:
+        if term is not None:
+            print(term, end=end, flush=flush)
+        return
+    line = json.dumps({"kind": kind, **data}, ensure_ascii=True) + "\n"   # ASCII: no codepage in between
+    with _OUT_LOCK:
+        _OUT.write(line.encode("ascii"))
+        _OUT.flush()
+
+class _PrintAsLog:
+    """--jsonl: what still goes through print() (startup notes, slash command output, the stats
+    line) becomes a `log` event, so one raw line can never break the stream."""
+    def __init__(self):
+        self._buf, self._lock = "", threading.Lock()
+
+    def write(self, s):
+        with self._lock:
+            self._buf += s
+            lines = self._buf.split("\n")
+            self._buf = lines.pop()
+        for line in lines:
+            if line.strip():
+                emit("log", text=line)
+        return len(s)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+def enter_jsonl():
+    global JSONL, _OUT
+    _OUT = sys.stdout.buffer
+    sys.stdout = _PrintAsLog()
+    JSONL = True
+
+def emit_state():
+    """What the GUI's side panel shows: mode, background tasks, counters."""
+    if JSONL:
+        emit("state", mode=MODE, stats=STATS.summary(),
+             tasks=[{"id": i, "kind": t["kind"], "status": t["status"], "desc": t["desc"][:200]}
+                    for i, t in list(TASKS.items())])
 
 def whole(v):
     """A token count from a server: a whole, non-negative number, else None (strings, lists,
@@ -510,11 +565,49 @@ PROMPT_LOCK = threading.RLock()    # one human question at a time (parallel suba
 def start_reader():
     def pump():
         try:
-            for line in sys.stdin:
-                EVENTS.put(("line", line.rstrip("\r\n")))
+            if JSONL:                                   # {"type":"user","text":..} | {"type":"answer","rid":..,"text":..}
+                for raw in sys.stdin.buffer:
+                    try:
+                        cmd = json.loads(raw.decode("utf-8"))
+                        kind, text = cmd["type"], str(cmd.get("text", ""))
+                    except (ValueError, KeyError, TypeError):
+                        continue                        # not a command: ignore, never guess
+                    if kind == "user":
+                        EVENTS.put(("line", text))
+                    elif kind == "answer":
+                        EVENTS.put(("answer", (str(cmd.get("rid")), text)))
+            else:
+                for line in sys.stdin:
+                    EVENTS.put(("line", line.rstrip("\r\n")))
         finally:
             EVENTS.put(("eof", None))
     threading.Thread(target=pump, daemon=True).start()
+
+_question_ids = [0]
+
+def read_answer(**question):
+    """--jsonl: ask the GUI and wait for the answer carrying THIS question's id. A message the
+    user types meanwhile is not an answer (it waits its turn), and an answer to another id is
+    dropped: a stale click can never approve a different command."""
+    with PROMPT_LOCK:
+        _question_ids[0] += 1
+        rid = f"q{_question_ids[0]}"
+        emit("ask", rid=rid, **question)
+        deferred = []
+        try:
+            while True:
+                kind, val = EVENTS.get()
+                if kind == "answer":
+                    if val[0] == rid:
+                        return val[1]
+                    continue
+                if kind == "eof":
+                    deferred.append((kind, val))
+                    return ""
+                deferred.append((kind, val))
+        finally:
+            for e in deferred:
+                EVENTS.put(e)
 
 def read_line(prompt):
     """Block for the next human line (ask_user, approvals). Other events that
@@ -591,6 +684,7 @@ def _kill_tree(proc):
     harness_hooks.kill_tree(proc)
 
 def wake():
+    emit_state()                                    # the task that woke us has just changed status
     EVENTS.put(("wake", None))
 
 def start_background(command):
@@ -823,7 +917,8 @@ def read_only(cmd):
 def ask_human(what, always=True):
     options = "y once / a always / N" if always else "y once / N"
     STATS.add("asked_human")
-    ans = read_line(f"\n  [approve?] {what}\n  ({options}) > ").strip().lower()
+    ans = (read_answer(what=what, always=always) if JSONL
+           else read_line(f"\n  [approve?] {what}\n  ({options}) > ")).strip().lower()
     if ans == "a" and not always:                       # nothing to remember here
         ans = "y"
     if ans not in ("y", "a"):                           # EOF or junk => deny
@@ -884,7 +979,7 @@ def gate(name, args):
             if MODE == "auto":                          # layer 3
                 verdict, why = classify(cmd)
                 STATS.add("classifier." + verdict.lower())
-                print(f"  [classifier] {verdict}: {why}")
+                emit("classifier", term=f"  [classifier] {verdict}: {why}", verdict=verdict, why=why)
                 if verdict == "ALLOW":
                     return None
                 if verdict == "BLOCK":
@@ -1017,6 +1112,8 @@ def _execute_tool(name, args, depth=0):
             remind("Your current todo list:\n" + args["todos"])
             return "todo list updated"
         if name == "ask_user":                              # ch 3 HITL
+            if JSONL:
+                return read_answer(what=args["question"], question=True)
             return read_line(f"\n  [agent asks] {args['question']}\n  > ")
         if name == "schedule_wakeup":
             return start_alarm(args["seconds"], args["reason"])
@@ -1197,14 +1294,20 @@ def run_calls(calls, depth, label, on_result=None):
     report = on_result or (lambda i, r: None)
     def one(i):
         fn = calls[i]["function"]
-        print(f"  [{label}tool] {fn['name']}({fn['arguments'][:110]})")
+        emit("tool_call", term=f"  [{label}tool] {fn['name']}({fn['arguments'][:110]})",
+             id=calls[i].get("id"), name=fn["name"], args=str(fn["arguments"])[:EVENT_CLIP],
+             label=label, depth=depth)
         STATS.count("tool_calls", depth)
         STATS.add("tool." + fn["name"])
         try:
             args = json.loads(fn["arguments"])
         except json.JSONDecodeError as e:                   # errors are fuel
-            return tool_error(f"ERROR: arguments were not valid JSON: {e}", depth)
-        return execute_tool(fn["name"], args, depth)
+            out = tool_error(f"ERROR: arguments were not valid JSON: {e}", depth)
+        else:
+            out = execute_tool(fn["name"], args, depth)
+        emit("tool_result", id=calls[i].get("id"), text=str(out)[:EVENT_CLIP], chars=len(str(out)),
+             label=label, depth=depth)                      # a terminal prints nothing here
+        return out
     agent_ids = [i for i, c in enumerate(calls) if c["function"]["name"] == "agent"]
     if len(agent_ids) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -1242,19 +1345,21 @@ def _run_loop(messages, tools, system, quiet, depth, label):
         last_in = _LAST_IN.get(id(messages))
         if last_in and last_in > COMPACT_TOKENS:           # ch 6
             if compact(messages):
-                print(f"  [{pre}compacted: prompt was {last_in} tokens, now "
-                      f"{len(messages)} messages]")
+                emit("compacted", label=pre, tokens=last_in, messages=len(messages),
+                     term=f"  [{pre}compacted: prompt was {last_in} tokens, now "
+                          f"{len(messages)} messages]")
             _LAST_IN.pop(id(messages), None)
         streamed = [False]
         def on_text(t):
             if not streamed[0]:
-                print("\nassistant> ", end="")
+                if not JSONL:
+                    print("\nassistant> ", end="")
                 streamed[0] = True
-            print(t, end="", flush=True)
+            emit("assistant_delta", term=t, end="", flush=True, text=t, label=label)
         reply = call_llm(messages, tools, system,
                          on_text=on_text if (STREAM and not quiet) else None)
         if streamed[0]:
-            print()
+            emit("assistant_end", term="", label=label)
         u = reply.get("usage") or {}
         STATS.count("model_calls", depth)
         tokens_in, tokens_out = whole(u.get("prompt_tokens")), whole(u.get("completion_tokens"))
@@ -1264,9 +1369,11 @@ def _run_loop(messages, tools, system, quiet, depth, label):
         STATS.count("tokens_out", depth, tokens_out or 0)
         cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
         ttft = reply.get("_ttft")
-        print(f"  [{pre}usage] in={u.get('prompt_tokens')} cached={cached} "
-              f"out={u.get('completion_tokens')}"
-              + (f" ttft={ttft:.2f}s" if ttft is not None else ""))
+        emit("usage", label=pre, tokens_in=u.get("prompt_tokens"), cached=cached,
+             tokens_out=u.get("completion_tokens"), ttft=ttft,
+             term=f"  [{pre}usage] in={u.get('prompt_tokens')} cached={cached} "
+                  f"out={u.get('completion_tokens')}"
+                  + (f" ttft={ttft:.2f}s" if ttft is not None else ""))
         if tokens_in:                                       # a string here used to crash the next compaction check
             _LAST_IN[id(messages)] = tokens_in
         choice = reply["choices"][0]
@@ -1280,7 +1387,8 @@ def _run_loop(messages, tools, system, quiet, depth, label):
         if entry["content"].strip():
             final_text = entry["content"]
             if not quiet and not streamed[0]:
-                print(f"\nassistant> {entry['content']}")
+                emit("assistant", term=f"\nassistant> {entry['content']}",
+                     text=entry["content"], label=label)
 
         if not calls:                                       # end_turn
             if choice.get("finish_reason") == "length":
@@ -1477,7 +1585,10 @@ def slash(cmd, messages):
 
 def main():
     global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS, MEMORY
-    session_file = sys.argv[1] if len(sys.argv) > 1 else "session.json"
+    argv = [a for a in sys.argv[1:] if a != "--jsonl"]
+    if len(argv) != len(sys.argv) - 1:
+        enter_jsonl()                                       # harness_gui: events on stdout, commands on stdin
+    session_file = argv[0] if argv else "session.json"
     if memory_protected(session_file):      # checkpoints rewrite the session without gate()
         raise SystemExit(f"the session file cannot be the project memory file ({MEMORY_FILE})")
     global SESSION_FILE
@@ -1518,10 +1629,13 @@ def main():
     fire_session_start()
 
     start_reader()
+    emit("ready", provider=PROVIDER, model=MODEL, cwd=root(), mode=MODE, session=session_file,
+         messages=len(messages))
+    emit_state()
     eof_seen, deadline = False, 0.0
     try:
         while True:
-            if not eof_seen:
+            if not eof_seen and not JSONL:
                 print("\nyou> ", end="", flush=True)
             try:
                 kind, val = EVENTS.get(timeout=0.5) if eof_seen else EVENTS.get()
@@ -1536,6 +1650,8 @@ def main():
                 print(f"\n[stdin closed; waiting up to {EOF_GRACE:.0f}s for "
                       f"{len(active_jobs())} pending job(s)]")
                 continue
+            if kind == "answer":                            # an answer nobody is waiting for any more
+                continue
             if kind == "wake":                              # ch 9: events start turns
                 pending = drain_reminders()
                 if not pending:
@@ -1549,6 +1665,7 @@ def main():
                     break
                 if line.startswith("/"):
                     messages = run_slash(line, messages)
+                    emit_state()
                     continue
                 if not submit_filter(line):                 # ch 11: UserPromptSubmit
                     continue
@@ -1557,12 +1674,15 @@ def main():
                 text = f"{pending}\n{line}" if pending else line
             messages.append({"role": "user", "content": text})
             checkpoint(messages)                            # the line is safe before the model sees it
+            emit("turn_start")
             try:
                 run_loop(messages, tools_for(0), system_prompt())
             except LLMError as e:
                 print(f"\n[harness] model call failed, turn abandoned: {e}")
             checkpoint(messages)
             fire_stop()
+            emit("turn_end")
+            emit_state()
     finally:
         try:
             saved = finish_session(messages, session_file)
