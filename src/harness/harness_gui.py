@@ -131,6 +131,9 @@ class Session:
             threading.Thread(target=self._pump_err, args=(self.proc,), daemon=True).start()
 
     def _pump_out(self, proc):
+        """Only the current process may speak for the session: stop() then start() can swap
+        self.proc while this thread still drains the old one, and a late `exited` would show
+        the running new harness as dead and wipe its open question."""
         for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             try:
@@ -139,14 +142,17 @@ class Session:
                     raise ValueError
             except ValueError:
                 ev = {"kind": "log", "text": line}
-            self.add(ev)
-        self.exit_code = proc.wait()
+            if self.proc is proc:
+                self.add(ev)
+        code = proc.wait()
         for pipe in (proc.stdin, proc.stdout):
             try:
                 pipe.close()
             except OSError:
                 pass
-        self.add({"kind": "exited", "code": self.exit_code})
+        if self.proc is proc:
+            self.exit_code = code
+            self.add({"kind": "exited", "code": code})
 
     def _pump_err(self, proc):
         for raw in proc.stderr:

@@ -236,6 +236,52 @@ class TestSessionBuffer(unittest.TestCase):
         self.assertEqual(s.events[-1]["text"], "24")
 
 
+class _Gone:
+    """A harness process that has already exited and whose pipes are drained."""
+    stdin = stdout = stderr = None
+
+    def __init__(self, lines=()):
+        self.stdout = _Pipe(lines)
+        self.stdin = _Pipe(())
+        self.pid = 0
+
+    def wait(self):
+        return 1
+
+    def poll(self):
+        return 1
+
+
+class _Pipe:
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def close(self):
+        pass
+
+
+class TestStaleProcessEvents(unittest.TestCase):
+    def test_an_old_process_cannot_end_or_speak_for_the_new_one(self):
+        """stop() then start() can swap the process before the old reader thread has finished.
+        Its late `exited` would show the running new harness as dead and wipe its open
+        approval question (found by the second review)."""
+        s = gui.Session("1" * 12, ".")
+        old, new = _Gone([b'{"kind":"log","text":"late line from the old one"}\n']), _Gone()
+        s.proc = new                                      # start() already replaced it
+        s.add({"kind": "ask", "rid": "q1", "what": "x"})  # the new process asked something
+        s._pump_out(old)                                  # ... and only now the old reader finishes
+        kinds = [e["kind"] for e in s.events]
+        self.assertNotIn("exited", kinds)
+        self.assertNotIn("log", kinds)
+        self.assertIn("q1", s.pending)                    # the open question survived
+        s._pump_out(new)                                  # the current process ending still counts
+        self.assertEqual(s.events[-1]["kind"], "exited")
+        self.assertEqual(s.pending, {})
+
+
 class TestTerminalModeIsUnchanged(unittest.TestCase):
     """Without --jsonl, emit() must print what print() printed. Run in a real process: emit is
     the one place every terminal line now goes through."""
