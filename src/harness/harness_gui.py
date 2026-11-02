@@ -74,9 +74,9 @@ class Session:
         self.events, self.base = [], 0
         self.pending = {}                    # rid -> the ask event still waiting for an answer
         self.proc = None
-        self.exit_code = None
         self.write_lock = threading.Lock()
         self.start_lock = threading.Lock()   # two resume requests must not start two harnesses
+        self.gen_lock = threading.Lock()     # "is this still the current process" + "add its event" are one step
 
     file =property(lambda self: os.path.join(SESSIONS, self.id + ".json"))
     meta_file = property(lambda self: os.path.join(SESSIONS, self.id + ".meta.json"))
@@ -122,13 +122,24 @@ class Session:
                 return
             env = dict(os.environ, HARNESS_MODE=self.mode, PYTHONIOENCODING="utf-8")
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            self.exit_code = None
-            self.proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 [sys.executable, "-X", "utf8", HARNESS, "--jsonl", self.file], cwd=self.cwd,
                 env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 creationflags=flags)
-            threading.Thread(target=self._pump_out, args=(self.proc,), daemon=True).start()
-            threading.Thread(target=self._pump_err, args=(self.proc,), daemon=True).start()
+            with self.gen_lock:                              # from here the old process is stale
+                self.proc = proc
+            threading.Thread(target=self._pump_out, args=(proc,), daemon=True).start()
+            threading.Thread(target=self._pump_err, args=(proc,), daemon=True).start()
+
+    def _add_if_current(self, proc, ev):
+        """Add `ev` only if `proc` is still the session's process. The check and the add happen
+        under the lock that start() takes to swap the process, so a late event from an old
+        process can never slip in after the swap."""
+        with self.gen_lock:
+            if self.proc is not proc:
+                return False
+            self.add(ev)
+            return True
 
     def _pump_out(self, proc):
         """Only the current process may speak for the session: stop() then start() can swap
@@ -142,17 +153,14 @@ class Session:
                     raise ValueError
             except ValueError:
                 ev = {"kind": "log", "text": line}
-            if self.proc is proc:
-                self.add(ev)
+            self._add_if_current(proc, ev)
         code = proc.wait()
         for pipe in (proc.stdin, proc.stdout):
             try:
                 pipe.close()
             except OSError:
                 pass
-        if self.proc is proc:
-            self.exit_code = code
-            self.add({"kind": "exited", "code": code})
+        self._add_if_current(proc, {"kind": "exited", "code": code})
 
     def _pump_err(self, proc):
         for raw in proc.stderr:

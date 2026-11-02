@@ -281,6 +281,25 @@ class TestStaleProcessEvents(unittest.TestCase):
         self.assertEqual(s.events[-1]["kind"], "exited")
         self.assertEqual(s.pending, {})
 
+    def test_the_swap_cannot_happen_between_the_check_and_the_add(self):
+        """The same guard, but the window the third review found: start() swaps the process
+        while the old reader is between 'am I current?' and 'add the event'. The swap is held
+        open here; the old reader must wait for it and then see that it is no longer current.
+        Mutation: take the lock out of _add_if_current and this test fails."""
+        s = gui.Session("2" * 12, ".")
+        old, new = _Gone(), _Gone()
+        s.proc = old
+        sent = []
+        with s.gen_lock:                                  # start() is in the middle of swapping
+            t = threading.Thread(target=lambda: sent.append(
+                s._add_if_current(old, {"kind": "exited", "code": 1})))
+            t.start()
+            time.sleep(0.3)                               # the old reader is at (or past) its check
+            s.proc = new
+        t.join(10)
+        self.assertEqual(sent, [False])
+        self.assertEqual(s.events, [])
+
 
 class TestTerminalModeIsUnchanged(unittest.TestCase):
     """Without --jsonl, emit() must print what print() printed. Run in a real process: emit is
