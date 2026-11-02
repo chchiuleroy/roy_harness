@@ -244,6 +244,7 @@ function handle(v, ev) {
     case "answered": {
       v.pending.delete(ev.rid); const c = v.log.querySelector(`[data-rid="${ev.rid}"]`); if (c) c.remove(); renderTabs(); break;
     }
+    case "image": sysLine(v, `已附上圖片：${ev.name}（${ev.width}×${ev.height}）`); break;
     case "classifier": sysLine(v, `分類器 ${ev.verdict}：${ev.why}`); break;
     case "usage":                                          // the harness prints it before the answer's text; show it after
       v.held = `${ev.label || ""}in=${ev.tokens_in} cached=${ev.cached} out=${ev.tokens_out}` + (ev.ttft != null ? ` ttft=${ev.ttft.toFixed(2)}s` : "");

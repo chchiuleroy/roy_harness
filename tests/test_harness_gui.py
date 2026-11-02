@@ -219,6 +219,15 @@ class TestMessagesToEvents(unittest.TestCase):
         self.assertEqual(ev[2]["id"], ev[3]["id"])
         self.assertTrue(all(e["history"] for e in ev))
 
+    def test_a_picture_the_harness_attached_is_not_shown_as_something_the_person_typed(self):
+        """view_image puts a user-role message in the session; replaying it as a speech bubble
+        would put the harness' words in the person's mouth."""
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "<system-reminder>attached</system-reminder>"},
+            {"type": "image_ref", "name": "a.png", "path": "C:/x/a.png", "width": 8, "height": 6}]}]
+        ev = gui.messages_to_events(msgs)
+        self.assertEqual([(e["kind"], e["name"], e["width"]) for e in ev], [("image", "a.png", 8)])
+
 
 class TestSessionBuffer(unittest.TestCase):
     def test_trimming_the_oldest_events_keeps_sequence_numbers_stable(self):
@@ -280,6 +289,25 @@ class TestStaleProcessEvents(unittest.TestCase):
         s._pump_out(new)                                  # the current process ending still counts
         self.assertEqual(s.events[-1]["kind"], "exited")
         self.assertEqual(s.pending, {})
+
+    def test_the_swap_cannot_happen_between_the_check_and_the_add(self):
+        """The same guard, but the window the third review found: start() swaps the process
+        while the old reader is between 'am I current?' and 'add the event'. The swap is held
+        open here; the old reader must wait for it and then see that it is no longer current.
+        Mutation: take the lock out of _add_if_current and this test fails."""
+        s = gui.Session("2" * 12, ".")
+        old, new = _Gone(), _Gone()
+        s.proc = old
+        sent = []
+        with s.gen_lock:                                  # start() is in the middle of swapping
+            t = threading.Thread(target=lambda: sent.append(
+                s._add_if_current(old, {"kind": "exited", "code": 1})))
+            t.start()
+            time.sleep(0.3)                               # the old reader is at (or past) its check
+            s.proc = new
+        t.join(10)
+        self.assertEqual(sent, [False])
+        self.assertEqual(s.events, [])
 
 
 class TestTerminalModeIsUnchanged(unittest.TestCase):
