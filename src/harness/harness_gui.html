@@ -162,8 +162,18 @@ function activate(sid) {
 function openSession(sid) {
   if (!V.has(sid)) {
     const v = newView(sid); V.set(sid, v); $("views").append(v.root); follow(v);
+    // a session that is not running (the server was restarted, or it was stopped earlier) never
+    // sends an `exited` event to this page, so it needs its resume button from the start
+    if (!info(sid).running) showResume(v, "這個 session 目前沒有在執行（上面是它存下來的歷史）");
   }
   activate(sid);
+}
+
+function showResume(v, text) {
+  v.banner.replaceChildren(el("span", "", text));
+  const b = el("button", "primary", "續跑");
+  b.onclick = async () => { try { await api("POST", `/api/sessions/${v.id}/resume`, {}); } catch (e) { alert(e.message); } };
+  v.banner.append(b); v.banner.style.display = "flex";
 }
 
 // ---- one session view
@@ -257,10 +267,7 @@ function handle(v, ev) {
     case "exited": {
       v.alive = false; v.busy = false; v.pending.clear(); v.cur = null;
       v.log.querySelectorAll(".ask").forEach((c) => c.remove());     // nothing is waiting for them any more
-      v.banner.replaceChildren(el("span", "", `harness 已結束（代碼 ${ev.code}）`));
-      const b = el("button", "primary", "續跑");
-      b.onclick = async () => { try { await api("POST", `/api/sessions/${v.id}/resume`, {}); } catch (e) { alert(e.message); } };
-      v.banner.append(b); v.banner.style.display = "flex"; renderTabs(); renderRight(); break;
+      showResume(v, `harness 已結束（代碼 ${ev.code}）`); renderTabs(); renderRight(); break;
     }
     case "stderr": sysLine(v, ev.text, true); break;
     case "log": if (ev.text && ev.text.trim()) sysLine(v, ev.text); break;
