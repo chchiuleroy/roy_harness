@@ -219,6 +219,15 @@ class TestMessagesToEvents(unittest.TestCase):
         self.assertEqual(ev[2]["id"], ev[3]["id"])
         self.assertTrue(all(e["history"] for e in ev))
 
+    def test_a_picture_the_harness_attached_is_not_shown_as_something_the_person_typed(self):
+        """view_image puts a user-role message in the session; replaying it as a speech bubble
+        would put the harness' words in the person's mouth."""
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "<system-reminder>attached</system-reminder>"},
+            {"type": "image_ref", "name": "a.png", "path": "C:/x/a.png", "width": 8, "height": 6}]}]
+        ev = gui.messages_to_events(msgs)
+        self.assertEqual([(e["kind"], e["name"], e["width"]) for e in ev], [("image", "a.png", 8)])
+
 
 class TestSessionBuffer(unittest.TestCase):
     def test_trimming_the_oldest_events_keeps_sequence_numbers_stable(self):

@@ -50,6 +50,12 @@ def messages_to_events(messages):
     for m in messages:
         role, content = m.get("role"), m.get("content")
         if isinstance(content, list):
+            pictures = [p for p in content if isinstance(p, dict) and p.get("type") == "image_ref"]
+            if pictures:                       # the harness attached them; the person did not type this
+                out += [{"kind": "image", "name": p.get("name"), "path": p.get("path"),
+                         "width": p.get("width"), "height": p.get("height"), "history": True}
+                        for p in pictures]
+                continue
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         content = content if isinstance(content, str) else ""
         if role == "user":
