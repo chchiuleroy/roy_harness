@@ -1779,6 +1779,7 @@ def slash(cmd, messages):
         print(HELP)
     elif word == "/clear":
         _LAST_IN.clear()                                    # ids may be reused
+        emit("cleared")                                     # GUI only: a terminal prints nothing here
         return True, []
     elif word == "/compact":
         print("compacted" if compact(messages) else "nothing to compact")

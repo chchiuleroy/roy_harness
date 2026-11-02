@@ -189,6 +189,35 @@ class TestWhoMayAsk(GuiBase):
         st, _ = self.call("POST", "/api/sessions/../../x/send", {"text": "x"})
         self.assertEqual(st, 404)
 
+    def test_a_session_needs_a_named_folder(self):
+        """An empty field used to mean 'the server's own folder' (realpath of '' is the current
+        directory), so a session could start inside the repo by accident."""
+        for body in ({}, {"cwd": ""}, {"cwd": "   "}):
+            st, _ = self.call("POST", "/api/sessions", body)
+            self.assertEqual(st, 400, body)
+        self.assertEqual(gui.REGISTRY.listing(), [])
+
+    def test_the_markdown_script_has_the_same_host_check_as_the_page(self):
+        """The page loads its markdown parser as a script of its own (so Node can test it)."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/md.js", headers={"Host": f"127.0.0.1:{self.port}"})
+        r = c.getresponse()
+        body = r.read().decode("utf-8")
+        self.assertEqual(r.status, 200)
+        self.assertIn("javascript", r.getheader("Content-Type"))
+        self.assertIn("parseMarkdown", body)
+        c.close()
+        st, _ = self.call("GET", "/md.js", headers={"Host": "evil.example"})
+        self.assertEqual(st, 403)
+
+    def test_the_page_loads_the_script_with_its_nonce(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/", headers={"Host": f"127.0.0.1:{self.port}"})
+        r = c.getresponse()
+        page = r.read().decode("utf-8")
+        nonce = r.getheader("Content-Security-Policy").split("'nonce-")[1].split("'")[0]
+        self.assertIn(f'<script nonce="{nonce}" src="/md.js"></script>', page)
+
     def test_the_page_carries_a_nonce_csp_and_no_token(self):
         """The page is the one place model text meets the DOM: a CSP with a nonce backs up
         textContent, and the token must never be in what the server sends."""
@@ -218,6 +247,31 @@ class TestMessagesToEvents(unittest.TestCase):
         self.assertEqual([e["kind"] for e in ev], ["user", "assistant", "tool_call", "tool_result"])
         self.assertEqual(ev[2]["id"], ev[3]["id"])
         self.assertTrue(all(e["history"] for e in ev))
+
+    def test_what_the_harness_wrote_into_a_user_message_is_not_shown_as_the_persons_words(self):
+        """Three things live in user-role messages without being typed: the summary that
+        replaces a compacted conversation, reminders glued in front of a typed line, and the note
+        of a wake-up with no typed line. Replaying them as speech bubbles put the harness'
+        words (a wall of 'USER MESSAGES (verbatim...)') in the person's mouth."""
+        summary = ("<system-reminder>\nEarlier conversation was compacted. Summary of everything "
+                   "before this point:\nTASK: x\n\nUSER MESSAGES (verbatim, kept by the harness, "
+                   "as JSON): {}\n</system-reminder>")
+        glued = "<system-reminder>\nBackground task b1 finished.\n</system-reminder>\nwhat happened?"
+        wake = ("<system-reminder>\nScheduled wakeup a1 fired.\n</system-reminder>\n"
+                "(No new user message: the harness woke you because of the events above.)")
+        only = "<system-reminder>\nsomething happened\n</system-reminder>"
+        ev = gui.messages_to_events([{"role": "user", "content": c} for c in (summary, glued, wake, only)])
+        self.assertEqual([e["kind"] for e in ev], ["summary", "user", "notice", "notice"])
+        self.assertIn("TASK: x", ev[0]["text"])
+        self.assertEqual(ev[1]["text"], "what happened?")                 # only what was typed
+        self.assertNotIn("system-reminder", " ".join(e["text"] for e in ev if e["kind"] == "user"))
+
+    def test_a_person_typing_the_summary_sentence_is_still_a_person(self):
+        """Only the harness' own head ('<system-reminder>' + that sentence) is a summary. Someone
+        who writes the sentence in ordinary text is shown as what they are (found by the review)."""
+        typed = "Earlier conversation was compacted. -- is the sentence I want to ask about"
+        ev = gui.messages_to_events([{"role": "user", "content": typed}])
+        self.assertEqual([(e["kind"], e["text"]) for e in ev], [("user", typed)])
 
     def test_a_picture_the_harness_attached_is_not_shown_as_something_the_person_typed(self):
         """view_image puts a user-role message in the session; replaying it as a speech bubble
@@ -332,6 +386,12 @@ class TestTerminalModeIsUnchanged(unittest.TestCase):
             "hv.emit('assistant_end', term='')\n"
             "hv.emit('state', mode='normal')\n")
         self.assertEqual(out, "  [tool] f({})\nab\n")
+
+    def test_clear_says_nothing_in_a_terminal(self):
+        """The `cleared` event is for the GUI only: a terminal user sees exactly what they saw before."""
+        out = self.run_py("import harness_vllm as hv\n"
+                          "print(hv.slash('/clear', [{'role': 'user', 'content': 'x'}]))\n")
+        self.assertEqual(out, "(True, [])\n")
 
     def test_jsonl_mode_turns_stray_prints_into_log_events(self):
         """One raw line on stdout would break the JSON stream the page reads."""
@@ -534,6 +594,33 @@ class TestRealHarness(GuiBase):
         self.assertNotEqual(sa.file, sb.file)
         st, listing = self.call("GET", "/api/sessions")
         self.assertEqual({x["id"] for x in listing["sessions"]}, {a, b})
+
+    def test_clear_is_announced_and_slash_lines_are_marked(self):
+        """/clear makes the model forget; the page used to show nothing at all, so the old chat
+        looked as if it still counted. The echo of a slash line is marked so the page can show
+        it as a command, not as something the person said."""
+        FakeLLM.script = [text_reply("first answer")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "hello"})
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "/clear"})
+        self.wait(s, lambda e: e["kind"] == "cleared", "cleared")
+        users = {e["text"]: e for e in s.events if e["kind"] == "user"}
+        self.assertNotIn("slash", users["hello"])
+        self.assertTrue(users["/clear"]["slash"])
+        time.sleep(0.5)
+        with open(s.file, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [])                      # what the model remembers: nothing
+
+    def test_the_session_summary_counts_its_events(self):
+        """The page uses the count to tell replayed history (no 'unread' marker) from live events."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        st, listing = self.call("GET", "/api/sessions")
+        row = next(x for x in listing["sessions"] if x["id"] == sid)
+        self.assertGreaterEqual(row["events"], 2)
+        self.assertEqual(row["events"], s.base + len(s.events))
 
     def test_the_stream_replays_from_a_sequence_number(self):
         """A reloaded page asks for from=N and gets exactly the rest, as one JSON per line."""
