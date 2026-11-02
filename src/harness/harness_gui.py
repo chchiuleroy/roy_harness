@@ -16,6 +16,9 @@ and a CSP with a per-request nonce. The page itself writes model output with tex
 Standard library only, like the harness.
 """
 import argparse
+import base64
+import binascii
+import hashlib
 import hmac
 import http.server
 import json
@@ -40,6 +43,10 @@ HOME = os.environ.get("HARNESS_GUI_HOME") or os.path.join(os.path.expanduser("~"
 SESSIONS = os.path.join(HOME, "sessions")   # outside every project: the model cannot write there
 MAX_EVENTS = 20_000                         # per session; the oldest are dropped, seq stays stable
 MAX_BODY = 1_000_000
+MAX_UPLOAD_BODY = 8_000_000                 # a picture (up to MAX_PICTURE) as base64 inside JSON
+MAX_PICTURE = 5_000_000                     # = the harness' MAX_IMAGE_BYTES; the harness decides, this is the first filter
+PICTURES_PER_MESSAGE = 4
+PICTURE_ID = re.compile(r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
 CLIP = 4_000
 SID = re.compile(r"^[0-9a-f]{12}$")
 # what the harness itself writes into user-role messages (see harness_vllm.py: compact, remind)
@@ -49,6 +56,19 @@ REMINDERS = re.compile(r"\A(?:\s*<system-reminder>.*?</system-reminder>)+\s*", r
 MODES = ("safe", "normal", "auto")
 
 # ---------------------------------------------------------------- sessions
+def picture_kind(data):
+    """'png' / 'jpg' / 'gif' / 'webp' from the first bytes, or None. Only a first filter: the harness
+    checks the whole file (header, end, size, pixels) before a model ever sees it."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
 def messages_to_events(messages):
     """A session file as the same events a live run produces (what the page replays on resume)."""
     out = []
@@ -56,7 +76,13 @@ def messages_to_events(messages):
         role, content = m.get("role"), m.get("content")
         if isinstance(content, list):
             pictures = [p for p in content if isinstance(p, dict) and p.get("type") == "image_ref"]
-            if pictures:                       # the harness attached them; the person did not type this
+            if pictures:
+                # the text part is either what the person typed with the pictures, or only the
+                # harness' own reminder (view_image): then there is nothing of the person's to show
+                words = REMINDERS.sub("", " ".join(p.get("text", "") for p in content
+                                                   if isinstance(p, dict) and p.get("type") == "text"), count=1)
+                if words.strip() and not words.lstrip().startswith(WAKE_NOTE):
+                    out.append({"kind": "user", "text": words[:20_000], "history": True})
                 out += [{"kind": "image", "name": p.get("name"), "path": p.get("path"),
                          "width": p.get("width"), "height": p.get("height"), "history": True}
                         for p in pictures]
@@ -94,6 +120,7 @@ class Session:
         self.proc = None
         self.write_lock = threading.Lock()
         self.start_lock = threading.Lock()   # two resume requests must not start two harnesses
+        self.pictures_lock = threading.Lock()
         self.gen_lock = threading.Lock()     # "is this still the current process" + "add its event" are one step
 
     file =property(lambda self: os.path.join(SESSIONS, self.id + ".json"))
@@ -198,17 +225,76 @@ class Session:
                 return False
         return True
 
-    def say(self, text):
+    images_dir = property(lambda self: os.path.join(SESSIONS, self.id + ".images"))
+
+    def keep_picture(self, name, data):
+        """Store an uploaded picture under its own hash, next to the session and outside every
+        project (the model's write_file cannot reach it). -> {"id", "name", "bytes"}."""
+        kind = picture_kind(data)
+        if kind is None:
+            raise ValueError("not a PNG, JPEG, GIF or WebP picture")
+        if len(data) > MAX_PICTURE:
+            raise ValueError(f"the picture is {len(data)} bytes; the limit is {MAX_PICTURE}")
+        pid = hashlib.sha256(data).hexdigest() + "." + kind
+        clean = "".join(c for c in os.path.basename(str(name or "").replace("\\", "/")) if c.isprintable())[:80] or pid
+        with self.pictures_lock:
+            os.makedirs(self.images_dir, exist_ok=True)
+            path = os.path.join(self.images_dir, pid)
+            if not os.path.exists(path):
+                with open(path + ".tmp", "wb") as f:
+                    f.write(data)
+                os.replace(path + ".tmp", path)
+            names = self._picture_names()
+            names[pid] = clean
+            with open(os.path.join(self.images_dir, "names.json.tmp"), "w", encoding="utf-8") as f:
+                json.dump(names, f, ensure_ascii=False)
+            os.replace(os.path.join(self.images_dir, "names.json.tmp"), os.path.join(self.images_dir, "names.json"))
+        return {"id": pid, "name": clean, "bytes": len(data)}
+
+    def _picture_names(self):
+        try:
+            with open(os.path.join(self.images_dir, "names.json"), encoding="utf-8") as f:
+                names = json.load(f)
+            return names if isinstance(names, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def picture_items(self, ids):
+        """[{"path", "name"}] for ids this session was given by keep_picture; ValueError for anything else."""
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError("images must be a list of ids")
+        if len(ids) > PICTURES_PER_MESSAGE:
+            raise ValueError(f"at most {PICTURES_PER_MESSAGE} pictures go with one message")
+        names = self._picture_names()
+        items = []
+        for pid in ids:
+            path = os.path.join(self.images_dir, pid)
+            if not PICTURE_ID.match(pid) or not os.path.isfile(path):
+                raise ValueError(f"no such picture: {pid[:70]}")
+            items.append({"path": path, "name": names.get(pid, pid)})
+        return items
+
+    def say(self, text, images=None):
         text = str(text)[:20_000]
-        if not self.send({"type": "user", "text": text}):
+        items = self.picture_items(images) if images else []
+        if items and text.startswith("/"):
+            raise ValueError("a command takes no picture")
+        command = {"type": "user", "text": text}
+        if items:
+            command["images"] = items
+        if not self.send(command):
             return False
         echo = {"kind": "user", "text": text}
         if text.startswith("/"):
             echo["slash"] = True                         # a command, not something to show as a speech bubble
+        if items:
+            echo["images"] = [i["name"] for i in items]
         self.add(echo)
         if not self.title and not text.startswith("/"):
-            self.title = text.strip().splitlines()[0][:60]
-            self.save_meta()
+            first = text.strip().splitlines()[0][:60] if text.strip() else ""
+            self.title = first or ("[圖片] " + items[0]["name"] if items else "")
+            if self.title:
+                self.save_meta()
         return True
 
     def answer(self, rid, text):
@@ -362,7 +448,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             n = -1
         # read the body before any refusal: closing on unread data resets the connection on
         # Windows and the client then never sees the 401/403 (a flaky test found this)
-        raw = self.rfile.read(n) if 0 <= n <= MAX_BODY else None
+        limit = MAX_UPLOAD_BODY if self.path.split("?")[0].endswith("/upload") else MAX_BODY
+        raw = self.rfile.read(n) if 0 <= n <= limit else None
         if not self._guard(True):
             return
         if raw is None:
@@ -397,11 +484,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._fail(400, f"the project folder is gone: {s.cwd}")
                 s.start()
                 return self._json(s.summary())
+            if act == "upload":
+                try:
+                    data = base64.b64decode(str(body.get("data") or ""), validate=True)
+                    return self._json(s.keep_picture(body.get("name"), data))
+                except (binascii.Error, ValueError) as e:
+                    return self._fail(400, str(e))
             if act == "send":
                 text = str(body.get("text") or "")
-                if not text.strip():
+                images = body.get("images")
+                if not text.strip() and not images:
                     return self._fail(400, "empty")
-                return self._json({"ok": True}) if s.say(text) else self._fail(409, "not running")
+                try:
+                    return self._json({"ok": True}) if s.say(text, images) else self._fail(409, "not running")
+                except ValueError as e:
+                    return self._fail(400, str(e))
             if act == "answer":
                 ok = s.answer(str(body.get("rid") or ""), body.get("text", ""))
                 return self._json({"ok": True}) if ok else self._fail(409, "no such question")
@@ -433,7 +530,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy",
                          f"default-src 'none'; script-src 'nonce-{nonce}'; "
-                         f"style-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'; "
+                         f"style-src 'nonce-{nonce}'; connect-src 'self'; img-src blob:; base-uri 'none'; "
                          f"form-action 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
