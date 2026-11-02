@@ -31,6 +31,12 @@ class TestMarkdown(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr.decode("utf-8", "replace"))
         return json.loads(out.stdout.decode("utf-8"))
 
+    def run_js(self, expression):
+        script = "const m = require(%s); with (m) { process.stdout.write(JSON.stringify(%s)); }" % (json.dumps(MD), expression)
+        out = subprocess.run([NODE, "-e", script], capture_output=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr.decode("utf-8", "replace"))
+        return json.loads(out.stdout.decode("utf-8"))
+
     @staticmethod
     def inline_types(blocks):
         found = set()
@@ -91,6 +97,16 @@ class TestMarkdown(unittest.TestCase):
         self.assertEqual([b["type"] for b in blocks], ["heading", "list"])
         self.assertEqual(blocks[0]["inline"], [{"t": "text", "v": "Title"}])
         self.assertEqual(len(blocks[1]["items"]), 2)
+
+    def test_the_repaint_interval_grows_with_the_answer_but_stays_bounded(self):
+        """The page re-parses the whole answer each time it repaints a streamed answer; the longer
+        the answer, the less often it may do so (found by the review: 50,000 characters repainted
+        every 10 characters took 1.7 s in total)."""
+        gaps = [self.run_js("renderGap(%d)" % n) for n in (0, 1_000, 10_000, 50_000, 10_000_000)]
+        self.assertEqual(gaps[0], 50)
+        self.assertEqual(sorted(gaps), gaps)
+        self.assertGreater(gaps[3], gaps[1])
+        self.assertEqual(gaps[-1], 1000)                                   # never slower than one repaint a second
 
     def test_empty_input(self):
         self.assertEqual(self.parse(""), [])

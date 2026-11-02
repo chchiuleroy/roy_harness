@@ -340,9 +340,16 @@ function handle(v, ev) {
     case "notice": sysLine(v, "（harness 通知）" + short(ev.text.replace(/<\/?system-reminder>/g, ""), 160)); break;
     case "compacted": sysLine(v, `${ev.label || ""}已壓縮對話：提示曾有 ${ev.tokens} tokens，現在剩 ${ev.messages} 則訊息`); break;
     case "assistant_delta":
-      if (!v.cur) v.cur = {node: botBubble(v), text: ""};
+      if (!v.cur) v.cur = {node: botBubble(v), text: "", last: 0, raf: 0};
       v.cur.text += ev.text;
-      if (!v.cur.raf) v.cur.raf = requestAnimationFrame(() => { const c = v.cur; if (!c) return; c.raf = 0; stick(v, () => renderText(c.node, c.text)); });
+      if (!v.cur.raf) {                                            // repaint at most every renderGap(length) ms
+        const c = v.cur;
+        c.raf = requestAnimationFrame(function paint(now) {
+          if (v.cur !== c) return;                                 // the answer ended: assistant_end drew the final one
+          if (now - c.last < renderGap(c.text.length)) { c.raf = requestAnimationFrame(paint); return; }
+          c.raf = 0; c.last = now; stick(v, () => renderText(c.node, c.text));
+        });
+      }
       break;
     case "assistant_end":
       if (v.cur) { const c = v.cur; v.cur = null; stick(v, () => renderText(c.node, c.text)); }

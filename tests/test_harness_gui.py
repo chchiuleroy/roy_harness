@@ -266,6 +266,13 @@ class TestMessagesToEvents(unittest.TestCase):
         self.assertEqual(ev[1]["text"], "what happened?")                 # only what was typed
         self.assertNotIn("system-reminder", " ".join(e["text"] for e in ev if e["kind"] == "user"))
 
+    def test_a_person_typing_the_summary_sentence_is_still_a_person(self):
+        """Only the harness' own head ('<system-reminder>' + that sentence) is a summary. Someone
+        who writes the sentence in ordinary text is shown as what they are (found by the review)."""
+        typed = "Earlier conversation was compacted. -- is the sentence I want to ask about"
+        ev = gui.messages_to_events([{"role": "user", "content": typed}])
+        self.assertEqual([(e["kind"], e["text"]) for e in ev], [("user", typed)])
+
     def test_a_picture_the_harness_attached_is_not_shown_as_something_the_person_typed(self):
         """view_image puts a user-role message in the session; replaying it as a speech bubble
         would put the harness' words in the person's mouth."""

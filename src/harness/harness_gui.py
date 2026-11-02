@@ -64,7 +64,7 @@ def messages_to_events(messages):
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         content = content if isinstance(content, str) else ""
         if role == "user":
-            if COMPACTED in content[:600]:                 # the harness' own summary of what was cut
+            if content.startswith("<system-reminder>\n" + COMPACTED):   # the harness' own summary of what was cut
                 out.append({"kind": "summary", "text": content[:CLIP * 2], "history": True})
                 continue
             typed = REMINDERS.sub("", content, count=1)    # reminders the harness glued in front

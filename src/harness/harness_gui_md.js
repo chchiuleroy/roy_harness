@@ -74,6 +74,10 @@
     return blocks;
   }
 
-  if (typeof module !== "undefined" && module.exports) module.exports = {parseMarkdown};
-  else root.parseMarkdown = parseMarkdown;
+  // A streamed answer is parsed and rebuilt in full each time it is repainted, so the longer it
+  // is, the less often that may happen: ms between repaints for an answer of n characters.
+  function renderGap(n) { return Math.min(1000, 50 + Math.floor(n / 100)); }
+
+  if (typeof module !== "undefined" && module.exports) module.exports = {parseMarkdown, renderGap};
+  else { root.parseMarkdown = parseMarkdown; root.renderGap = renderGap; }
 })(typeof window !== "undefined" ? window : this);

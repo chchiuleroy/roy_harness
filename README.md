@@ -314,6 +314,8 @@ python src/harness/harness_gui.py            # 印出帶 token 的網址並開�
 
 **驗證**：`tests/test_harness_gui.py` 32 項、`tests/test_harness_gui_md.py` 15 項（用 Node 測 `parseMarkdown`：HTML／腳本／連結一律當文字、未閉合標記留原樣、200,000 字元的惡意輸入不卡；加上頁面原始碼檢查：內嵌 script 語法、沒有 `style=`、每個 `$("id")` 都存在、沒有 `innerHTML`／`eval`；沒裝 Node 就略過）。伺服器端、核心與 markdown 解析的 7 種突變（資料夾可留空、`/clear` 不發事件、斜線不標記、摘要不帶事件數、`/md.js` 不查 Host、HTML 不當文字、fence 內也解析）測試都失敗。**前端行為本身沒有自動化瀏覽器測試**：每一項都是我在瀏覽器窗格對真實 vLLM 手動驗證過（含：伺服器重啟後貼新網址、壓縮在門檻調低後實際觸發、關分頁再開仍可核准）。
 
+**第三方審查**（小o，唯讀、靜態推演）：未發現標記注入、CSP 放寬或 token 固定；確認 3 項 low，我逐條處理——(1) 重播的壓縮摘要判斷太鬆（使用者自己打那句話會被當成摘要）→ 改成精確比對 harness 實際產生的開頭；開頭的 `<system-reminder>` 區塊會被剝掉這一點與 harness 自己的 `_user_words` 同一條規則、無法區分，列為既有設計；(2) 分頁還原清單存在同源 `localStorage`，兩個同時開著的 GUI 瀏覽器視窗會互相覆蓋 → **維持**，因為改成 `sessionStorage` 會讓「伺服器重啟後把新網址貼進新分頁」還原不了；(3) 串流時每個畫面影格都重新解析整篇回答、總成本隨長度二次方成長 → 重繪間隔改為依長度放寬（`renderGap`：50 ms＋每 100 字元 1 ms、上限 1 秒），瀏覽器實測 559 個片段只重繪 59 次、過程逐步更新、最後內容一致。這批修復沒有再複審。
+
 ## 評測與自我改進（`bench/`）
 
 `bench/` 是 2026-10-30 加的：12 個題型、確定性評分器、按題型切 train／val／test，每次試驗開一個真實的 harness 行程，同時量 Agent 層（答對沒）與 Harness 層（行程正常、session 有存、沒逾時）。優化迴圈（依 Self-Harness 的 weakness mining → proposal → validation）只讓提案模型改 `AGENT.md` 與 `skills/`，harness 程式碼、`gate()`、Hook 都不動。
@@ -459,7 +461,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
 - Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；第三方審查一次（見下）。
-- GUI：只在 Windows 11、一個瀏覽器窗格（暗色、1024 寬與 375 寬）測過；前端沒有自動化瀏覽器測試；markdown 不支援連結、圖片、表格（刻意：連結與圖片會變成要檢查的網址）；停止是強制結束、不能只中斷一輪；每個 session 只留最近 20,000 筆事件（頁面重新整理靠重播）；沒有 per-session 的模型或 provider 設定；token 外洩（例如把帶 token 的網址貼出去）等於交出執行權，重啟伺服器才會換新。
+- GUI：只在 Windows 11、一個瀏覽器窗格（暗色、1024 寬與 375 寬）測過；前端沒有自動化瀏覽器測試；兩個同時開著的 GUI 瀏覽器視窗共用同一份「分頁還原」清單（後存的蓋掉先存的）；markdown 不支援連結、圖片、表格（刻意：連結與圖片會變成要檢查的網址）；停止是強制結束、不能只中斷一輪；每個 session 只留最近 20,000 筆事件（頁面重新整理靠重播）；沒有 per-session 的模型或 provider 設定；token 外洩（例如把帶 token 的網址貼出去）等於交出執行權，重啟伺服器才會換新。
 - 圖片：`view_image` 只對 `vllm` 探測過；不縮圖（零依賴，只能以 5 MB／3840×2160 擋）；附上後檔案被改，之後的請求只剩文字說明；GUI 還不能貼圖或上傳（只有模型自己去看磁碟上的檔）；真實截圖、照片、小字的準確度沒量；`view_image` 跟 `read_file` 一樣能讀專案外的檔。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
