@@ -448,6 +448,13 @@ def _webp_size(data):
         return w & 0x3FFF, h & 0x3FFF
     return None
 
+def _riff_whole(data):
+    """A WebP container that is all there: the RIFF size is even (chunks are padded) and fits
+    in the file, and the first chunk fits inside it. (struct.error on a short file: not whole.)"""
+    declared = struct.unpack("<I", data[4:8])[0]
+    first = struct.unpack("<I", data[16:20])[0]
+    return declared % 2 == 0 and declared + 8 <= len(data) and 20 + first <= declared + 8
+
 def sniff_image(data):
     """(mime, width, height) read from the bytes themselves, or None. The file name is a claim,
     the header is the fact; nothing is decoded here."""
@@ -461,7 +468,7 @@ def sniff_image(data):
         elif data[:2] == b"\xff\xd8" and data.rstrip(b"\x00")[-2:] == b"\xff\xd9":
             mime, (w, h) = "image/jpeg", _jpeg_size(data)
         elif (data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-              and struct.unpack("<I", data[4:8])[0] + 8 <= len(data)):
+              and _riff_whole(data)):
             mime, (w, h) = "image/webp", _webp_size(data)
         else:
             return None
@@ -504,6 +511,12 @@ def view_image(path, depth=0):
 def take_image(key):
     return _IMAGES.pop(key, None)
 
+def drop_images(calls):
+    """Start a batch with a clean slate: Python may give a new list the id of a dead one, and a
+    picture an interrupt left under the old key must never be handed to the new batch."""
+    for j in range(len(calls)):
+        _IMAGES.pop((id(calls), j), None)
+
 def image_message(parts, announce=True):
     """The user message that carries the pictures a batch of tool calls asked for."""
     for p in parts if announce else ():
@@ -535,15 +548,17 @@ def _wire_image(p):
     return {"type": "image_url",
             "image_url": {"url": f"data:{p['mime']};base64," + base64.b64encode(data).decode("ascii")}}
 
-def expand_images(messages):
+def expand_images(messages, with_pictures=True):
     """What goes on the wire: the latest IMAGES_IN_PROMPT pictures as data URIs, read from disk
     now and checked against the saved hash; older ones as a one-line note. The saved
-    conversation is not touched, so it never holds a picture."""
+    conversation is not touched, so it never holds a picture. with_pictures=False sends notes
+    only (used once, to find out whether a refused request was refused because of the pictures)."""
     refs = [(i, j) for i, m in enumerate(messages) if isinstance(m.get("content"), list)
             for j, p in enumerate(m["content"]) if isinstance(p, dict) and p.get("type") == "image_ref"]
     if not refs:
         return messages
-    keep = set() if PICTURES_REFUSED[0] or IMAGES_IN_PROMPT <= 0 else set(refs[-IMAGES_IN_PROMPT:])
+    no_pictures = PICTURES_REFUSED[0] or not with_pictures
+    keep = set() if no_pictures or IMAGES_IN_PROMPT <= 0 else set(refs[-IMAGES_IN_PROMPT:])
     out = []
     for i, m in enumerate(messages):
         if not isinstance(m.get("content"), list):
@@ -553,7 +568,7 @@ def expand_images(messages):
         for j, p in enumerate(m["content"]):
             if isinstance(p, dict) and p.get("type") == "image_ref":
                 why = ("not sent: the server refused a request that held pictures"
-                       if PICTURES_REFUSED[0] else "left out to save context; view_image shows it again")
+                       if no_pictures else "left out to save context; view_image shows it again")
                 parts.append(_wire_image(p) if (i, j) in keep else
                              {"type": "text", "text": f"[image {p.get('name', '?')} {why}]"})
             else:
@@ -655,6 +670,27 @@ def _retry_after(err):
     except (TypeError, ValueError, AttributeError):
         return None
 
+def _holds_pictures(body):
+    return any(isinstance(m.get("content"), list)
+               and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
+               for m in body["messages"])
+
+def _retry_without_pictures(body, system, messages, shown, first_error, detail):
+    """A 400 on a request that held pictures: ask again WITHOUT them, once. If that goes through,
+    the pictures were the problem and are switched off for this run (the references stay in the
+    session and would otherwise fail every later request too). If it fails as well (context too
+    long, a bad parameter) the pictures are innocent: they stay on, and the original error stands."""
+    plain = dict(body, messages=[{"role": "system", "content": system}]
+                 + expand_images(messages, with_pictures=False))
+    try:
+        reply = _post(plain, shown)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        raise LLMError(f"HTTP 400: {detail}") from first_error
+    PICTURES_REFUSED[0] = True
+    print(f"\n  [harness] the server rejected a request that held pictures ({detail[:100]}); "
+          f"it works without them, so pictures are off for the rest of this run")
+    return reply
+
 def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
              temperature=None):
     prov = PROVIDERS[PROVIDER]
@@ -686,15 +722,8 @@ def call_llm(messages, tools, system, on_text=None, max_tokens=8192,
             return _post(body, shown)
         except urllib.error.HTTPError as e:                 # before URLError
             detail = e.read()[:300].decode("utf-8", "replace")
-            if e.code == 400 and not PICTURES_REFUSED[0] and any(
-                    isinstance(m.get("content"), list) and any(
-                        isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
-                    for m in body["messages"]):
-                PICTURES_REFUSED[0] = True                  # else every later request fails the same way
-                body["messages"] = [{"role": "system", "content": system}] + expand_images(messages)
-                print(f"\n  [harness] the server rejected a request that held pictures "
-                      f"({detail[:100]}); retrying without them, and not sending pictures again")
-                continue
+            if e.code == 400 and not PICTURES_REFUSED[0] and _holds_pictures(body):
+                return _retry_without_pictures(body, system, messages, shown, e, detail)
             if e.code not in RETRY_STATUS or attempt == MAX_RETRIES:
                 raise LLMError(f"HTTP {e.code}: {detail}") from e
             why, wait = f"HTTP {e.code}", _retry_after(e)
@@ -1590,6 +1619,7 @@ def _run_loop(messages, tools, system, quiet, depth, label):
             return final_text
 
         got, sent = {}, [0]
+        drop_images(calls)
 
         def landed(i, result):
             """A tool result exists: add every result that is next in call order, and save."""
@@ -1612,6 +1642,9 @@ def _run_loop(messages, tools, system, quiet, depth, label):
             # (out of order is fine, repair puts them back) so the exit-time save keeps them
             for k in sorted(got):
                 messages.append({"role": "tool", "tool_call_id": calls[k]["id"], "content": got[k]})
+            lost = [p for p in (take_image((id(calls), j)) for j in range(len(calls))) if p]
+            if lost:                                        # the exit-time save rewrites the file from
+                messages.append(image_message(lost, announce=False))     # this array: the picture goes in it
             raise
         for j in range(sent[0], len(calls)):                # anything that was not reported
             messages.append({"role": "tool", "tool_call_id": calls[j]["id"],

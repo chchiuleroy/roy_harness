@@ -54,8 +54,8 @@ def webp_vp8x(w, h):
 
 def webp_vp8l(w, h):
     bits = (w - 1) | ((h - 1) << 14)
-    return (b"RIFF" + struct.pack("<I", 17) + b"WEBP" + b"VP8L" + struct.pack("<I", 5)
-            + b"\x2f" + bits.to_bytes(4, "little"))
+    return (b"RIFF" + struct.pack("<I", 18) + b"WEBP" + b"VP8L" + struct.pack("<I", 5)   # 5 bytes + 1 pad
+            + b"\x2f" + bits.to_bytes(4, "little") + b"\x00")
 
 
 def webp_vp8(w, h):
@@ -290,6 +290,35 @@ class TestReviewFindings(Base):
         self.assertEqual(reloaded[-1]["content"][1]["type"], "image_ref")
         self.assertEqual(reloaded[-1]["content"][1]["name"], "shot.png")
 
+    def test_ctrl_c_during_a_batch_keeps_the_picture_in_the_final_save(self):
+        """A hard kill leaves the last checkpoint; Ctrl-C is different: main() then rewrites the
+        whole file from memory (finish_session). If the picture message was only in the
+        checkpoint, that rewrite would drop it and the session would again claim an attachment
+        the model never gets."""
+        path = self.write("shot.png", png(8, 6))
+        batch = [{"id": "c1", "type": "function", "function": {
+                      "name": "view_image", "arguments": json.dumps({"path": path})}},
+                 {"id": "c2", "type": "function", "function": {
+                      "name": "run_command", "arguments": json.dumps({"command": "echo boom"})}}]
+        reply = {"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "", "tool_calls": batch}}], "usage": {}}
+
+        def interrupt(*a, **k):
+            raise KeyboardInterrupt()
+        saved = hv.call_llm, hv.run_shell, hv.SESSION_FILE
+        hv.call_llm, hv.run_shell, hv.SESSION_FILE = (lambda *a, **k: reply), interrupt, "session.json"
+        try:
+            messages = [{"role": "user", "content": "look"}]
+            with self.assertRaises(KeyboardInterrupt):
+                hv._run_loop(messages, hv.tools_for(0), "sys", True, 0, "")
+            hv.finish_session(messages, "session.json")            # what main()'s finally does
+        finally:
+            hv.call_llm, hv.run_shell, hv.SESSION_FILE = saved
+        reloaded, _ = hv.load_session("session.json")
+        self.assertEqual([m["role"] for m in reloaded], ["user", "assistant", "tool", "tool", "user"])
+        self.assertEqual(reloaded[-1]["content"][1]["name"], "shot.png")
+        self.assertEqual(hv._IMAGES, {})                           # nothing left behind in memory
+
     def test_a_malformed_picture_reference_becomes_a_note_not_a_crash(self):
         """An old, hand-edited or damaged session must still produce a request."""
         good = self.write("a.png", png())
@@ -313,6 +342,57 @@ class TestReviewFindings(Base):
             self.assertIsNone(hv.sniff_image(cut), name)
 
 
+class TestSecondReview(Base):
+    """What the second review of view_image found."""
+
+    def test_a_leftover_picture_cannot_be_handed_to_a_later_batch_that_reuses_the_id(self):
+        """Python may give a new list the id of a dead one. If an interrupt left a picture
+        filed under the old list's key, the new batch must start with a clean slate."""
+        batch = [{"id": "c1", "type": "function", "function": {"name": "todo_write", "arguments": "{}"}}]
+        hv._IMAGES[(id(batch), 0)] = {"type": "image_ref", "name": "stale.png", "path": "x", "mime": "image/png",
+                                      "sha256": "0", "bytes": 1, "width": 1, "height": 1}
+        reply_tools = {"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "", "tool_calls": batch}}], "usage": {}}
+        reply_done = {"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": "done"}}], "usage": {}}
+        replies = [reply_tools, reply_done]
+        saved = hv.call_llm
+        hv.call_llm = lambda *a, **k: replies.pop(0)
+        try:
+            messages = [{"role": "user", "content": "go"}]
+            hv._run_loop(messages, hv.tools_for(0), "sys", True, 0, "")
+        finally:
+            hv.call_llm = saved
+        self.assertNotIn("image_ref", json.dumps(messages))        # the stale picture was not attached
+        self.assertEqual(hv._IMAGES, {})
+
+    def test_webp_must_be_a_whole_container(self):
+        """The RIFF size is even (chunks are padded) and the first chunk fits inside it."""
+        good = webp_vp8x(13, 8)
+        self.assertIsNotNone(hv.sniff_image(good))
+        odd = good[:4] + struct.pack("<I", 23) + good[8:] + b"\x00"      # odd size that fits the file and the chunk
+        self.assertIsNone(hv.sniff_image(odd))                            # only the evenness rule can refuse it
+        chunk_too_big = good[:16] + struct.pack("<I", 400) + good[20:]    # the chunk claims more than the file
+        self.assertIsNone(hv.sniff_image(chunk_too_big))
+
+    def test_the_hosted_gate_follows_the_provider_type_not_the_address(self):
+        """Pinned on purpose: 'vllm' means the user's own server, wherever it runs (the author's
+        is remote). It gets pictures like it gets file contents from read_file, without a
+        question; only a hosted vendor (openai, anthropic-compat) is asked."""
+        path = self.write("a.png", png())
+        asked = []
+        saved = hv.read_line, hv.BASE_URL
+        hv.read_line = lambda prompt: (asked.append(prompt), "n")[1]
+        hv.BASE_URL = "https://api.example.com/v1"                  # a remote address (a documentation host)
+        try:
+            hv._CALL.key = ("t", "c1")
+            out = hv.execute_tool("view_image", {"path": path})
+        finally:
+            hv.read_line, hv.BASE_URL = saved
+        self.assertEqual(asked, [])
+        self.assertIn("image loaded", out)
+
+
 class TestCompactionAndTranscript(Base):
     def test_the_summary_transcript_names_pictures_instead_of_crashing(self):
         """A conversation that holds a picture still has to be compactable and summarisable."""
@@ -326,7 +406,7 @@ class TestCompactionAndTranscript(Base):
 
 
 class FakeLLM(http.server.BaseHTTPRequestHandler):
-    script, bodies, reject_images = [], [], False
+    script, bodies, reject_images, fail_next = [], [], False, 0
 
     def log_message(self, *a):
         pass
@@ -335,6 +415,13 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(n)
         type(self).bodies.append(json.loads(raw))
+        if type(self).fail_next > 0:                               # a 400 that has nothing to do with pictures
+            type(self).fail_next -= 1
+            self.send_response(400)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "maximum context length exceeded"}')
+            return
         if type(self).reject_images and b"image_url" in raw:       # a server that cannot decode it
             self.send_response(400)
             self.send_header("content-type", "application/json")
@@ -365,7 +452,7 @@ class TestEndToEnd(Base):
 
     def setUp(self):
         super().setUp()
-        FakeLLM.script, FakeLLM.bodies, FakeLLM.reject_images = [], [], False
+        FakeLLM.script, FakeLLM.bodies, FakeLLM.reject_images, FakeLLM.fail_next = [], [], False, 0
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
@@ -426,6 +513,31 @@ class TestEndToEnd(Base):
         self.assertEqual(len(FakeLLM.bodies), 3)                    # asked, refused, asked again without
         self.assertEqual(self.images_on_wire(FakeLLM.bodies[-1]), [])
         self.assertIn("not sent", json.dumps(FakeLLM.bodies[-1]))
+
+    def test_a_400_that_is_not_about_pictures_does_not_turn_pictures_off(self):
+        """A 400 can mean 'context too long'. Pictures are blamed only if the same request
+        WITHOUT them goes through; here it does not, so the original error stands, the turn is
+        abandoned, and the next turn still sends the picture."""
+        path = self.write("shot.png", png(8, 6))
+        FakeLLM.script = [view_reply(path), text_reply("second try works")]
+        # request 1 answers view_image; request 2 (with the picture) and the probe (without) both get a 400
+        original = FakeLLM.do_POST
+
+        def fail_requests_two_and_three(handler):
+            if len(FakeLLM.bodies) in (1, 2):                       # bodies holds the requests before this one
+                FakeLLM.fail_next = 1
+            return original(handler)
+        FakeLLM.do_POST = fail_requests_two_and_three
+        try:
+            out_first = self.run_harness("look\nagain\n")
+        finally:
+            FakeLLM.do_POST = original
+        self.assertIn("turn abandoned", out_first.stdout, out_first.stdout + out_first.stderr)
+        self.assertNotIn("not sending pictures again", out_first.stdout)
+        self.assertEqual(len(self.images_on_wire(FakeLLM.bodies[1])), 1)    # request 2 held the picture
+        self.assertEqual(self.images_on_wire(FakeLLM.bodies[2]), [])        # the probe did not
+        self.assertEqual(len(self.images_on_wire(FakeLLM.bodies[3])), 1)    # the next turn sends it again
+        self.assertIn("second try works", out_first.stdout)
 
     def test_jsonl_mode_announces_the_picture_as_an_event(self):
         """The GUI needs to know a picture was attached; it gets a structured event, not text to parse."""
