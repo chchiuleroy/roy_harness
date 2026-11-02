@@ -448,6 +448,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with s.cond:
                 i = max(i, s.base)
                 if i - s.base >= len(s.events):
+                    # Nothing more comes until it runs again (a session loaded from disk, or one
+                    # whose `exited` the page now has): end the stream. The page then parks instead
+                    # of holding one of the browser's six connections to this host for a stopped
+                    # session; with six of those open, no request (send, answer, stop) got through.
+                    if not s.running and (s.proc is None or (s.events and s.events[-1].get("kind") == "exited")):
+                        return
                     s.cond.wait(15)
                 batch = list(s.events[i - s.base:])
             try:

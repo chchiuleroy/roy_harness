@@ -888,8 +888,10 @@ def clean_env():
 def _spawn_args(command):
     prefix = os.environ.get("HARNESS_SANDBOX")      # e.g. ["docker","run",...]
     if prefix:                                      # NOT tested here (no docker)
-        return dict(args=[*json.loads(prefix), command], shell=False)
-    return dict(args=command, shell=True)
+        return dict(args=[*json.loads(prefix), command], shell=False, stdin=subprocess.DEVNULL)
+    # no stdin: under the GUI it is the command pipe (a child that inherits it hangs on Windows
+    # while the reader thread is blocked on it, and could eat the person's next message)
+    return dict(args=command, shell=True, stdin=subprocess.DEVNULL)
 
 def run_shell(command, timeout=300):
     out = subprocess.run(text=True, encoding=SHELL_ENC, errors="replace",

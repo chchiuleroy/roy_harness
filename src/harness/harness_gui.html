@@ -179,6 +179,7 @@ async function refresh() {
   try {
     const j = await api("GET", "/api/sessions");
     LIST = j.sessions;
+    for (const v of V.values()) if (v.parked && info(v.id).running) wake(v);     // resumed from another tab or the terminal
     if (!$("cwd").value) $("cwd").value = j.default_cwd;
     const dl = $("cwds"); dl.replaceChildren();
     for (const c of [j.default_cwd, ...j.recent_cwds]) { const o = el("option"); o.value = c; dl.append(o); }
@@ -257,7 +258,7 @@ async function restoreTabs() {
 function showResume(v, text) {
   v.banner.replaceChildren(el("span", "", text));
   const b = el("button", "primary", "續跑");
-  b.onclick = async () => { try { await api("POST", `/api/sessions/${v.id}/resume`, {}); } catch (e) { alert(e.message); } };
+  b.onclick = async () => { try { await api("POST", `/api/sessions/${v.id}/resume`, {}); wake(v); } catch (e) { alert(e.message); } };
   v.banner.append(b); v.banner.style.display = "flex";
 }
 
@@ -427,6 +428,9 @@ async function follow(v) {
         buf += dec.decode(value, {stream: true}); let i;
         while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line.trim()) handle(v, JSON.parse(line)); }
       }
+      // the server ends the stream of a session that is not running once it has sent everything:
+      // do not hold one of the browser's six connections to a host for it (see wake)
+      if (!v.alive) { v.parked = true; return; }
     } catch (e) {
       if (v.closed) return;
       if (e && e.message !== "401" && e.name !== "AbortError") setConn("offline", true);   // the stream died: is the server still there?
@@ -434,6 +438,9 @@ async function follow(v) {
     await new Promise((r) => setTimeout(r, 1500));
   }
 }
+
+// a parked view starts following again when its session runs again (resumed here or somewhere else)
+function wake(v) { if (v.parked && !v.closed) { v.parked = false; follow(v); } }
 
 // ---- right panel (active session)
 function renderRight() {

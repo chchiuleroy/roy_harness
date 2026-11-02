@@ -641,6 +641,85 @@ class TestRealHarness(GuiBase):
         c.close()
         self.assertEqual([e["seq"] for e in got], list(range(2, len(s.events))))
 
+    def open_stream(self, sid, start=0, timeout=10):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        c.request("GET", f"/api/sessions/{sid}/stream?from={start}",
+                  headers={"Host": f"127.0.0.1:{self.port}", "Authorization": f"Bearer {TOKEN}"})
+        return c, c.getresponse()
+
+    def test_the_stream_of_a_stopped_session_ends_after_the_last_event(self):
+        """A browser allows six connections to one host. A stream that never ends for a session that
+        is not running used up one each: with six tabs open, no request (send, answer, stop) got
+        through any more and the page looked frozen."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/stop", {})
+        self.wait(s, lambda e: e["kind"] == "exited", "exited")
+        c, r = self.open_stream(sid)
+        kinds = [json.loads(line)["kind"] for line in r.read().decode("utf-8").splitlines() if line.strip()]
+        c.close()
+        self.assertEqual(kinds[-1], "exited")                        # all of it arrived, then the end
+        self.assertIn("ready", kinds)
+
+    def test_the_stream_of_a_session_loaded_from_disk_ends_too(self):
+        """After a server restart every session is 'not running'; none of them may hold a connection."""
+        FakeLLM.script = [text_reply("hello again")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "hi"})
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        gui.REGISTRY.stop_all()
+        gui.REGISTRY = gui.Registry()                                # a restarted server: nothing in memory
+        c, r = self.open_stream(sid)
+        body = r.read().decode("utf-8")                              # returns: the stream ended
+        c.close()
+        kinds = [json.loads(line)["kind"] for line in body.splitlines() if line.strip()]
+        self.assertIn("user", kinds)                                 # the saved history came first
+        self.assertNotIn("ready", kinds)                             # it is history only: no harness runs
+
+    def test_the_stream_waits_for_exited_when_the_process_is_gone_but_the_event_is_not_in_yet(self):
+        """The reader thread adds `exited` after the process is already dead. A stream that ended in
+        that gap would hand the page 'not running' without the event that tells it why."""
+        s = gui.Session("2" * 12, self.project)
+        s.proc = _Gone()                                             # poll() says it exited
+        s.add({"kind": "ready"})
+        with gui.REGISTRY.lock:
+            gui.REGISTRY.live[s.id] = s
+        c, r = self.open_stream(s.id, start=0, timeout=2)
+        self.assertIn(b"ready", r.fp.readline())
+        late = threading.Timer(0.7, lambda: s.add({"kind": "exited", "code": 1}))
+        late.start()
+        got = r.fp.readline()                                        # blocks until the event arrives
+        late.join()
+        c.close()
+        self.assertIn(b"exited", got)
+
+    def test_the_stream_of_a_running_session_stays_open(self):
+        """The counterpart: while the harness runs, the page keeps receiving what it says."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        c, r = self.open_stream(sid, start=s.base + len(s.events), timeout=1.5)
+        with self.assertRaises(OSError):                             # nothing to read, and no end of file
+            r.fp.readline()
+        c.close()
+
+    def test_the_stream_of_a_resumed_session_carries_on_from_where_the_page_was(self):
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/stop", {})
+        self.wait(s, lambda e: e["kind"] == "exited", "exited")
+        seen = s.base + len(s.events)
+        st, _ = self.call("POST", f"/api/sessions/{sid}/resume", {})
+        self.assertEqual(st, 200)
+        c, r = self.open_stream(sid, start=seen)
+        first = None
+        while first is None:
+            line = r.fp.readline().strip()
+            if line:
+                first = json.loads(line)
+        c.close()
+        self.assertGreaterEqual(first["seq"], seen)                  # new events only, from the resumed harness
+
 
 if __name__ == "__main__":
     unittest.main()
