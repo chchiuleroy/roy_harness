@@ -11,13 +11,17 @@ Each test's docstring says WHY the behaviour matters, not just what it is.
 import http.client
 import http.server
 import json
+import base64
+import hashlib
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import zlib
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,13 +34,13 @@ TOKEN = "test-token-123"
 
 class FakeLLM(http.server.BaseHTTPRequestHandler):
     """Scripted OpenAI-style server: each request pops the next reply (JSON, or ("sse", text))."""
-    script = []
+    script, bodies = [], []
 
     def log_message(self, *a):
         pass
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("content-length", 0)))
+        type(self).bodies.append(json.loads(self.rfile.read(int(self.headers.get("content-length", 0)))))
         item = type(self).script.pop(0)
         if isinstance(item, tuple):                          # streaming reply
             self.send_response(200)
@@ -86,7 +90,7 @@ class GuiBase(unittest.TestCase):
         ]
         for p in self._patches:
             p.start()
-        FakeLLM.script = []
+        FakeLLM.script, FakeLLM.bodies = [], []
         self.llm = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
         threading.Thread(target=self.llm.serve_forever, daemon=True).start()
         env = {k: v for k, v in os.environ.items() if not k.startswith(("VLLM_", "HARNESS_"))}
@@ -266,6 +270,17 @@ class TestMessagesToEvents(unittest.TestCase):
         self.assertEqual(ev[1]["text"], "what happened?")                 # only what was typed
         self.assertNotIn("system-reminder", " ".join(e["text"] for e in ev if e["kind"] == "user"))
 
+    def test_a_message_with_a_picture_replays_as_words_then_picture(self):
+        """The person's own message that carries a picture is shown as what they typed plus a
+        line for the picture; the harness' view_image message (reminder text only) stays a line."""
+        ref = {"type": "image_ref", "name": "shot.png", "path": "C:/x/shot.png", "width": 8, "height": 6}
+        ev = gui.messages_to_events([{"role": "user", "content": [{"type": "text", "text": "what is this?"}, ref]}])
+        self.assertEqual([(e["kind"], e.get("text") or e.get("name")) for e in ev],
+                         [("user", "what is this?"), ("image", "shot.png")])
+        note = "<system-reminder>\nThe harness attached shot.png because view_image was called\n</system-reminder>"
+        ev = gui.messages_to_events([{"role": "user", "content": [{"type": "text", "text": note}, ref]}])
+        self.assertEqual([e["kind"] for e in ev], ["image"])
+
     def test_a_person_typing_the_summary_sentence_is_still_a_person(self):
         """Only the harness' own head ('<system-reminder>' + that sentence) is a summary. Someone
         who writes the sentence in ordinary text is shown as what they are (found by the review)."""
@@ -404,6 +419,126 @@ class TestTerminalModeIsUnchanged(unittest.TestCase):
         lines = [json.loads(x) for x in out.splitlines()]
         self.assertEqual([(e["kind"], e.get("text")) for e in lines],
                          [("log", "plain line"), ("log", "partial"), ("state", None)])
+
+
+def png_bytes(w=8, h=6, color=(220, 30, 30), noise=0):
+    """A real PNG (stdlib only); `noise` bytes of random data per row make a big one."""
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+    raw = b"".join(b"\x00" + (os.urandom(w * 3) if noise else bytes(color) * w) for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 0 if noise else 6)) + chunk(b"IEND", b""))
+
+
+class TestAttachments(GuiBase):
+    """Paste / drop / pick a picture: it is uploaded to the session, then sent by id with a message."""
+
+    def upload(self, sid, name, data, **kw):
+        return self.call("POST", f"/api/sessions/{sid}/upload",
+                         {"name": name, "data": base64.b64encode(data).decode()}, **kw)
+
+    def test_a_picture_is_kept_under_its_hash_outside_the_project(self):
+        """Nothing the model can write to (the project folder) may hold the person's picture."""
+        sid, s = self.new_session()
+        data = png_bytes()
+        st, r = self.upload(sid, "my shot.png", data)
+        self.assertEqual(st, 200, r)
+        self.assertEqual(r["id"], hashlib.sha256(data).hexdigest() + ".png")
+        self.assertEqual((r["name"], r["bytes"]), ("my shot.png", len(data)))
+        stored = os.path.join(gui.SESSIONS, sid + ".images", r["id"])
+        with open(stored, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertNotEqual(os.path.commonpath([os.path.realpath(stored), os.path.realpath(self.project)]),
+                            os.path.realpath(self.project))
+
+    def test_a_picture_bigger_than_a_normal_request_still_goes_through(self):
+        """A normal body is capped at 1 MB; a picture as base64 is a third bigger than the file."""
+        sid, s = self.new_session()
+        data = png_bytes(500, 500, noise=1)                          # about 750 KB of file, 1 MB as base64
+        self.assertGreater(len(base64.b64encode(data)), gui.MAX_BODY)
+        st, r = self.upload(sid, "big.png", data)
+        self.assertEqual(st, 200, r)
+
+    def test_what_is_not_a_picture_is_refused(self):
+        sid, s = self.new_session()
+        for name, data in (("notes.png", b"just some words"), ("empty.png", b""),
+                           ("huge.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 5_000_100)):
+            st, _ = self.upload(sid, name, data)
+            self.assertEqual(st, 400, name)
+        st, _ = self.call("POST", f"/api/sessions/{sid}/upload", {"name": "x.png", "data": "!!! not base64 !!!"})
+        self.assertEqual(st, 400)
+        self.assertFalse(os.path.exists(os.path.join(gui.SESSIONS, sid + ".images")))   # nothing was kept
+
+    def test_upload_has_the_same_guards_as_everything_else(self):
+        sid, s = self.new_session()
+        data = png_bytes()
+        self.assertEqual(self.upload(sid, "a.png", data, headers={"Authorization": None})[0], 401)
+        self.assertEqual(self.upload(sid, "a.png", data, headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.upload("0" * 12, "a.png", data)[0], 404)
+        st, _ = self.call("POST", f"/api/sessions/{sid}/upload", raw="{}", headers={"Content-Type": "text/plain"})
+        self.assertEqual(st, 415)
+
+    def test_send_takes_uploaded_ids_and_nothing_else(self):
+        """The page names a picture by the id the server gave it; it cannot name a path."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        st, r = self.upload(sid, "a.png", png_bytes())
+        good = r["id"]
+        # "names.json" really exists in the pictures folder: only the id check can refuse it
+        for bad in (["../../etc/passwd"], ["C:/Windows/win.ini"], ["0" * 64 + ".png"], [good] * 5, "not a list",
+                    [123], [good, "..\\x.png"], ["names.json"], [good + "/../names.json"]):
+            st, _ = self.call("POST", f"/api/sessions/{sid}/send", {"text": "look", "images": bad})
+            self.assertEqual(st, 400, bad)
+        self.assertEqual([e for e in s.events if e["kind"] == "user"], [])        # none of them was delivered
+        st, _ = self.call("POST", f"/api/sessions/{sid}/send", {"text": "", "images": []})
+        self.assertEqual(st, 400)                                                  # still nothing to say
+        st, _ = self.call("POST", f"/api/sessions/{sid}/send", {"text": "/stats", "images": [good]})
+        self.assertEqual(st, 400)                                                  # a command takes no picture
+
+    def test_the_model_gets_the_picture_the_person_attached(self):
+        """The whole way: upload, send with words, the request to the model holds the bytes, the
+        session keeps only a reference under the person's own file name."""
+        FakeLLM.script = [text_reply("a red rectangle")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        data = png_bytes(8, 6)
+        st, r = self.upload(sid, "my shot.png", data)
+        st, _ = self.call("POST", f"/api/sessions/{sid}/send", {"text": "what is this?", "images": [r["id"]]})
+        self.assertEqual(st, 200)
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        sent = [m for m in FakeLLM.bodies[0]["messages"] if m["role"] == "user"][-1]["content"]
+        self.assertEqual([p["type"] for p in sent], ["text", "image_url"])
+        self.assertEqual(sent[1]["image_url"]["url"], "data:image/png;base64," + base64.b64encode(data).decode())
+        echo = next(e for e in s.events if e["kind"] == "user")
+        self.assertEqual((echo["text"], echo["images"]), ("what is this?", ["my shot.png"]))
+        self.assertEqual([e["name"] for e in s.events if e["kind"] == "image"], ["my shot.png"])
+        with open(s.file, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved[0]["content"][1]["name"], "my shot.png")
+        self.assertNotIn("base64", json.dumps(saved))
+        self.assertEqual(s.title, "what is this?")
+
+    def test_a_picture_alone_is_a_message(self):
+        FakeLLM.script = [text_reply("I see a rectangle")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        st, r = self.upload(sid, "only.png", png_bytes())
+        st, _ = self.call("POST", f"/api/sessions/{sid}/send", {"text": "", "images": [r["id"]]})
+        self.assertEqual(st, 200)
+        self.wait(s, lambda e: e.get("text") == "I see a rectangle", "answer")
+        self.assertTrue(s.title)                                                    # something to find it by in the list
+
+    def test_the_csp_lets_the_page_show_blob_pictures_and_nothing_wider(self):
+        """Thumbnails are made from blob: URLs of files the page itself holds; everything else stays shut."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/", headers={"Host": f"127.0.0.1:{self.port}"})
+        csp = c.getresponse().getheader("Content-Security-Policy")
+        self.assertIn("img-src blob:", csp)
+        self.assertIn("default-src 'none'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+        self.assertNotIn("img-src blob: data:", csp)
+        self.assertNotIn("*", csp)
 
 
 class TestRealHarness(GuiBase):
@@ -640,6 +775,85 @@ class TestRealHarness(GuiBase):
                 got.append(json.loads(line))
         c.close()
         self.assertEqual([e["seq"] for e in got], list(range(2, len(s.events))))
+
+    def open_stream(self, sid, start=0, timeout=10):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        c.request("GET", f"/api/sessions/{sid}/stream?from={start}",
+                  headers={"Host": f"127.0.0.1:{self.port}", "Authorization": f"Bearer {TOKEN}"})
+        return c, c.getresponse()
+
+    def test_the_stream_of_a_stopped_session_ends_after_the_last_event(self):
+        """A browser allows six connections to one host. A stream that never ends for a session that
+        is not running used up one each: with six tabs open, no request (send, answer, stop) got
+        through any more and the page looked frozen."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/stop", {})
+        self.wait(s, lambda e: e["kind"] == "exited", "exited")
+        c, r = self.open_stream(sid)
+        kinds = [json.loads(line)["kind"] for line in r.read().decode("utf-8").splitlines() if line.strip()]
+        c.close()
+        self.assertEqual(kinds[-1], "exited")                        # all of it arrived, then the end
+        self.assertIn("ready", kinds)
+
+    def test_the_stream_of_a_session_loaded_from_disk_ends_too(self):
+        """After a server restart every session is 'not running'; none of them may hold a connection."""
+        FakeLLM.script = [text_reply("hello again")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "hi"})
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        gui.REGISTRY.stop_all()
+        gui.REGISTRY = gui.Registry()                                # a restarted server: nothing in memory
+        c, r = self.open_stream(sid)
+        body = r.read().decode("utf-8")                              # returns: the stream ended
+        c.close()
+        kinds = [json.loads(line)["kind"] for line in body.splitlines() if line.strip()]
+        self.assertIn("user", kinds)                                 # the saved history came first
+        self.assertNotIn("ready", kinds)                             # it is history only: no harness runs
+
+    def test_the_stream_waits_for_exited_when_the_process_is_gone_but_the_event_is_not_in_yet(self):
+        """The reader thread adds `exited` after the process is already dead. A stream that ended in
+        that gap would hand the page 'not running' without the event that tells it why."""
+        s = gui.Session("2" * 12, self.project)
+        s.proc = _Gone()                                             # poll() says it exited
+        s.add({"kind": "ready"})
+        with gui.REGISTRY.lock:
+            gui.REGISTRY.live[s.id] = s
+        c, r = self.open_stream(s.id, start=0, timeout=2)
+        self.assertIn(b"ready", r.fp.readline())
+        late = threading.Timer(0.7, lambda: s.add({"kind": "exited", "code": 1}))
+        late.start()
+        got = r.fp.readline()                                        # blocks until the event arrives
+        late.join()
+        c.close()
+        self.assertIn(b"exited", got)
+
+    def test_the_stream_of_a_running_session_stays_open(self):
+        """The counterpart: while the harness runs, the page keeps receiving what it says."""
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        c, r = self.open_stream(sid, start=s.base + len(s.events), timeout=1.5)
+        with self.assertRaises(OSError):                             # nothing to read, and no end of file
+            r.fp.readline()
+        c.close()
+
+    def test_the_stream_of_a_resumed_session_carries_on_from_where_the_page_was(self):
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/stop", {})
+        self.wait(s, lambda e: e["kind"] == "exited", "exited")
+        seen = s.base + len(s.events)
+        st, _ = self.call("POST", f"/api/sessions/{sid}/resume", {})
+        self.assertEqual(st, 200)
+        c, r = self.open_stream(sid, start=seen)
+        first = None
+        while first is None:
+            line = r.fp.readline().strip()
+            if line:
+                first = json.loads(line)
+        c.close()
+        self.assertGreaterEqual(first["seq"], seen)                  # new events only, from the resumed harness
 
 
 if __name__ == "__main__":

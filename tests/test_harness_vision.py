@@ -393,6 +393,52 @@ class TestSecondReview(Base):
         self.assertIn("image loaded", out)
 
 
+class TestUserAttachments(Base):
+    """A picture the PERSON attaches to a message (the GUI's paste / drop / button): same
+    references as view_image, but they ride in the person's own message."""
+
+    def test_make_image_ref_checks_the_file_and_says_why_not(self):
+        good = self.write("a.png", png(4, 3))
+        ref, why = hv.make_image_ref(good, "screenshot.png")
+        self.assertIsNone(why)
+        self.assertEqual((ref["type"], ref["name"], ref["width"], ref["height"]), ("image_ref", "screenshot.png", 4, 3))
+        self.assertEqual(ref["sha256"], hashlib.sha256(png(4, 3)).hexdigest())
+        hv.MAX_IMAGE_BYTES, hv.MAX_IMAGE_PIXELS = 1000, 100
+        for name, data in {"text.png": b"just words", "big.png": png(4, 3) + b"\x00" * 2000,
+                           "wide.png": png(20, 20)}.items():
+            ref, why = hv.make_image_ref(self.write(name, data))
+            self.assertIsNone(ref, name)
+            self.assertTrue(why, name)
+        ref, why = hv.make_image_ref("missing.png")
+        self.assertIsNone(ref)
+        self.assertTrue(why)
+
+    def test_the_words_the_person_typed_with_a_picture_survive_compaction(self):
+        """_user_words is what compaction keeps verbatim. It returned '' for any list content,
+        so a message with a picture would have lost the words typed with it."""
+        ref = {"type": "image_ref", "name": "a.png"}
+        typed = [{"type": "text", "text": "remember the code KESTREL-81"}, ref]
+        self.assertEqual(hv._user_words(typed), "remember the code KESTREL-81")
+        glued = [{"type": "text", "text": "<system-reminder>\ntask b1 done\n</system-reminder>\nand this?"}, ref]
+        self.assertEqual(hv._user_words(glued), "and this?")
+        harness_note = [{"type": "text", "text": "<system-reminder>\nThe harness attached a.png\n</system-reminder>"}, ref]
+        self.assertEqual(hv._user_words(harness_note), "")            # view_image's own message is not the person's words
+        said = hv.verbatim_user_messages([{"role": "user", "content": typed}])
+        self.assertIn("KESTREL-81", said)
+
+    def test_a_picture_the_person_attached_is_approved_for_a_hosted_provider(self):
+        """The person chose to send it; the question view_image asks for the model's own choice
+        would be asked of them a second time."""
+        path = self.write("a.png", png())
+        saved = set(hv._APPROVED)
+        try:
+            parts, _ = hv.attach_user_images([{"path": path, "name": "a.png"}])
+            self.assertIn(parts[0]["sha256"], hv._APPROVED)
+        finally:
+            hv._APPROVED.clear()
+            hv._APPROVED.update(saved)
+
+
 class TestCompactionAndTranscript(Base):
     def test_the_summary_transcript_names_pictures_instead_of_crashing(self):
         """A conversation that holds a picture still has to be compactable and summarisable."""
@@ -460,10 +506,10 @@ class TestEndToEnd(Base):
         self.srv.shutdown()
         super().tearDown()
 
-    def run_harness(self, stdin_text, *extra):
+    def run_harness(self, stdin_text, *extra, env_extra=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("VLLM_", "HARNESS_"))}
         env.update(HARNESS_BASE_URL=f"http://127.0.0.1:{self.srv.server_address[1]}/v1",
-                   HARNESS_STREAM="0", HARNESS_MODEL="fake", PYTHONUTF8="1")
+                   HARNESS_STREAM="0", HARNESS_MODEL="fake", PYTHONUTF8="1", **(env_extra or {}))
         return subprocess.run(
             [sys.executable, "-X", "utf8", os.path.join(SRC, "harness_vllm.py"), *extra, "session.json"],
             input=stdin_text, capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
@@ -538,6 +584,53 @@ class TestEndToEnd(Base):
         self.assertEqual(self.images_on_wire(FakeLLM.bodies[2]), [])        # the probe did not
         self.assertEqual(len(self.images_on_wire(FakeLLM.bodies[3])), 1)    # the next turn sends it again
         self.assertIn("second try works", out_first.stdout)
+
+    def user_command(self, text, *paths_and_names):
+        return json.dumps({"type": "user", "text": text,
+                           "images": [{"path": p, "name": n} for p, n in paths_and_names]}) + "\n"
+
+    def test_a_message_with_pictures_reaches_the_model_as_text_plus_references(self):
+        path = self.write("pasted.png", png(8, 6))
+        FakeLLM.script = [text_reply("a red rectangle")]
+        out = self.run_harness(self.user_command("what is this?", (path, "screenshot.png")), "--jsonl")
+        sent = [m for m in FakeLLM.bodies[0]["messages"] if m["role"] == "user"][-1]["content"]
+        self.assertEqual([p["type"] for p in sent], ["text", "image_url"])
+        self.assertEqual(sent[0]["text"], "what is this?")
+        saved = json.load(open("session.json", encoding="utf-8"))
+        self.assertEqual([p["type"] for p in saved[0]["content"]], ["text", "image_ref"])
+        self.assertEqual(saved[0]["content"][1]["name"], "screenshot.png")      # the person's name for it
+        self.assertNotIn("base64", json.dumps(saved))
+        events = [json.loads(line) for line in out.stdout.splitlines() if line.startswith("{")]
+        self.assertEqual([e["name"] for e in events if e["kind"] == "image"], ["screenshot.png"])
+
+    def test_a_picture_with_no_words_is_still_a_message(self):
+        """An empty line ends the terminal REPL; with a picture it is a real message."""
+        path = self.write("pasted.png", png(8, 6))
+        FakeLLM.script = [text_reply("I see a rectangle")]
+        out = self.run_harness(self.user_command("", (path, "shot.png")), "--jsonl")
+        self.assertIn("I see a rectangle", out.stdout, out.stdout + out.stderr)
+        saved = json.load(open("session.json", encoding="utf-8"))
+        self.assertEqual(saved[0]["content"][0]["type"], "text")
+        self.assertTrue(saved[0]["content"][0]["text"].strip())
+
+    def test_pictures_are_dropped_with_a_message_when_the_server_cannot_take_them(self):
+        path = self.write("pasted.png", png(8, 6))
+        FakeLLM.script = [text_reply("text only")]
+        out = self.run_harness(self.user_command("hello", (path, "shot.png")), "--jsonl",
+                               env_extra={"HARNESS_VISION": "0"})
+        self.assertIn("text only", out.stdout)
+        self.assertEqual(self.images_on_wire(FakeLLM.bodies[0]), [])
+        saved = json.load(open("session.json", encoding="utf-8"))
+        self.assertEqual(saved[0]["content"], "hello")
+        self.assertIn("picture", out.stdout.lower())                 # the person is told, not left guessing
+
+    def test_a_bad_picture_is_reported_and_the_words_still_go(self):
+        bad = self.write("fake.png", b"just words")
+        FakeLLM.script = [text_reply("ok")]
+        out = self.run_harness(self.user_command("look", (bad, "fake.png")), "--jsonl")
+        self.assertIn("ok", out.stdout)
+        self.assertIn("fake.png", out.stdout)                        # named in the notice
+        self.assertEqual(json.load(open("session.json", encoding="utf-8"))[0]["content"], "look")
 
     def test_jsonl_mode_announces_the_picture_as_an_event(self):
         """The GUI needs to know a picture was attached; it gets a structured event, not text to parse."""

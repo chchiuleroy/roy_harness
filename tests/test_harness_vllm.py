@@ -3758,5 +3758,34 @@ class TestLive(Base):
         self.assertIn("PELICAN-77", out.upper())
 
 
+class TestCommandsDoNotShareTheCommandPipe(Base):
+    """Under the GUI the harness reads its commands from a pipe on stdin."""
+
+    CHILD = textwrap.dedent('''
+        import sys, threading
+        sys.path.insert(0, sys.argv[1])
+        import harness_vllm as hv
+        threading.Thread(target=sys.stdin.readline, daemon=True).start()    # the command reader, blocked
+        out = hv.run_shell('python -c "print(6*7)"', timeout=20)
+        print(out.stdout.strip(), flush=True)
+        ''')
+
+    def test_a_command_the_model_runs_is_not_handed_the_harness_command_pipe(self):
+        """On Windows a child that inherits a pipe another thread is blocked reading hangs as soon
+        as it asks what kind of handle stdin is (python, node and git all do): the model's
+        `python -c ...` never returned, and subprocess's own timeout cannot free it. It would
+        also let a command eat the person's next message. The command gets no stdin at all."""
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-c", self.CHILD, SRC],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)   # pipe stays open
+        watchdog = threading.Timer(40, lambda: hv.harness_hooks.kill_tree(proc))
+        watchdog.start()
+        try:
+            line = proc.stdout.readline().strip()
+        finally:
+            watchdog.cancel()
+            hv.harness_hooks.kill_tree(proc)
+        self.assertEqual(line, "42", "run_shell hung or failed while the harness' stdin was a busy pipe")
+
+
 if __name__ == "__main__":
     unittest.main()

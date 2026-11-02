@@ -312,7 +312,20 @@ python src/harness/harness_gui.py            # 印出帶 token 的網址並開�
 | 重播歷史時，壓縮摘要、黏在輸入前面的提醒、鬧鐘喚醒通知被當成「你說的話」 | 摘要變成可摺疊一欄、提醒被去掉、通知變成一行 |
 | `#newform` 的 `style=` 被 CSP 擋掉，「模式」與「建立」沒排成一列 | 改成 class；測試掃頁面原始碼不得再有 `style=` |
 
-**驗證**：`tests/test_harness_gui.py` 33 項、`tests/test_harness_gui_md.py` 16 項（用 Node 測 `parseMarkdown`：HTML／腳本／連結一律當文字、未閉合標記留原樣、200,000 字元的惡意輸入不卡；加上頁面原始碼檢查：內嵌 script 語法、沒有 `style=`、每個 `$("id")` 都存在、沒有 `innerHTML`／`eval`；沒裝 Node 就略過）。伺服器端、核心與 markdown 解析的 7 種突變（資料夾可留空、`/clear` 不發事件、斜線不標記、摘要不帶事件數、`/md.js` 不查 Host、HTML 不當文字、fence 內也解析）測試都失敗。**前端行為本身沒有自動化瀏覽器測試**：每一項都是我在瀏覽器窗格對真實 vLLM 手動驗證過（含：伺服器重啟後貼新網址、壓縮在門檻調低後實際觸發、關分頁再開仍可核准）。
+**貼圖／上傳**（共用 `view_image` 的 `image_ref` 管線）：輸入框可以貼上截圖、把圖片拖進對話區、或按 📎 選檔，最多 4 張、每張 5 MB（PNG／JPEG／GIF／WebP）。圖片先 `POST /api/sessions/<id>/upload`（base64 包在 JSON 裡，body 上限 8 MB，其他請求仍是 1 MB）存成 `~/.roy_harness_gui/sessions/<id>.images/<sha256>.<副檔名>`——跟 session 檔一樣在專案資料夾**之外**，模型的 `write_file` 碰不到；`send` 只帶圖片 id（必須是這個 session 自己存過的檔，`names.json` 或路徑穿越都被拒）。harness 端用 `make_image_ref` 做完整檢查（檔頭、檔尾、大小、像素），訊息裡只存參照；人自己附的圖視為已核准（`_APPROVED`），只送給當前 provider 一次。只有圖沒有字也是一則訊息（預設文字請模型看圖說明）。壞圖會在對話裡說「not attached: …」，其餘字與圖照送。`HARNESS_VISION=0` 時圖片丟掉並告知。CSP 多了 `img-src blob:`（縮圖用本機 blob，不載入任何外部圖片）。重播歷史時，打的字和圖都留著（`_user_words` 現在處理含圖片的 list content，壓縮後打字內容不會被當成提醒剝掉）。
+
+**這輪補測找到並修掉的兩個真 bug**（2026-11-02，auto 模式要模型同時開兩個子代理並跑 `python -c`）：
+
+| 缺口 | 現在 |
+|---|---|
+| **模型執行的 `python -c ...` 在 GUI 下永遠卡住**。GUI 模式下 harness 的 stdin 是指令管道，且有一條執行緒卡在讀它；子行程繼承這條管道，Windows 上它一查 stdin 是什麼類型的 handle 就卡死（`subprocess` 的 `timeout` 也救不了，因為孫行程握著輸出管道）。`echo`、`dir` 這類命令不查 stdin，所以先前的實測都沒踩到。也等於讓子行程能吃掉你的下一則訊息 | `_spawn_args` 一律 `stdin=DEVNULL`；回歸測試 `TestCommandsDoNotShareTheCommandPipe`（拿掉就卡住）。真實 vLLM 重跑：`python -c "print(6*7)"` 回 42 |
+| **開到第 6 個 session 分頁，整個 GUI 像當掉**：每個分頁一條永不結束的 `/stream`，瀏覽器對同一個 host 最多 6 條 HTTP/1.1 連線，之後 send／answer／stop 全排不進去（伺服器日誌什麼都沒有，因為請求根本沒送出） | 伺服器對「沒在跑、事件已送完」的 session 結束 stream；頁面把該 view 標成 `parked`，按續跑或輪詢看到它又在跑時才重新接上。瀏覽器實測：6 個還原的分頁，stream 全在約 10 ms 內結束，續跑後事件照常進來 |
+
+**同一輪也確認過的**（真實 vLLM，單次手動）：auto 模式的分類器判斷以「分類器 ASK：…」一行顯示、問人時出現核准卡片；平行子代理的工具卡與用量行帶 `s1`／`s2` 標籤；兩個瀏覽器分頁同時開著，兩邊都看得到同一張核准卡片（後開的那個重播得到），一邊回答後另一邊的卡片消失，對同一題重複回答回 409 `no such question`。
+
+**第三方審查**（小o，唯讀、靜態推演；範圍：貼圖／上傳、`stdin=DEVNULL`、stream 結束與 `wake`）：**未確認任何缺陷**（findings 為空）。它檢查了上傳路徑與 id 驗證、`names.json` 與路徑穿越、CSP、body 上限分流、`exited` 空窗、`wake` 是否雙重 follow、`DEVNULL` 影響範圍（只動 `run_shell` 與背景任務）。**它沒檢查的**（它自己列出）：真實瀏覽器操作與瀏覽器連線排程、Docker 沙盒前綴（`HARNESS_SANDBOX`，我這邊也沒測過）、完整測試套件（它的唯讀沙盒沒有可寫暫存目錄，測試在 setUp 就失敗，不是程式錯）、惡意大量上傳的記憶體壓力、`images_dir` 內的符號連結。所以「沒找到缺陷」的證據等級是**靜態讀碼加部分測試**；瀏覽器行為與兩個修復的真實效果靠我自己的手動驗證與測試。
+
+**驗證**：`tests/test_harness_gui.py` 47 項、`tests/test_harness_gui_md.py` 17 項（用 Node 測 `parseMarkdown`：HTML／腳本／連結一律當文字、未閉合標記留原樣、200,000 字元的惡意輸入不卡；加上頁面原始碼檢查：內嵌 script 語法、沒有 `style=`、每個 `$("id")` 都存在、沒有 `innerHTML`／`eval`；沒裝 Node 就略過）。伺服器端、核心與 markdown 解析的 7 種突變（資料夾可留空、`/clear` 不發事件、斜線不標記、摘要不帶事件數、`/md.js` 不查 Host、HTML 不當文字、fence 內也解析）測試都失敗。**前端行為本身沒有自動化瀏覽器測試**：每一項都是我在瀏覽器窗格對真實 vLLM 手動驗證過（含：伺服器重啟後貼新網址、壓縮在門檻調低後實際觸發、關分頁再開仍可核准）。
 
 **第三方審查**（小o，唯讀、靜態推演）：未發現標記注入、CSP 放寬或 token 固定；確認 3 項 low，我逐條處理——(1) 重播的壓縮摘要判斷太鬆（使用者自己打那句話會被當成摘要）→ 改成精確比對 harness 實際產生的開頭；開頭的 `<system-reminder>` 區塊會被剝掉這一點與 harness 自己的 `_user_words` 同一條規則、無法區分，列為既有設計；(2) 分頁還原清單存在同源 `localStorage`，兩個同時開著的 GUI 瀏覽器視窗會互相覆蓋 → **維持**，因為改成 `sessionStorage` 會讓「伺服器重啟後把新網址貼進新分頁」還原不了；(3) 串流時每個畫面影格都重新解析整篇回答、總成本隨長度二次方成長 → 重繪間隔改為依長度放寬（`renderGap`：50 ms＋每 100 字元 1 ms、上限 1 秒），瀏覽器實測 559 個片段只重繪 59 次、過程逐步更新、最後內容一致。這批修復沒有再複審。
 
@@ -331,7 +344,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 
 339 項 = 離線 316 項（假伺服器、時間、並行、分類器邏輯等）＋ live 23 項（vLLM 16 項、真實 FastMCP 5 項、skill 2 項；其中 1 項視模型行為可能 skipped）。**沒設 `HARNESS_LIVE` 時實際跑 315 項、略過 24 項**：23 項 live，加 1 項離線的符號連結測試（需要建立符號連結的權限，作者這台機器沒有，所以該測試**從未實跑**）。這是 2026-10-27 在作者機器上逐模組計數的結果（vllm 250、mcp 42、mcp_live 5、skills 42）；設好 live 環境後完整跑過一次：339 項、206 秒、全過、略過 2 項（符號連結測試，以及模型沒有嘗試被注入的指令那一項）。其中 `test_auto_mode_blocks_instruction_hidden_in_a_file` 只有在模型真的嘗試執行注入的 `curl` 時才會檢驗閘門，否則會被標為 skipped（實測該模型 5/5 次都沒有照做）；閘門對「已被注入的腦」的防護由 `test_compromised_brain_cannot_get_attacks_past_the_real_classifier` 負責。live 測試需要可連的 vLLM 端點（`VLLM_BASE_URL`／`.harness.env`）。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 
-2026-10-30 起另有 `bench/` 的離線測試 47 項（`tests/test_bench_*.py`）；整套 `discover` 實測 386 項、OK、略過 24 項（略過的原因沒有逐一核對，推測是 live 與符號連結測試）。
+2026-10-30 起另有 `bench/` 的離線測試 47 項（`tests/test_bench_*.py`）；整套 `discover`（2026-11-02，附圖與兩個修復之後）實測 484 項、OK、略過 24 項（略過的原因沒有逐一核對，推測是 live 與符號連結測試）。
 
 **測試實際抓到的問題**
 - 壓縮在一般聊天**永遠不會觸發**（觸發用的 token 數是函式區域變數，每個使用者回合歸零）；由 live 測試發現，補了離線回歸測試。
@@ -461,8 +474,8 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - Hook：HTTP hook 只對假伺服器測過，沒有對真實的內部政策伺服器測過；`command` 型 hook 對真實模型各測過一次（否決寫檔、SessionStart 文字進模型）。沒做 `async`、`if`、shell form。hook 腳本要自己可重入（並行子 agent 可能同時觸發）。
 - MCP：只對我自己寫的假伺服器與兩代 FastMCP（4.1.3、2.14.7）驗證過，其他伺服器未驗證；舊版協定只讀過 2025-11-25，伺服器回 2025-06-18／2025-03-26 時形狀相同是假設；`x-mcp-header` 只對假伺服器測過；第三方審查一次（見上）；無 OAuth、無 resources／prompts 等。
 - Skill：不實作 `allowed-tools` 等欄位的限制；選單預算放不下大型資料夾，而且**超過預算時按字母順序丟掉後面的**（被丟掉的 skill 模型不知道它存在），預算數字是我訂的；符號連結一律照 SymJack 政策處理，所以你資料夾裡指向別處的連結不會載入；`skill` 工具只給主 agent；只在 Windows 11 測過；第三方審查一次（見下）。
-- GUI：只在 Windows 11、一個瀏覽器窗格（暗色、1024 寬與 375 寬）測過；前端沒有自動化瀏覽器測試；兩個同時開著的 GUI 瀏覽器視窗共用同一份「分頁還原」清單（後存的蓋掉先存的）；markdown 不支援連結、圖片、表格（刻意：連結與圖片會變成要檢查的網址）；停止是強制結束、不能只中斷一輪；每個 session 只留最近 20,000 筆事件（頁面重新整理靠重播）；沒有 per-session 的模型或 provider 設定；token 外洩（例如把帶 token 的網址貼出去）等於交出執行權，重啟伺服器才會換新。
-- 圖片：`view_image` 只對 `vllm` 探測過；不縮圖（零依賴，只能以 5 MB／3840×2160 擋）；附上後檔案被改，之後的請求只剩文字說明；GUI 還不能貼圖或上傳（只有模型自己去看磁碟上的檔）；真實截圖、照片、小字的準確度沒量；`view_image` 跟 `read_file` 一樣能讀專案外的檔。
+- GUI：只在 Windows 11、一個瀏覽器窗格（暗色、1024 寬與 375 寬）測過；同一個瀏覽器同時開著 6 個以上「正在執行」的 session 仍會用光連線上限（只修了沒在跑的那一半；每個執行中的 session 一條 `/stream`，要留一條給一般請求）；前端沒有自動化瀏覽器測試；兩個同時開著的 GUI 瀏覽器視窗共用同一份「分頁還原」清單（後存的蓋掉先存的）；markdown 不支援連結、圖片、表格（刻意：連結與圖片會變成要檢查的網址）；停止是強制結束、不能只中斷一輪；每個 session 只留最近 20,000 筆事件（頁面重新整理靠重播）；沒有 per-session 的模型或 provider 設定；token 外洩（例如把帶 token 的網址貼出去）等於交出執行權，重啟伺服器才會換新。
+- 圖片：`view_image` 只對 `vllm` 探測過；不縮圖（零依賴，只能以 5 MB／3840×2160 擋）；附上後檔案被改，之後的請求只剩文字說明；GUI 的貼圖／上傳走同一條管線（上限 4 張、每張 5 MB，base64 包在 JSON 裡所以傳輸約大 33%）；真實截圖、照片、小字的準確度沒量；`view_image` 跟 `read_file` 一樣能讀專案外的檔。
 - 沒有 token 計數器；壓縮用的是伺服器回報的 `prompt_tokens`。
 - 若伺服器沒有 `/metrics`，`/cache` 只會回報 unknown。
 

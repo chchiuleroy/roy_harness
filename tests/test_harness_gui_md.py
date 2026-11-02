@@ -151,6 +151,15 @@ class TestPageSource(unittest.TestCase):
         defined = set(re.findall(r'\sid="([A-Za-z]+)"', self.html))
         self.assertEqual(sorted(used - defined), [])
 
+    def test_a_view_that_stops_following_is_woken_when_its_session_runs_again(self):
+        """The server ends the stream of a session that is not running, so the page parks its view.
+        A parked view with nobody to wake it would stay silent after 'resume' (here or elsewhere)."""
+        import re
+        follow = re.search(r"async function follow\(v\) \{[\s\S]*?\n\}\n", self.html).group(0)
+        self.assertIn("v.parked = true", follow)
+        self.assertIn("wake(v)", re.search(r"function showResume[\s\S]*?\n\}\n", self.html).group(0))
+        self.assertIn("wake(v)", re.search(r"async function refresh\(\) \{[\s\S]*?\n\}\n", self.html).group(0))
+
     def test_the_page_never_writes_html(self):
         # these are only strings searched for in the page's source: nothing here evaluates anything
         for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
