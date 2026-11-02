@@ -35,12 +35,17 @@ import harness_hooks               # kill_tree: the same Windows-safe tree kill 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.join(HERE, "harness_vllm.py")
 PAGE = os.path.join(HERE, "harness_gui.html")
+MARKDOWN_JS = os.path.join(HERE, "harness_gui_md.js")   # its own file: Node tests it without a browser
 HOME = os.environ.get("HARNESS_GUI_HOME") or os.path.join(os.path.expanduser("~"), ".roy_harness_gui")
 SESSIONS = os.path.join(HOME, "sessions")   # outside every project: the model cannot write there
 MAX_EVENTS = 20_000                         # per session; the oldest are dropped, seq stays stable
 MAX_BODY = 1_000_000
 CLIP = 4_000
 SID = re.compile(r"^[0-9a-f]{12}$")
+# what the harness itself writes into user-role messages (see harness_vllm.py: compact, remind)
+COMPACTED = "Earlier conversation was compacted."
+WAKE_NOTE = "(No new user message"
+REMINDERS = re.compile(r"\A(?:\s*<system-reminder>.*?</system-reminder>)+\s*", re.S)
 MODES = ("safe", "normal", "auto")
 
 # ---------------------------------------------------------------- sessions
@@ -59,7 +64,14 @@ def messages_to_events(messages):
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         content = content if isinstance(content, str) else ""
         if role == "user":
-            out.append({"kind": "user", "text": content[:20_000], "history": True})
+            if COMPACTED in content[:600]:                 # the harness' own summary of what was cut
+                out.append({"kind": "summary", "text": content[:CLIP * 2], "history": True})
+                continue
+            typed = REMINDERS.sub("", content, count=1)    # reminders the harness glued in front
+            if typed != content and (not typed.strip() or typed.lstrip().startswith(WAKE_NOTE)):
+                out.append({"kind": "notice", "text": content[:600], "history": True})
+                continue
+            out.append({"kind": "user", "text": typed[:20_000], "history": True})
         elif role == "assistant":
             if content.strip():
                 out.append({"kind": "assistant", "text": content, "history": True})
@@ -120,7 +132,7 @@ class Session:
             updated = self.created
         return {"id": self.id, "cwd": self.cwd, "mode": self.mode, "title": self.title,
                 "created": self.created, "updated": updated, "running": self.running,
-                "waiting": len(self.pending)}
+                "waiting": len(self.pending), "events": self.base + len(self.events)}
 
     def start(self):
         with self.start_lock:
@@ -190,7 +202,10 @@ class Session:
         text = str(text)[:20_000]
         if not self.send({"type": "user", "text": text}):
             return False
-        self.add({"kind": "user", "text": text})
+        echo = {"kind": "user", "text": text}
+        if text.startswith("/"):
+            echo["slash"] = True                         # a command, not something to show as a speech bubble
+        self.add(echo)
         if not self.title and not text.startswith("/"):
             self.title = text.strip().splitlines()[0][:60]
             self.save_meta()
@@ -317,6 +332,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self._guard(False):
                 self._page()
             return
+        if url.path == "/md.js":                         # static, no secrets: the host check is enough
+            if self._guard(False):
+                self._static(MARKDOWN_JS, "application/javascript; charset=utf-8")
+            return
         if not self._guard(True):
             return
         parts = url.path.strip("/").split("/")
@@ -356,7 +375,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._fail(400, "object expected")
         parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
         if parts == ["api", "sessions"]:
-            cwd = os.path.realpath(str(body.get("cwd") or ""))
+            named = str(body.get("cwd") or "").strip()
+            if not named:                                # realpath("") is the server's own folder
+                return self._fail(400, "folder is required")
+            cwd = os.path.realpath(named)
             mode = body.get("mode", "normal")
             if not os.path.isdir(cwd):
                 return self._fail(400, f"not a folder: {cwd}")
@@ -387,6 +409,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.stop()
                 return self._json({"ok": True})
         self._fail(404, "not found")
+
+    def _static(self, path, content_type):
+        with open(path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _page(self):
         nonce = secrets.token_urlsafe(16)

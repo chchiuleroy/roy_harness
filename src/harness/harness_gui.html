@@ -21,18 +21,25 @@ input,select,textarea{background:var(--card);border:1px solid var(--line);border
 #side{width:260px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
 #side h2{font-size:12px;color:var(--dim);margin:12px 12px 4px;font-weight:600;text-transform:uppercase}
 #newform{padding:8px 12px;display:grid;gap:6px;border-bottom:1px solid var(--line)}
+#newform .pair{display:flex;gap:6px}
 #list{overflow:auto;flex:1}
 .item{padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer}
 .item:hover,.item.on{background:var(--card)}
 .item .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item .s{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px}
-.dot.run{background:var(--ok)}.dot.wait{background:var(--warn);animation:b 1s infinite}
+.dot.run{background:var(--ok)}.dot.wait{background:var(--warn);animation:b 1s infinite}.dot.new{background:var(--accent)}
+body.offline .dot.run,body.offline .dot.wait,body.offline .dot.new{background:var(--dim);animation:none}
 @keyframes b{50%{opacity:.25}}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
-#tabs{display:flex;gap:2px;background:var(--panel);border-bottom:1px solid var(--line);padding:6px 8px 0;overflow-x:auto}
+#alertbar{display:none;padding:8px 14px;background:var(--bad);color:#fff;font-weight:600}
+#alertbar.warn{background:var(--warn)}
+#topbar{display:flex;align-items:flex-end;gap:6px;background:var(--panel);border-bottom:1px solid var(--line);padding:6px 8px 0}
+#tabs{display:flex;gap:2px;overflow-x:auto;flex:1;min-width:0}
+.nav{display:none;margin-bottom:4px;white-space:nowrap}
 .tab{padding:5px 10px;border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;cursor:pointer;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis}
 .tab.on{background:var(--bg)}
+.tab.unread{font-weight:700}
 .tab .x{margin-left:8px;color:var(--dim)}
 #body{flex:1;display:flex;min-height:0}
 #views{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -43,6 +50,11 @@ input,select,textarea{background:var(--card);border:1px solid var(--line);border
 .msg.user{background:var(--user);margin-left:10%}
 .msg.bot{background:var(--card);border:1px solid var(--line);margin-right:10%}
 .msg pre{background:var(--panel);padding:8px;border-radius:6px;overflow:auto;font:12.5px var(--mono);white-space:pre;margin:6px 0}
+.msg code{background:var(--panel);padding:0 4px;border-radius:4px;font:12.5px var(--mono)}
+.msg ul,.msg ol{margin:4px 0;padding-left:22px}
+.md-h{font-weight:700;margin:6px 0 2px}.md-h1{font-size:1.25em}.md-h2{font-size:1.15em}
+.faded{opacity:.45}
+.divider{text-align:center;color:var(--dim);font:12px var(--mono);margin:12px 0;border-top:1px dashed var(--line);padding-top:6px}
 .sys{color:var(--dim);font:12px var(--mono);white-space:pre-wrap;word-break:break-word;margin:2px 0}
 .sys.err{color:var(--bad)}
 details.tool{margin:6px 0;border:1px solid var(--line);border-radius:6px;background:var(--card)}
@@ -63,7 +75,17 @@ details.tool pre{margin:0;padding:8px 10px;border-top:1px solid var(--line);font
 .task span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 table.st{font-size:12px;width:100%}table.st td:last-child{text-align:right;font-family:var(--mono)}
 #empty{margin:auto;color:var(--dim)}
-@media(max-width:900px){#right{display:none}#side{width:200px}}
+@media(max-width:900px){
+  /* a phone or a narrow window: the list and the panel become drawers instead of squeezing the chat */
+  .nav{display:inline-block}
+  #side,#right{position:fixed;top:0;bottom:0;z-index:5;box-shadow:0 0 18px rgba(0,0,0,.35)}
+  #side{left:0;width:min(280px,86vw);transform:translateX(-105%);transition:transform .15s}
+  #right{right:0;width:min(300px,90vw);transform:translateX(105%);transition:transform .15s}
+  body.show-side #side,body.show-right #right{transform:none}
+  #backdrop{display:none;position:fixed;inset:0;z-index:4;background:rgba(0,0,0,.35)}
+  body.show-side #backdrop,body.show-right #backdrop{display:block}
+  .msg.user{margin-left:4%}.msg.bot{margin-right:4%}
+}
 </style>
 </head>
 <body>
@@ -71,7 +93,7 @@ table.st{font-size:12px;width:100%}table.st td:last-child{text-align:right;font-
   <h2>新 session</h2>
   <div id="newform">
     <input id="cwd" list="cwds" placeholder="專案資料夾（絕對路徑）"><datalist id="cwds"></datalist>
-    <div style="display:flex;gap:6px">
+    <div class="pair">
       <select id="mode"><option>normal</option><option>safe</option><option>auto</option></select>
       <button class="primary" id="create">建立</button>
     </div>
@@ -80,12 +102,19 @@ table.st{font-size:12px;width:100%}table.st td:last-child{text-align:right;font-
   <div id="list"></div>
 </aside>
 <section id="main">
-  <div id="tabs"></div>
+  <div id="alertbar" role="alert"></div>
+  <div id="topbar">
+    <button class="nav" id="navSide" title="session 列表">☰ 列表</button>
+    <div id="tabs"></div>
+    <button class="nav" id="navRight" title="模式、背景任務、指令、統計">⚙ 面板</button>
+  </div>
   <div id="body">
     <div id="views"><div id="empty">在左邊建立或選一個 session</div></div>
     <aside id="right"></aside>
   </div>
 </section>
+<div id="backdrop"></div>
+<script nonce="__NONCE__" src="/md.js"></script>
 <script nonce="__NONCE__">
 "use strict";
 // Everything that comes from the model, the files or the tools goes in with textContent only.
@@ -95,17 +124,54 @@ try {
   if (m) { sessionStorage.setItem("t", m[1]); history.replaceState(null, "", location.pathname); }
   TOKEN = sessionStorage.getItem("t") || "";
 } catch (e) {}
+// A new server run has a new token. Pasting its address into THIS tab only changes the part after
+// "#", which the browser does not treat as a new page, so the old token would stay. Take it, and
+// start the page afresh (the open tabs come back from localStorage).
+window.addEventListener("hashchange", () => {
+  const m = location.hash.match(/t=([\w-]+)/);
+  if (!m) return;
+  try { sessionStorage.setItem("t", m[1]); } catch (e) {}
+  history.replaceState(null, "", location.pathname);
+  location.reload();
+});
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const V = new Map();          // sid -> view
 let ACTIVE = null, LIST = [];
 
+// ---- what the page knows about its connection: refused (token) and unreachable (server gone)
+const CONN = {auth: false, offline: false};
+function showConn() {
+  const bar = $("alertbar");
+  const text = CONN.auth ? "連線被拒絕（token 失效）。GUI 伺服器每次啟動都會換新 token：請把它啟動時印出的新網址貼到這個分頁的網址列。"
+    : CONN.offline ? "跟 GUI 伺服器的連線中斷，重新連線中…（session 的 harness 行程可能已經跟著伺服器一起結束；伺服器重啟後要用新網址）" : "";
+  bar.textContent = text; bar.style.display = text ? "block" : "none";
+  bar.className = CONN.auth ? "" : "warn";
+  document.body.classList.toggle("offline", CONN.auth || CONN.offline);   // the green "running" dots turn grey
+}
+function setConn(key, value) { if (CONN[key] !== value) { CONN[key] = value; showConn(); } }
+
 async function api(method, path, body) {
-  const r = await fetch(path, {method, headers: {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
-    body: body === undefined ? undefined : JSON.stringify(body)});
+  let r;
+  try {
+    r = await fetch(path, {method, headers: {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
+      body: body === undefined ? undefined : JSON.stringify(body)});
+  } catch (e) { setConn("offline", true); throw e; }
+  setConn("offline", false);
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401) setConn("auth", true); else setConn("auth", false);
   if (!r.ok) throw new Error(j.error || r.status);
   return j;
+}
+
+// ---- which tabs were open: kept per browser, so a reload does not close them all
+const TABS_KEY = "roy_harness_tabs";
+function saveTabs() {
+  try { localStorage.setItem(TABS_KEY, JSON.stringify({tabs: [...V.keys()], active: ACTIVE})); } catch (e) {}
+}
+function savedTabs() {
+  try { const j = JSON.parse(localStorage.getItem(TABS_KEY) || "null"); if (j && Array.isArray(j.tabs)) return j; } catch (e) {}
+  return {tabs: [], active: null};
 }
 
 // ---- sidebar
@@ -122,16 +188,21 @@ async function refresh() {
       const t = el("div", "t"); const d = el("span", "dot" + (s.waiting ? " wait" : s.running ? " run" : ""));
       t.append(d, s.title || "(新 session)");
       it.append(t, el("div", "s", s.cwd + " · " + s.mode + " · " + new Date(s.updated * 1000).toLocaleString()));
-      it.onclick = () => openSession(s.id);
+      it.onclick = () => { openSession(s.id); document.body.classList.remove("show-side"); };
       box.append(it);
     }
     renderTabs();
-  } catch (e) { if (String(e.message) === "401") document.body.textContent = "token 失效：請用啟動時印出的網址重新開啟"; }
+  } catch (e) { /* api() already told the connection state to the banner */ }
 }
 $("create").onclick = async () => {
-  try { const s = await api("POST", "/api/sessions", {cwd: $("cwd").value.trim(), mode: $("mode").value}); await refresh(); openSession(s.id); }
+  const cwd = $("cwd").value.trim();
+  if (!cwd) { alert("請先填專案資料夾（絕對路徑）。"); return; }
+  try { const s = await api("POST", "/api/sessions", {cwd, mode: $("mode").value}); await refresh(); openSession(s.id); document.body.classList.remove("show-side"); }
   catch (e) { alert("建立失敗：" + e.message); }
 };
+$("navSide").onclick = () => { document.body.classList.toggle("show-side"); document.body.classList.remove("show-right"); };
+$("navRight").onclick = () => { document.body.classList.toggle("show-right"); document.body.classList.remove("show-side"); };
+$("backdrop").onclick = () => document.body.classList.remove("show-side", "show-right");
 
 // ---- tabs
 function info(sid) { return LIST.find((s) => s.id === sid) || {}; }
@@ -139,34 +210,48 @@ function renderTabs() {
   const bar = $("tabs"); bar.replaceChildren();
   for (const [sid, v] of V) {
     const i = info(sid);
-    const t = el("div", "tab" + (sid === ACTIVE ? " on" : ""));
-    t.append(el("span", "dot" + (v.pending.size ? " wait" : v.alive ? " run" : "")), i.title || "(新)");
+    const t = el("div", "tab" + (sid === ACTIVE ? " on" : "") + (v.unread ? " unread" : ""));
+    t.append(el("span", "dot" + (v.pending.size ? " wait" : v.unread ? " new" : v.alive ? " run" : "")), i.title || "(新)");
     const x = el("span", "x", "×"); x.title = "關閉分頁（不停止 session）";
     x.onclick = (e) => { e.stopPropagation(); closeTab(sid); };
     t.append(x); t.onclick = () => activate(sid); bar.append(t);
   }
-  document.title = [...V.values()].some((v) => v.pending.size) ? "(待核准) roy_harness" : "roy_harness";
+  // the title speaks for every session that waits for the person, also one whose tab was closed
+  const waiting = [...V.values()].some((v) => v.pending.size) || LIST.some((s) => s.waiting);
+  const fresh = [...V.values()].some((v) => v.unread);
+  document.title = (waiting ? "(待核准) " : fresh ? "(新) " : "") + "roy_harness";
 }
 function closeTab(sid) {
   const v = V.get(sid); if (!v) return;
   v.closed = true; if (v.ctl) v.ctl.abort(); v.root.remove(); V.delete(sid);
   if (ACTIVE === sid) { ACTIVE = null; const n = V.keys().next().value; if (n) activate(n); else renderRight(); }
-  renderTabs();
+  saveTabs(); renderTabs(); refresh();
 }
 function activate(sid) {
   ACTIVE = sid;
-  for (const [id, v] of V) v.root.classList.toggle("on", id === sid);
-  $("empty").style.display = "none"; renderTabs(); renderRight(); refresh();
-  const v = V.get(sid); if (v) v.input.focus();
+  const v = V.get(sid); if (v) v.unread = false;
+  for (const [id, w] of V) w.root.classList.toggle("on", id === sid);
+  $("empty").style.display = "none"; saveTabs(); renderTabs(); renderRight(); refresh();
+  if (v) v.input.focus();
 }
-function openSession(sid) {
-  if (!V.has(sid)) {
-    const v = newView(sid); V.set(sid, v); $("views").append(v.root); follow(v);
-    // a session that is not running (the server was restarted, or it was stopped earlier) never
-    // sends an `exited` event to this page, so it needs its resume button from the start
-    if (!info(sid).running) showResume(v, "這個 session 目前沒有在執行（上面是它存下來的歷史）");
-  }
-  activate(sid);
+function openView(sid) {
+  if (V.has(sid)) return V.get(sid);
+  const v = newView(sid); V.set(sid, v); $("views").append(v.root);
+  v.liveFrom = info(sid).events || 0;         // what the server already had is history, not news
+  follow(v);
+  // a session that is not running (the server was restarted, or it was stopped earlier) never
+  // sends an `exited` event to this page, so it needs its resume button from the start
+  if (!info(sid).running) showResume(v, "這個 session 目前沒有在執行（上面是它存下來的歷史）");
+  return v;
+}
+function openSession(sid) { openView(sid); activate(sid); }
+// after a reload: the tabs that were open, if their sessions still exist
+async function restoreTabs() {
+  const saved = savedTabs();
+  await refresh();
+  const known = new Set(LIST.map((s) => s.id));
+  for (const sid of saved.tabs) if (known.has(sid)) openView(sid);
+  if (V.size) activate(saved.active && V.has(saved.active) ? saved.active : V.keys().next().value);
 }
 
 function showResume(v, text) {
@@ -185,7 +270,8 @@ function newView(sid) {
   compose.append(input, send); root.append(log, banner, compose);
   banner.style.display = "none";
   const v = {id: sid, root, log, banner, input, seq: 0, pending: new Map(), tools: new Map(), cur: null,
-             alive: false, busy: false, state: null, closed: false, ready: null, ctl: null};
+             alive: false, busy: false, state: null, closed: false, ready: null, ctl: null,
+             unread: false, liveFrom: 0};
   const go = async () => {
     const text = input.value; if (!text.trim()) return;
     try { await api("POST", `/api/sessions/${sid}/send`, {text}); input.value = ""; }
@@ -201,14 +287,22 @@ function stick(v, fn) {
 }
 function sysLine(v, text, err) { stick(v, () => v.log.append(el("div", "sys" + (err ? " err" : ""), text))); }
 
-// text with ``` fences -> text + <pre>, built from DOM nodes only
+// model text -> DOM. parseMarkdown (harness_gui_md.js) gives a plain tree; every node here is made
+// with createElement/textContent, so nothing a model writes can become markup.
+function fillInline(node, parts) {
+  for (const p of parts) node.append(p.t === "text" ? document.createTextNode(p.v) : el(p.t === "strong" ? "strong" : "code", "", p.v));
+}
 function renderText(node, text) {
   node.replaceChildren();
-  const parts = text.split("```");
-  parts.forEach((p, i) => {
-    if (i % 2 === 0) { if (p) node.append(document.createTextNode(p)); }
-    else { const nl = p.indexOf("\n"); node.append(el("pre", "", nl >= 0 ? p.slice(nl + 1) : p)); }
-  });
+  for (const b of parseMarkdown(text)) {
+    if (b.type === "code") node.append(el("pre", "", b.text));
+    else if (b.type === "heading") { const h = el("div", "md-h md-h" + b.level); fillInline(h, b.inline); node.append(h); }
+    else if (b.type === "list") {
+      const l = el(b.ordered ? "ol" : "ul");
+      for (const item of b.items) { const li = el("li"); fillInline(li, item); l.append(li); }
+      node.append(l);
+    } else { const p = el("div"); fillInline(p, b.inline); node.append(p); }
+  }
 }
 function botBubble(v) {
   const b = el("div", "msg bot"); stick(v, () => v.log.append(b)); return b;
@@ -221,10 +315,30 @@ function flushUsage(v) {
   if (v.held) { sysLine(v, v.held); v.held = null; }
 }
 
+// what counts as news in a tab the person is not looking at (replayed history does not)
+const NEWS = new Set(["assistant", "assistant_end", "exited"]);
+
 function handle(v, ev) {
   v.seq = ev.seq + 1;
+  if (NEWS.has(ev.kind) && v.id !== ACTIVE && ev.seq >= v.liveFrom && !v.unread) { v.unread = true; renderTabs(); }
   switch (ev.kind) {
-    case "user": stick(v, () => v.log.append(el("div", "msg user", ev.text))); break;
+    case "user":
+      if (ev.slash) sysLine(v, "› " + ev.text);                   // a command (from a button or typed), not a speech bubble
+      else stick(v, () => v.log.append(el("div", "msg user", ev.text)));
+      break;
+    case "cleared": {                                              // /clear: the model forgot; the page must say so
+      v.cur = null; v.held = null; v.ended = false;
+      for (const c of [...v.log.children]) c.classList.add("faded");
+      stick(v, () => v.log.append(el("div", "divider", "── 對話已清除：模型不再記得上面的內容 ──")));
+      break;
+    }
+    case "summary": {                                              // history replay: the summary that replaced a long chat
+      const d = el("details", "tool");
+      d.append(el("summary", "", "（對話曾被壓縮：前面的內容由這份摘要取代）"), el("pre", "", ev.text));
+      stick(v, () => v.log.append(d)); break;
+    }
+    case "notice": sysLine(v, "（harness 通知）" + short(ev.text.replace(/<\/?system-reminder>/g, ""), 160)); break;
+    case "compacted": sysLine(v, `${ev.label || ""}已壓縮對話：提示曾有 ${ev.tokens} tokens，現在剩 ${ev.messages} 則訊息`); break;
     case "assistant_delta":
       if (!v.cur) v.cur = {node: botBubble(v), text: ""};
       v.cur.text += ev.text;
@@ -252,7 +366,7 @@ function handle(v, ev) {
     }
     case "ask": v.pending.set(ev.rid, ev); askCard(v, ev); renderTabs(); break;
     case "answered": {
-      v.pending.delete(ev.rid); const c = v.log.querySelector(`[data-rid="${ev.rid}"]`); if (c) c.remove(); renderTabs(); break;
+      v.pending.delete(ev.rid); const c = v.log.querySelector(`[data-rid="${ev.rid}"]`); if (c) c.remove(); renderTabs(); refresh(); break;
     }
     case "image": sysLine(v, `已附上圖片：${ev.name}（${ev.width}×${ev.height}）`); break;
     case "classifier": sysLine(v, `分類器 ${ev.verdict}：${ev.why}`); break;
@@ -297,13 +411,19 @@ async function follow(v) {
     try {
       v.ctl = new AbortController();
       const r = await fetch(`/api/sessions/${v.id}/stream?from=${v.seq}`, {headers: {"Authorization": "Bearer " + TOKEN}, signal: v.ctl.signal});
+      if (r.status === 401) { setConn("auth", true); throw new Error("401"); }
+      if (!r.ok) throw new Error(String(r.status));
+      setConn("auth", false); setConn("offline", false);
       const rd = r.body.getReader(); let buf = "";
       for (;;) {
         const {value, done} = await rd.read(); if (done) break;
         buf += dec.decode(value, {stream: true}); let i;
         while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line.trim()) handle(v, JSON.parse(line)); }
       }
-    } catch (e) { if (v.closed) return; }
+    } catch (e) {
+      if (v.closed) return;
+      if (e && e.message !== "401" && e.name !== "AbortError") setConn("offline", true);   // the stream died: is the server still there?
+    }
     await new Promise((r) => setTimeout(r, 1500));
   }
 }
@@ -345,7 +465,7 @@ function renderRight() {
     p.append(b); }
 }
 
-refresh(); setInterval(refresh, 5000);
+restoreTabs(); setInterval(refresh, 5000);
 </script>
 </body>
 </html>
