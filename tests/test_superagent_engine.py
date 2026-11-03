@@ -269,6 +269,61 @@ class TestAskIsOneCommit(unittest.TestCase):
                 self.assertEqual(store.ticket(tid)["state"], TicketState.OPEN.value)
 
 
+class TestAnswerConfirmation(unittest.TestCase):
+    """Writing an answer to the pipe is not the same as the harness having read it."""
+
+    class Stub:
+        alive = True
+
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.stopped = False
+
+        def answer(self, rid, yes):
+            return True
+
+        def stop(self, force=False, grace=5.0):
+            self.stopped = True
+
+    def setup_run(self, home):
+        store = Store(home).open()
+        tid, _ = store.new_ticket("s", "t", Strength.EXPLICIT, lambda i: ("c", "s", "c"))
+        engine = Engine(store, None, None, Policy(), RuleAssessor(), lambda t: None)
+        from superagent.engine import _Run
+        gen = store.start_run(tid, 1, 1.0, "c")
+        stub = self.Stub()
+        run = _Run(tid, stub, gen, 1)
+        engine.runs[tid] = run
+        ask_id = store.add_ask(tid, gen, "q1", "dir")
+        engine.answer_ask(ask_id, True)
+        return store, engine, run, stub, ask_id
+
+    def test_process_that_dies_straight_after_the_answer_does_not_count_as_answered(self):
+        with tempfile.TemporaryDirectory() as home:
+            store, engine, run, stub, ask_id = self.setup_run(home)
+            try:
+                self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
+                stub.events.put({"kind": "exited", "code": 1, "_pid": 1})
+                engine.pump(run)
+                self.assertEqual(store.ask(ask_id)["state"], AskState.ORPHANED.value)
+                self.assertEqual(engine.events[-1]["unconfirmed_answers"], [ask_id])
+            finally:
+                store.close()
+
+    def test_progress_after_the_answer_confirms_it(self):
+        with tempfile.TemporaryDirectory() as home:
+            store, engine, run, stub, ask_id = self.setup_run(home)
+            try:
+                stub.events.put({"kind": "tool_result", "text": "DENIED", "_pid": 1})
+                stub.events.put({"kind": "exited", "code": 0, "_pid": 1})
+                engine.pump(run)
+                self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
+                self.assertEqual(engine.events[-1]["unconfirmed_answers"], [])
+            finally:
+                store.close()
+
+
 class TestFreeTextQuestion(unittest.TestCase):
     """The branch that closes an ask_user question. The hook refuses the tool, so a real harness
     never gets here; the branch exists for the day the hook policy changes, and has to be right

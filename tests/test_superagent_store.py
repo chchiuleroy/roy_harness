@@ -150,6 +150,25 @@ class TestAskIdentity(StoreCase):
         with self.assertRaises(AskRejected):
             self.s.claim_answer(a)
 
+    def test_an_answer_the_harness_never_showed_it_received_is_not_reported_as_given(self):
+        """Writing to the pipe succeeds even if the child dies before reading it. When the process
+        ends with no sign of progress, the answer is marked orphaned, so the status is truthful."""
+        tid, _ = self.ticket()
+        g = self.s.start_run(tid, 100, 1.0, "w")
+        a = self.s.add_ask(tid, g, "q1", "dir")
+        self.s.mark_answered(a)
+        self.assertEqual(self.s.end_run(tid, 100), [a])
+        self.assertEqual(self.s.ask(a)["state"], AskState.ORPHANED.value)
+
+    def test_an_answer_followed_by_progress_stays_answered(self):
+        tid, _ = self.ticket()
+        g = self.s.start_run(tid, 100, 1.0, "w")
+        a = self.s.add_ask(tid, g, "q1", "dir")
+        self.s.mark_answered(a)
+        self.s.confirm_answers(tid)
+        self.assertEqual(self.s.end_run(tid, 100), [])
+        self.assertEqual(self.s.ask(a)["state"], AskState.ANSWERED.value)
+
     def test_an_answer_is_accepted_once(self):
         tid, _ = self.ticket()
         g = self.s.start_run(tid, 100, 1.0, "w")
@@ -192,6 +211,22 @@ class TestNestedTransactions(StoreCase):
             self.s.enqueue_input(tid, trid, "k")
         self.assertEqual(len(self.s.tickets()), 1)
         self.assertEqual(len(self.s.inputs(tid)), 1)
+
+    def test_an_inner_failure_that_the_caller_swallows_still_rolls_everything_back(self):
+        """Catching the error does not make half-done work valid: the outer transaction must not
+        commit what the failed inner one wrote."""
+        with self.assertRaises(RuntimeError) as ctx:
+            with self.s.tx():
+                self.s.add_trigger(trig("kept?"))
+                try:
+                    with self.s.tx():
+                        self.s.add_trigger(trig("inner"))
+                        raise ValueError("inner step failed")
+                except ValueError:
+                    pass                          # swallowed
+        self.assertIn("rolled back", str(ctx.exception))
+        self.assertEqual(self.s._q("SELECT COUNT(*) AS n FROM trigger")[0]["n"], 0)
+        self.assertIsNotNone(self.s.add_trigger(trig("after")), "the store is unusable after the rollback")
 
     def test_a_failed_transaction_leaves_the_store_usable(self):
         try:
@@ -246,6 +281,26 @@ class TestHomeLock(unittest.TestCase):
             threading.Timer(0.3, probe._release_lock).start()
             Store(d, lock_wait=3.0).open().close()
             self.assertFalse(lock_is_held(d))
+
+    def test_two_probes_at_once_do_not_mistake_each_other_for_an_orchestrator(self):
+        """A probe holds the lock for an instant. A second probe in that instant used to see
+        'locked' and report an orchestrator that is not there; `down` would then wait for a
+        shutdown nobody can answer."""
+        from superagent.store import lock_is_held
+        with tempfile.TemporaryDirectory() as d:
+            slow = {}
+            th = threading.Thread(target=lambda: slow.setdefault("r", lock_is_held(d, _hold=0.6)))
+            th.start()
+            time.sleep(0.15)                      # the first probe is holding the lock now
+            self.assertFalse(lock_is_held(d), "a probe was taken for an orchestrator")
+            th.join()
+            self.assertFalse(slow["r"])
+
+    def test_a_probe_still_sees_a_real_orchestrator(self):
+        from superagent.store import lock_is_held
+        with tempfile.TemporaryDirectory() as d:
+            with Store(d):
+                self.assertTrue(lock_is_held(d))
 
     def test_looking_at_a_held_lock_is_quick(self):
         """`status` asks 'is it running?' while the orchestrator holds the lock; the answer must

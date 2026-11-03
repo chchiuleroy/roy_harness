@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS input(
   state TEXT NOT NULL, replayed INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS ask(
   ask_id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, run_gen INTEGER NOT NULL,
-  rid TEXT NOT NULL, what TEXT NOT NULL, what_sha TEXT NOT NULL, state TEXT NOT NULL, ts REAL NOT NULL);
+  rid TEXT NOT NULL, what TEXT NOT NULL, what_sha TEXT NOT NULL, state TEXT NOT NULL, ts REAL NOT NULL,
+  confirmed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL, msg_id TEXT NOT NULL UNIQUE,
   payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL);
@@ -66,22 +67,67 @@ CREATE TABLE IF NOT EXISTS process(
 """
 
 
-def lock_is_held(home):
-    """True when another orchestrator holds the home lock. Looks at the lock only: it works
-    even when the database file is damaged."""
+def lock_is_held(home, _hold=0.0):
+    """True when an orchestrator holds the home lock. Looks at the lock only: it works even when
+    the database file is damaged. Probes queue behind a guard lock (`.probe`), so two probes at
+    the same moment never mistake each other for an orchestrator; `_hold` keeps a probe's lock a
+    little longer, for tests."""
     probe = Store(home, lock_wait=0)
     os.makedirs(probe.home, exist_ok=True)
     try:
-        probe._take_lock()
+        guard = _acquire(os.path.join(probe.home, ".probe"), 2.0)
     except StoreLocked:
-        return True
-    probe._release_lock()
-    return False
+        guard = None                  # another probe is stuck; look anyway
+    try:
+        try:
+            probe._take_lock()
+        except StoreLocked:
+            return True
+        if _hold:
+            time.sleep(_hold)
+        probe._release_lock()
+        return False
+    finally:
+        if guard is not None:
+            _release(guard)
 
 
 def _row(cur):
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _acquire(path, wait):
+    """Take an exclusive OS lock on byte 0 of `path`, retrying for `wait` seconds.
+    -> the open file (keep it open to keep the lock). Raises StoreLocked."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT)
+    f = os.fdopen(fd, "r+b", buffering=0)
+    deadline = time.time() + wait
+    while True:
+        try:
+            f.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError as e:
+            if time.time() >= deadline:
+                f.close()
+                raise StoreLocked(f"{path} is locked") from e
+            time.sleep(0.05)
+
+
+def _release(f):
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    f.close()
 
 
 class Store:
@@ -95,6 +141,7 @@ class Store:
         self._lock_file = None
         self._thread = None
         self._depth = 0
+        self._failed = False
 
     # ---------------------------------------------------------------- lifecycle
     def open(self):
@@ -121,23 +168,10 @@ class Store:
         self.close()
 
     def _take_lock(self):
-        path = os.path.join(self.home, ".lock")
-        fd = os.open(path, os.O_RDWR | os.O_CREAT)
-        f = os.fdopen(fd, "r+b", buffering=0)
-        deadline = time.time() + self.lock_wait
-        while True:
-            try:
-                f.seek(0)
-                if os.name == "nt":
-                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as e:
-                if time.time() >= deadline:
-                    f.close()
-                    raise StoreLocked(f"{self.home} is in use by another orchestrator") from e
-                time.sleep(0.05)
+        try:
+            f = _acquire(os.path.join(self.home, ".lock"), self.lock_wait)
+        except StoreLocked as e:
+            raise StoreLocked(f"{self.home} is in use by another orchestrator") from e
         # owner note, for a human reading the file; it takes no part in locking
         f.seek(16)
         f.truncate(16)
@@ -146,17 +180,8 @@ class Store:
 
     def _release_lock(self):
         f, self._lock_file = self._lock_file, None
-        if f is None:
-            return
-        try:
-            f.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        f.close()
+        if f is not None:
+            _release(f)
 
     # ---------------------------------------------------------------- plumbing
     def _check(self):
@@ -169,25 +194,33 @@ class Store:
     def tx(self):
         """A transaction. Re-entrant: a `with store.tx()` inside another one joins it, so the
         engine can make "record the trigger, decide, open the ticket, queue the input" one
-        commit; any exception rolls the whole outer transaction back."""
+        commit; any exception rolls the whole outer transaction back. If an inner transaction
+        fails and the caller catches the exception, the outer one still cannot commit: it rolls
+        back and raises RuntimeError, instead of keeping half of what was done."""
         self._check()
         if self._depth:
             self._depth += 1
             try:
                 yield self.db
+            except BaseException:
+                self._failed = True
+                raise
             finally:
                 self._depth -= 1
             return
         self.db.execute("BEGIN IMMEDIATE")
-        self._depth = 1
+        self._depth, self._failed = 1, False
         try:
             yield self.db
         except BaseException:
-            self._depth = 0
+            self._depth, self._failed = 0, False
             self.db.execute("ROLLBACK")
             raise
         else:
-            self._depth = 0
+            failed, self._depth, self._failed = self._failed, 0, False
+            if failed:
+                self.db.execute("ROLLBACK")
+                raise RuntimeError("an inner transaction failed, so the whole transaction was rolled back")
             self.db.execute("COMMIT")
 
     def _q(self, sql, args=()):
@@ -317,11 +350,24 @@ class Store:
             return gen
 
     def end_run(self, ticket_id, pid):
-        """The process is gone: forget it, and no question it asked can be answered any more."""
+        """The process is gone: forget it. No question it asked can be answered any more, and an
+        answer it never showed it had received (see confirm_answers) is not reported as given.
+        -> ids of the answers that were not confirmed."""
         with self.tx() as db:
             db.execute("DELETE FROM process WHERE pid=? AND ticket_id=?", (pid, ticket_id))
-            db.execute("UPDATE ask SET state=? WHERE ticket_id=? AND state=?",
-                       (AskState.ORPHANED.value, ticket_id, AskState.OPEN.value))
+            lost = [r["ask_id"] for r in self._q(
+                "SELECT ask_id FROM ask WHERE ticket_id=? AND state=? AND confirmed=0",
+                (ticket_id, AskState.ANSWERED.value))]
+            db.execute("UPDATE ask SET state=? WHERE ticket_id=? AND (state=? OR (state=? AND confirmed=0))",
+                       (AskState.ORPHANED.value, ticket_id, AskState.OPEN.value, AskState.ANSWERED.value))
+            return lost
+
+    def confirm_answers(self, ticket_id):
+        """The harness has shown progress (a tool result, the end of a turn, a new question) after
+        an answer was written to it, so the answer was received."""
+        with self.tx() as db:
+            db.execute("UPDATE ask SET confirmed=1 WHERE ticket_id=? AND state=? AND confirmed=0",
+                       (ticket_id, AskState.ANSWERED.value))
 
     def processes(self):
         return self._q("SELECT * FROM process ORDER BY started")

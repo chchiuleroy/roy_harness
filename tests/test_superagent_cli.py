@@ -38,6 +38,21 @@ def reap(*procs):
         p.wait()
 
 
+def not_green(outcomes):
+    """Tests of a suite that did not pass. A removal check compares two suites; if the baseline
+    itself is not green, 'identical' proves little (a different failure would look the same)."""
+    return sorted(name for name, outcome in outcomes.items()
+                  if outcome not in ("ok", "skipped", "expected failure"))
+
+
+class TestRemovalGuard(unittest.TestCase):
+    def test_a_baseline_that_is_not_green_is_reported(self):
+        self.assertEqual(not_green({"a": "ok", "b": "skipped"}), [])
+        self.assertEqual(not_green({"a": "ok", "b": "FAIL", "c": "ERROR"}), ["b", "c"])
+        self.assertEqual(not_green({"unittest.loader._FailedTest.x": "ERROR"}),
+                         ["unittest.loader._FailedTest.x"])
+
+
 class TestControlChannel(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -250,6 +265,7 @@ class TestRemovable(unittest.TestCase):
                     os.remove(os.path.join(cur, "tests", f))
             before, after = self.run_suite(base), self.run_suite(cur)
         self.assertGreater(len(before), 50, "the baseline suite did not run")
+        self.assertEqual(not_green(before), [], "the baseline suite is not green, so 'identical' proves little")
         self.assertEqual(after, before)
 
 

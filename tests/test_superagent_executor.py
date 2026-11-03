@@ -21,7 +21,7 @@ class TestAnswer(unittest.TestCase):
         """An `a` answer would be saved by the harness as a PERMANENT grant (PERMS), after which
         `safe` mode stops asking for that command. The port must not be able to produce one."""
         sent = []
-        e = ex.HarnessExecutor(ex.ExecutorConfig("vllm", "http://x/v1", "m"))
+        e = ex.HarnessExecutor(ex.ExecutorConfig("vllm", "http://example.com/v1", "m"))
         e._send_raw = lambda obj: sent.append(obj) or True
         e.answer("q1", True)
         e.answer("q2", False)

@@ -27,9 +27,9 @@ class TestEnv(unittest.TestCase):
         that depends on the machine it runs on proves nothing, and a secret in the child can
         be sent anywhere the model writes a command."""
         parent = {"PATH": "p", "SYSTEMROOT": "C:\\Windows", "FOO_TOKEN": "x", "HARNESS_STREAM": "1",
-                  "VLLM_BASE_URL": "http://elsewhere/v1", "ANTHROPIC_API_KEY": "sk-1",
+                  "VLLM_BASE_URL": "http://example.com/v1", "ANTHROPIC_API_KEY": "sk-1",
                   "HARNESS_MODE": "auto", "HARNESS_DEBUG": "1"}
-        env = ex.build_env(ex.ExecutorConfig("vllm", "http://x/v1", "m"), parent=parent)
+        env = ex.build_env(ex.ExecutorConfig("vllm", "http://example.com/v1", "m"), parent=parent)
         self.assertNotIn("FOO_TOKEN", env)
         self.assertEqual(env["HARNESS_STREAM"], "0")
         self.assertEqual(env["HARNESS_MODE"], "safe")
@@ -41,16 +41,16 @@ class TestEnv(unittest.TestCase):
     def test_mode_cannot_be_chosen_by_the_caller(self):
         """`normal` does not ask before writing files and `auto` hands approval to a classifier
         that quotes 'the user's words'; a ticket gets neither."""
-        cfg = ex.ExecutorConfig("vllm", "http://x/v1", "m")
+        cfg = ex.ExecutorConfig("vllm", "http://example.com/v1", "m")
         self.assertEqual(ex.build_env(cfg, parent={"HARNESS_MODE": "auto"})["HARNESS_MODE"], "safe")
         with self.assertRaises(TypeError):
             ex.build_env(cfg, parent={}, extra={"HARNESS_MODE": "auto"})
 
     def test_api_key_only_when_configured(self):
         """An empty key is a pin; a configured key is the one deliberate exception."""
-        base = ex.ExecutorConfig("openai", "https://x/v1", "m")
+        base = ex.ExecutorConfig("openai", "https://api.example.com/v1", "m")
         self.assertEqual(ex.build_env(base, parent={})["HARNESS_API_KEY"], "")
-        keyed = ex.ExecutorConfig("openai", "https://x/v1", "m", api_key="k1")
+        keyed = ex.ExecutorConfig("openai", "https://api.example.com/v1", "m", api_key="k1")
         self.assertEqual(ex.build_env(keyed, parent={})["HARNESS_API_KEY"], "k1")
 
 
@@ -79,7 +79,7 @@ class TestPreflight(unittest.TestCase):
     def test_pinned_keys_in_repo_env_file_are_fine(self):
         """The author's own endpoint lives in that file; refusing every file would make the
         layer unusable on the machine it was written for."""
-        self._env_file("VLLM_BASE_URL=http://example/v1\nHARNESS_PROVIDER=vllm\n# comment\n")
+        self._env_file("VLLM_BASE_URL=http://example.com/v1\nHARNESS_PROVIDER=vllm\n# comment\n")
         ex.preflight(self.cwd, self.harness)
 
     def test_permission_file_in_ticket_folder_refuses_start(self):

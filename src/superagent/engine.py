@@ -183,6 +183,8 @@ class Engine:
             kind = ev.get("kind")
             if ev.get("_pid") not in (None, run.pid):
                 continue                                            # a late event of an older process
+            if kind in ("tool_result", "turn_end", "ask"):
+                self.store.confirm_answers(run.ticket_id)          # progress proves the answer arrived
             if kind == "turn_end":
                 run.turns += 1
                 self.deaths.pop(run.ticket_id, None)
@@ -214,9 +216,9 @@ class Engine:
         tid = run.ticket_id
         self.runs.pop(tid, None)
         run.executor.stop(force=True)
-        self.store.end_run(tid, run.pid)
+        lost = self.store.end_run(tid, run.pid)
         replayed = self.store.recover_inflight(tid)
-        self.note("exited", ticket=tid, code=ev.get("code"), replay=replayed)
+        self.note("exited", ticket=tid, code=ev.get("code"), replay=replayed, unconfirmed_answers=lost)
         if self.store.ticket(tid)["state"] == TicketState.WAITING.value and not self.store.ticket(tid)["note"]:
             self.store.set_ticket_state(tid, TicketState.OPEN)
         if self.clock() - run.started < QUICK and run.turns == 0:
