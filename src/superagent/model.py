@@ -16,6 +16,7 @@ class Verdict(enum.Enum):
     STOP = "stop"
     UNAVAILABLE = "unavailable"
     FANOUT = "fanout"                  # a follow-up on a thread that already has a live ticket: no Eval
+    REOPEN = "reopen"                  # a message on a thread whose ticket had ended: that same ticket is open again
 
 
 class TicketState(enum.Enum):

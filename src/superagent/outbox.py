@@ -16,7 +16,7 @@ class Outbox:
 
     def enqueue(self, ticket_id, text):
         """Commit the intent to reply. Nothing is written yet. -> msg_id"""
-        _, msg_id = self.store.outbox_enqueue(ticket_id, {"ticket_id": ticket_id, "text": text})
+        _, msg_id = self.store.outbox_enqueue(ticket_id, {"kind": "status", "ticket_id": ticket_id, "text": text})
         return msg_id
 
     def flush(self):
@@ -24,8 +24,13 @@ class Outbox:
         sent = 0
         for row in self.store.outbox_rows("pending"):
             try:
-                self.sink.write(row["msg_id"], json.loads(row["payload"]))
-            except OSError:
+                payload = json.loads(row["payload"])
+                if not isinstance(payload, dict):
+                    raise ValueError("the payload is not an object")
+                payload.setdefault("kind", "status")      # rows queued before `kind` existed were all status messages
+                self.sink.write(row["msg_id"], payload)
+            except (OSError, ValueError):                 # a row that cannot be read or written (damaged JSON, a text the
+                                                          # file cannot hold) is a failed try, never a crash that blocks the rest
                 attempts = row["attempts"] + 1
                 self.store.outbox_mark(row["id"], "failed" if attempts >= MAX_ATTEMPTS else "pending",
                                        attempts)

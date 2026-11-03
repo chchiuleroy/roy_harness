@@ -143,10 +143,15 @@ class TestFlow(Rig):
         self.llm.script[:] = [{"text": "ok"}]
         self.drop("001.json")
         self.until(lambda: self.states() == ["done"] and self.engine.store.outbox_rows("pending") == [])
-        sent = [n for n in os.listdir(self.out_dir) if n.endswith(".json")]
-        self.assertEqual(len(sent), 1)
-        with open(os.path.join(self.out_dir, sent[0]), encoding="utf-8") as f:
-            self.assertIn("Ticket 1 opened", json.load(f)["text"])
+        bodies = []
+        for n in sorted(os.listdir(self.out_dir)):
+            if n.endswith(".json"):
+                with open(os.path.join(self.out_dir, n), encoding="utf-8") as f:
+                    bodies.append(json.load(f))
+        opened = [b for b in bodies if b["kind"] == "status" and "Ticket 1 opened" in b["text"]]
+        self.assertEqual(len(opened), 1, "the request must be acknowledged exactly once")
+        self.assertEqual([b["kind"] for b in bodies if b not in opened], ["executor_output"],
+                         "since Slice 3 the model's reply is the only other message")
 
 
 class TestQuestions(Rig):

@@ -21,6 +21,7 @@ from . import main_session as ms
 from .model import AskState, Decision, InputState, Strength, TicketState, Trigger, Verdict
 from .outbox import Outbox
 from .store import AskRejected, StaleBatch
+from .turnreply import ReplyTracker, reply_payload
 
 MAX_QUICK_DEATHS = 3          # an executor that dies this many times without finishing a turn is parked
 QUICK = 30.0                  # seconds: "quick" for the above
@@ -33,6 +34,7 @@ class _Run:
         self.ticket_id, self.executor, self.run_gen, self.pid = ticket_id, executor, run_gen, pid
         self.started = time.time()
         self.turns = 0
+        self.tracker = ReplyTracker()     # what this process says at the end of each turn
         self.confirm_after = 0     # events numbered up to this were queued before the last answer was written: not its consequence
 
 
@@ -40,14 +42,17 @@ class Engine:
     def __init__(self, store, source, sink, policy, assessor, executor_factory, *,
                  ask_timeout=3600.0, max_running=4, clock=time.time,
                  main=None, batch_max=ms.BATCH_MAX, batch_min=1, batch_wait=3.0, eval_timeout=180.0,
-                 card_cap=ms.CARD_CAP):
+                 card_cap=ms.CARD_CAP, idle_end=600.0):
         """main: a MainSession turns on model assessment of inferred candidates (otherwise the
-        rule-based assessor decides them, exactly as in Slice 1)."""
+        rule-based assessor decides them, exactly as in Slice 1). idle_end: seconds after its last
+        activity at which a ticket with nothing left to do is ended and its process stopped."""
+        # `type(...) is int` keeps out True/False; math.isfinite keeps out nan (every comparison with it
+        # is false, so `nan <= 0` would pass and `elapsed > nan` would never time out) and infinity.
+        whole = lambda v: type(v) is int                                          # noqa: E731
+        number = lambda v: type(v) in (int, float) and math.isfinite(v)           # noqa: E731
+        if not (number(idle_end) and idle_end > 0):
+            raise ValueError("idle_end must be a finite number of seconds above 0")
         if main is not None:
-            # `type(...) is int` keeps out True/False; math.isfinite keeps out nan (every comparison with it
-            # is false, so `nan <= 0` would pass and `elapsed > nan` would never time out) and infinity.
-            whole = lambda v: type(v) is int                                          # noqa: E731
-            number = lambda v: type(v) in (int, float) and math.isfinite(v)           # noqa: E731
             if not (whole(batch_max) and 1 <= batch_max <= 100):
                 raise ValueError("batch_max must be a whole number from 1 to 100 (it bounds how much one "
                                  "poisoned batch can do)")
@@ -62,6 +67,7 @@ class Engine:
         self.executor_factory = executor_factory
         self.home = store.home
         self.ask_timeout, self.max_running, self.clock = ask_timeout, max_running, clock
+        self.idle_end = idle_end
         self.runs = {}                 # ticket_id -> _Run
         self.deaths = {}               # ticket_id -> consecutive quick deaths
         self.events = []               # what happened, for status and tests (bounded)
@@ -113,18 +119,38 @@ class Engine:
             self.source.settle(t)              # only after the commit: a crash before it re-reads the file
         for tid in [t["id"] for t in self.store.tickets({TicketState.OPEN, TicketState.WAITING})]:
             self.drive(tid)
+        self.end_idle()
         self.expire_asks()
         self.eval_stage()
         self.outbox.flush()
 
     def handle_trigger(self, t, trigger_id):
         live = self.store.live_tickets_on(t.source, t.thread)
-        if live:                                     # a follow-up: no Eval, delivered as context
+        if live:                                     # a follow-up: no Eval, but it must be admitted
+            strength = gate.admit(t, self.policy, True)
+            if strength is not Strength.EXPLICIT:
+                # Only a person on the allow list can steer a ticket. A stranger's words (or an
+                # inferred sender's, or anyone's while the accept mode is `off`) are not delivered.
+                self.store.record_decision(trigger_id, Decision(
+                    Verdict.IGNORE, strength, f"follow-up not admitted ({strength.value}): nothing was delivered"))
+                self.note("follow_up_not_admitted", trigger=trigger_id, sender=t.sender)
+                return
             for tid in live:
-                self.store.enqueue_input(tid, trigger_id, f"{tid}:{trigger_id}")
+                self.store.enqueue_input(tid, trigger_id, f"{tid}:{trigger_id}", self.clock())
             self.store.record_decision(
-                trigger_id, Decision(Verdict.FANOUT, gate.admit(t, self.policy, True),
-                                     f"delivered to ticket(s) {live}"), live[0])
+                trigger_id, Decision(Verdict.FANOUT, strength, f"delivered to ticket(s) {live}"), live[0])
+            return
+        ended = self.store.ended_tickets_on(t.source, t.thread)
+        if ended and gate.admit(t, self.policy, True) is Strength.EXPLICIT:
+            # A person on the allow list speaks on a thread whose ticket had ended: the same ticket
+            # (same session, same mandate) opens again. Admission is decided now, by the current
+            # policy, for this message; the old mandate only says what the ticket may do.
+            tid = ended[0]
+            self.store.reopen_ticket(tid, trigger_id, f"{tid}:{trigger_id}", self.clock())
+            self.store.record_decision(trigger_id, Decision(
+                Verdict.REOPEN, Strength.EXPLICIT, f"reopened ticket {tid}"), tid)
+            self.outbox.enqueue(tid, f"Ticket {tid} reopened for this message.")
+            self.note("ticket_reopened", ticket=tid)
             return
         if self.main is not None and gate.admit(t, self.policy, False) is Strength.INFERRED:
             self.store.enqueue_eval(trigger_id, self.clock())       # the model decides; no decision yet
@@ -132,10 +158,10 @@ class Engine:
             return
         d = gate.evaluate(t, self.policy, self.assessor, False)
         if d.verdict is Verdict.ACCEPT:
-            tid, _ = self.store.new_ticket(t.source, t.thread, d.strength, self.paths)
+            tid, _ = self.store.new_ticket(t.source, t.thread, d.strength, self.paths, now=self.clock())
             self.fault("in_trigger")
             self.store.record_decision(trigger_id, d, tid)
-            self.store.enqueue_input(tid, trigger_id, f"{tid}:{trigger_id}")
+            self.store.enqueue_input(tid, trigger_id, f"{tid}:{trigger_id}", self.clock())
             self.outbox.enqueue(tid, f"Ticket {tid} opened for this request.")
             self.note("ticket_opened", ticket=tid)
         else:
@@ -197,7 +223,7 @@ class Engine:
         self.note("batch_done", batch=ev.batch_id, **report)
 
     def _opened_by_model(self, trig, ticket_id):
-        self.store.enqueue_input(ticket_id, trig["id"], f"{ticket_id}:{trig['id']}")
+        self.store.enqueue_input(ticket_id, trig["id"], f"{ticket_id}:{trig['id']}", self.clock())
         self.outbox.enqueue(ticket_id, f"Ticket {ticket_id} opened for this request.")
         self.note("ticket_opened", ticket=ticket_id, by="model")
 
@@ -279,14 +305,13 @@ class Engine:
             kind = ev.get("kind")
             if ev.get("_pid") not in (None, run.pid):
                 continue                                            # a late event of an older process
+            ended = run.tracker.feed(ev)        # after the check above: an older process must not touch it
             if kind in ("tool_result", "turn_end", "ask") and not stale:
                 self.store.confirm_answers(run.ticket_id)          # progress AFTER the answer proves it arrived
             if kind == "turn_end":
                 run.turns += 1
                 self.deaths.pop(run.ticket_id, None)
-                flight = self.store.in_flight(run.ticket_id)
-                if flight:
-                    self.store.mark_input(flight["id"], InputState.DONE)
+                self.finish_turn(run, ended)
             elif kind == "ask":
                 self.on_ask(run, ev)
             elif kind == "log" and "could not write" in str(ev.get("text", "")):
@@ -294,6 +319,20 @@ class Engine:
             elif kind == "exited":
                 self.on_exit(run, ev)
                 return
+
+    def finish_turn(self, run, ended):
+        """A turn is over: its input is done and its reply (or the notice that there was none) is
+        queued, in one transaction."""
+        flight = self.store.in_flight(run.ticket_id)
+        if flight is None:
+            self.note("turn_end_without_input", ticket=run.ticket_id)
+            return
+        payload = reply_payload(run.ticket_id, flight["id"], ended.text)
+        if not self.store.finish_turn(run.ticket_id, flight["id"], payload, self.clock(),
+                                      fault=lambda: self.fault("in_finish_turn")):
+            self.note("turn_not_finished", ticket=run.ticket_id, input=flight["id"])
+        elif payload["kind"] == "status":
+            self.note("turn_without_reply", ticket=run.ticket_id)
 
     def on_ask(self, run, ev):
         if ev.get("question"):                                      # ask_user: nobody types free text
@@ -333,7 +372,7 @@ class Engine:
         if not run.executor.answer(row["rid"], bool(yes)):       # delivered, or it stays open
             raise AskRejected(f"question {ask_id}: the answer could not be delivered; try again")
         run.confirm_after = max(run.confirm_after, run.executor.last_answer_mark)
-        self.store.mark_answered(ask_id)
+        self.store.mark_answered(ask_id, self.clock())
         self.note("answered", ticket=row["ticket_id"], ask_id=ask_id, yes=bool(yes))
 
     def expire_asks(self):
@@ -344,6 +383,26 @@ class Engine:
                     self.note("ask_timed_out", ask_id=a["ask_id"])
                 except AskRejected:
                     pass
+
+    def end_idle(self):
+        """A ticket that has nothing left to do ends, and its process goes: otherwise a finished
+        ticket keeps its slot for ever. The decision is made in the database (one transaction that
+        re-checks everything); the process is stopped only after it has been committed."""
+        for t in self.store.tickets({TicketState.OPEN}):
+            if self.store.end_ticket_if_idle(t["id"], self.clock(), self.idle_end):
+                self.note("ticket_ended", ticket=t["id"])
+                self.fault("after_ended_commit")          # a crash here leaves an ended ticket with a live process
+                self.release(t["id"])
+        for tid in list(self.runs):                         # ... and the next pass (or the next start) tidies it
+            if self.store.ticket(tid)["state"] == TicketState.ENDED.value:
+                self.release(tid)
+
+    def release(self, ticket_id):
+        """Stop this ticket's process (if it has one) and give its slot back."""
+        run = self.runs.pop(ticket_id, None)
+        if run is not None:
+            run.executor.stop()
+            self.store.end_run(ticket_id, run.pid)
 
     def stop_ticket(self, ticket_id):
         """A person's stop is final: the process ends and nothing more is delivered."""
@@ -370,6 +429,7 @@ class Engine:
     def status(self):
         return {
             "tickets": [{"id": t["id"], "state": t["state"], "thread": t["thread"], "note": t["note"],
+                         "last_activity": t["last_activity"],
                          "pid": self.runs[t["id"]].pid if t["id"] in self.runs else None,
                          "pending_inputs": len([i for i in self.store.inputs(t["id"])
                                                 if i["state"] != InputState.DONE.value])}

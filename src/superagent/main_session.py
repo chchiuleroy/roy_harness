@@ -13,6 +13,7 @@ import os
 
 from . import executor as ex
 from . import frame
+from .turnreply import ReplyTracker
 
 ROUTER_HEADER = "[SUPERAGENT-ROUTER-BATCH]"
 ROUTER_FOOTER = "[END-OF-ROUTER-BATCH]"
@@ -219,7 +220,7 @@ class MainSession:
         self.batch_id = None
         self.batches_in_generation = 0
         self.last_error = None
-        self._reply = None
+        self._tracker = ReplyTracker()
 
     # ---------------------------------------------------------------- lifecycle
     @property
@@ -268,7 +269,8 @@ class MainSession:
 
     def _drop(self):
         executor, self.executor = self.executor, None
-        self.batch_id, self._reply = None, None
+        self.batch_id = None
+        self._tracker.reset()
         if executor is not None:
             executor.stop(force=True)
             if self.on_stop:
@@ -284,7 +286,7 @@ class MainSession:
             raise RuntimeError("a batch is already in flight")
         if not self.alive:
             return False
-        self._reply = None
+        self._tracker.reset()
         if not self.executor.send(text):
             return False
         self.batch_id = batch_id
@@ -301,17 +303,13 @@ class MainSession:
             except Exception:
                 break
             kind = ev.get("kind")
-            if kind == "turn_start":
-                self._reply = None
-            elif kind == "assistant":
-                self._reply = str(ev.get("text", ""))
-            elif kind in ("tool_call", "tool_result"):
-                self._reply = None
-            elif kind == "turn_end" and self.batch_id is not None:
-                bid, reply, self._reply = self.batch_id, self._reply, None
-                out.append(MainEvent("reply", bid, reply) if reply is not None
-                           else MainEvent("failed", bid, "no final reply"))
-                self._batch_done()
+            ended = self._tracker.feed(ev)
+            if ended is not None:
+                if self.batch_id is not None:
+                    bid = self.batch_id
+                    out.append(MainEvent("reply", bid, ended.text) if ended.text is not None
+                               else MainEvent("failed", bid, "no final reply"))
+                    self._batch_done()
             elif kind == "ask":
                 if self.batch_id is not None:
                     out.append(MainEvent("failed", self.batch_id, "the model session asked a question"))
