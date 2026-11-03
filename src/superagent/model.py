@@ -66,3 +66,12 @@ class Mandate:
     thread: str
     tools_allowed: Tuple[str, ...] = ("read_file", "write_file", "edit_file", "run_command",
                                       "todo_write")
+    matched_rules: Tuple[str, ...] = ()        # which proactive rule(s) allowed it, if it was not an explicit request
+
+
+@dataclasses.dataclass(frozen=True)
+class Authorized:
+    """A decision about a candidate that came out of `gate.authorize`. The store accepts nothing
+    else for a model-assessed candidate, so there is no way to hand it a hand-made Decision."""
+    decision: Decision
+    matched_rules: Tuple[str, ...] = ()

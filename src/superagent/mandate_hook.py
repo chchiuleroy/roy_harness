@@ -38,6 +38,8 @@ def inside(path, root, base):
 
 def decide(tool_name, tool_input, mandate, cwd=None):
     """-> None when there is no objection, else the reason for the veto."""
+    if mandate.get("profile") == "router":
+        return "the router session has no tools"
     root = mandate.get("root")
     if not isinstance(root, str) or not root:
         return "mandate has no root"

@@ -15,7 +15,8 @@ import threading
 import time
 import uuid
 
-from .model import AskState, InputState, Mandate, Strength, TicketState
+from . import gate
+from .model import AskState, Decision, InputState, Mandate, Strength, TicketState, Verdict
 
 if os.name == "nt":
     import msvcrt
@@ -29,6 +30,14 @@ class StoreLocked(Exception):
 
 class AskRejected(Exception):
     """An answer that does not match a live question."""
+
+
+class StaleBatch(Exception):
+    """An evaluation result that does not match the batch it claims to answer: the batch is not in
+    flight any more, or a trigger is not part of it, or already has a decision."""
+
+
+EVAL_MAX_ATTEMPTS = 3          # tries per candidate before it is recorded as unavailable
 
 
 SCHEMA = """
@@ -64,6 +73,13 @@ CREATE TABLE IF NOT EXISTS outbox(
 CREATE TABLE IF NOT EXISTS process(
   pid INTEGER NOT NULL, create_time REAL NOT NULL, ticket_id INTEGER NOT NULL, cwd TEXT NOT NULL,
   run_gen INTEGER NOT NULL, started REAL NOT NULL, PRIMARY KEY(pid, create_time));
+CREATE UNIQUE INDEX IF NOT EXISTS decision_one_per_trigger ON decision(trigger_id);
+CREATE TABLE IF NOT EXISTS eval_batch(
+  id INTEGER PRIMARY KEY, state TEXT NOT NULL, text TEXT NOT NULL,
+  session_generation INTEGER NOT NULL, sent_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS eval_item(
+  trigger_id INTEGER PRIMARY KEY REFERENCES trigger(id), state TEXT NOT NULL,
+  batch_id INTEGER REFERENCES eval_batch(id), attempts INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL);
 """
 
 
@@ -269,7 +285,7 @@ class Store:
         return self._q("SELECT * FROM decision ORDER BY id")
 
     # ---------------------------------------------------------------- tickets, mandates
-    def new_ticket(self, source, thread, strength, paths_fn):
+    def new_ticket(self, source, thread, strength, paths_fn, matched_rules=()):
         """Create a ticket and its immutable mandate in one transaction.
         paths_fn(ticket_id) -> (cwd, session_file, root_realpath). -> (ticket_id, Mandate)"""
         with self.tx() as db:
@@ -278,9 +294,10 @@ class Store:
             tid = cur.lastrowid
             cwd, session, root = paths_fn(tid)
             db.execute("UPDATE ticket SET cwd=?, session=? WHERE id=?", (cwd, session, tid))
-            m = Mandate(tid, root, strength, source, thread)
+            m = Mandate(tid, root, strength, source, thread, matched_rules=tuple(matched_rules))
             body = {"ticket_id": m.ticket_id, "root": m.root, "strength": m.strength.value,
-                    "source": m.source, "thread": m.thread, "tools_allowed": list(m.tools_allowed)}
+                    "source": m.source, "thread": m.thread, "tools_allowed": list(m.tools_allowed),
+                    "matched_rules": list(m.matched_rules)}
             db.execute("INSERT INTO mandate(ticket_id, body) VALUES(?,?)", (tid, json.dumps(body)))
             return tid, m
 
@@ -429,6 +446,151 @@ class Store:
             a = self.answerable(ask_id)
             self.mark_answered(ask_id)
             return a
+
+    # ---------------------------------------------------------------- the evaluation ledger
+    def enqueue_eval(self, trigger_id, now=None):
+        """A candidate waits for the model. Called in the same transaction as add_trigger."""
+        with self.tx() as db:
+            db.execute("INSERT OR IGNORE INTO eval_item(trigger_id, state, attempts, ts) VALUES(?,?,?,?)",
+                       (trigger_id, "pending", 0, time.time() if now is None else now))
+
+    def eval_batch_items(self, batch_id):
+        """Trigger ids still waiting for an answer in this batch."""
+        return [r["trigger_id"] for r in self._q(
+            "SELECT trigger_id FROM eval_item WHERE batch_id=? AND state='sent' ORDER BY trigger_id", (batch_id,))]
+
+    def peek_eval_items(self, max_items):
+        """The oldest pending candidates, with their message. Changes nothing."""
+        return self._q(
+            "SELECT e.trigger_id, e.attempts, e.ts, t.source, t.thread, t.sender, t.text "
+            "FROM eval_item e JOIN trigger t ON t.id = e.trigger_id WHERE e.state='pending' "
+            "ORDER BY e.trigger_id LIMIT ?", (max(1, int(max_items)),))   # LIMIT 0 takes none, a negative one takes all
+
+    def sent_batches(self):
+        return self._q("SELECT * FROM eval_batch WHERE state='sent' ORDER BY id")
+
+    def sent_batch(self):
+        rows = self.sent_batches()
+        return rows[0] if rows else None
+
+    def eval_item(self, trigger_id):
+        rows = self._q("SELECT * FROM eval_item WHERE trigger_id=?", (trigger_id,))
+        return rows[0] if rows else None
+
+    def eval_batch(self, batch_id):
+        rows = self._q("SELECT * FROM eval_batch WHERE id=?", (batch_id,))
+        return rows[0] if rows else None
+
+    def eval_counts(self):
+        out = {s: 0 for s in ("pending", "sent", "done", "unavailable")}
+        for r in self._q("SELECT state, COUNT(*) AS n FROM eval_item GROUP BY state"):
+            out[r["state"]] = r["n"]
+        return out
+
+    def create_eval_batch(self, trigger_ids, text, session_generation, now):
+        """One transaction: record exactly what is about to be sent, and move its candidates from
+        pending to sent. Only one batch may be in flight. -> batch id"""
+        with self.tx() as db:
+            if self.sent_batch() is not None:
+                raise StaleBatch("a batch is already in flight")
+            ids = list(trigger_ids)
+            if not ids:
+                raise StaleBatch("an empty batch")
+            for tid in ids:
+                it = self.eval_item(tid)
+                if it is None or it["state"] != "pending":
+                    raise StaleBatch(f"trigger {tid} is not waiting for evaluation")
+            cur = db.execute("INSERT INTO eval_batch(state, text, session_generation, sent_at) VALUES(?,?,?,?)",
+                             ("sent", text, int(session_generation), now))
+            bid = cur.lastrowid
+            for tid in ids:
+                db.execute("UPDATE eval_item SET state='sent', batch_id=? WHERE trigger_id=?", (bid, tid))
+            return bid
+
+    def _miss(self, db, tid, item, count=True):
+        """A candidate the model did not answer (or a batch that failed): count the try; at the limit
+        record it as unavailable, otherwise put it back in line. With count=False (a restart or a
+        shutdown, which is nobody's fault) it just goes back in line."""
+        attempts = item["attempts"] + (1 if count else 0)
+        if count and attempts >= EVAL_MAX_ATTEMPTS:
+            self.record_decision(tid, Decision(Verdict.UNAVAILABLE, Strength.INFERRED,
+                                               f"no usable answer after {attempts} tries"))
+            db.execute("UPDATE eval_item SET state='unavailable', attempts=? WHERE trigger_id=?", (attempts, tid))
+            return "unavailable"
+        db.execute("UPDATE eval_item SET state='pending', batch_id=NULL, attempts=? WHERE trigger_id=?",
+                   (attempts, tid))
+        return "pending"
+
+    def finish_eval(self, batch_id, answers, policy, paths_fn, on_accept=None):
+        """Apply the model's answers to a batch, all or nothing.
+        answers: {trigger_id: (rule name or None, reason)}, exactly what the model said. THIS method
+        turns them into decisions, by calling gate.authorize itself: a caller cannot hand in a
+        decision, so there is no way to open a ticket from a model answer without that check.
+        Candidates of the batch that are not in `answers` count as unanswered. Raises StaleBatch (and
+        changes nothing) unless the batch is still in flight, every trigger belongs to it and is still
+        waiting, and none has a decision yet.
+        -> {"accepted": [ticket ids], "done": [...], "unavailable": [...], "pending": [...]}"""
+        report = {"accepted": [], "done": [], "unavailable": [], "pending": []}
+        results = {}
+        for tid, answer in answers.items():
+            if not (isinstance(answer, tuple) and len(answer) == 2
+                    and (answer[0] is None or isinstance(answer[0], str)) and isinstance(answer[1], str)):
+                raise TypeError("an answer must be (rule name or None, reason), as the model gave it")
+            results[tid] = gate.authorize(answer[0], answer[1], Strength.INFERRED, policy)
+        with self.tx() as db:
+            batch = self.eval_batch(batch_id)
+            if batch is None or batch["state"] != "sent":
+                raise StaleBatch(f"batch {batch_id} is not in flight")
+            items = {r["trigger_id"]: r for r in self._q("SELECT * FROM eval_item WHERE batch_id=?", (batch_id,))}
+            for tid in results:
+                it = items.get(tid)
+                if it is None or it["state"] != "sent":
+                    raise StaleBatch(f"trigger {tid} is not part of batch {batch_id}")
+                if self._q("SELECT 1 FROM decision WHERE trigger_id=?", (tid,)):
+                    raise StaleBatch(f"trigger {tid} already has a decision")
+            for tid, auth in results.items():
+                d, trig, ticket_id = auth.decision, self.get_trigger(tid), None
+                if d.verdict is Verdict.ACCEPT:
+                    ticket_id, _ = self.new_ticket(trig["source"], trig["thread"], d.strength, paths_fn,
+                                                   auth.matched_rules)
+                    report["accepted"].append(ticket_id)
+                self.record_decision(tid, d, ticket_id)
+                state = "unavailable" if d.verdict is Verdict.UNAVAILABLE else "done"
+                db.execute("UPDATE eval_item SET state=? WHERE trigger_id=?", (state, tid))
+                report[state].append(tid)
+                if ticket_id is not None and on_accept is not None:
+                    on_accept(trig, ticket_id)
+            for tid, it in items.items():
+                if tid not in results and it["state"] == "sent":
+                    report[self._miss(db, tid, it)].append(tid)
+            db.execute("UPDATE eval_batch SET state='done' WHERE id=?", (batch_id,))
+        return report
+
+    def requeue_eval(self, batch_id, reason, count=True):
+        """The batch got no usable answer (the process died, it took too long, the reply was
+        unreadable). Its candidates go back in line; at the limit they become unavailable.
+        count=False: do not count it as a try (the orchestrator itself stopped or restarted).
+        -> the trigger ids touched; [] if the batch was not in flight."""
+        with self.tx() as db:
+            batch = self.eval_batch(batch_id)
+            if batch is None or batch["state"] != "sent":
+                return []
+            touched = []
+            for it in self._q("SELECT * FROM eval_item WHERE batch_id=? AND state='sent' ORDER BY trigger_id", (batch_id,)):
+                self._miss(db, it["trigger_id"], it, count)
+                touched.append(it["trigger_id"])
+            db.execute("UPDATE eval_batch SET state='requeued' WHERE id=?", (batch_id,))
+            return touched
+
+    def record_process(self, pid, create_time, ticket_id, cwd, run_gen=0):
+        """A process that is not a ticket's executor (the model session) goes in the manifest too."""
+        with self.tx() as db:
+            db.execute("INSERT OR REPLACE INTO process(pid, create_time, ticket_id, cwd, run_gen, started) "
+                       "VALUES(?,?,?,?,?,?)", (pid, create_time, ticket_id, cwd, run_gen, time.time()))
+
+    def forget_process(self, pid, ticket_id):
+        with self.tx() as db:
+            db.execute("DELETE FROM process WHERE pid=? AND ticket_id=?", (pid, ticket_id))
 
     # ---------------------------------------------------------------- outbox
     def outbox_enqueue(self, ticket_id, payload):
