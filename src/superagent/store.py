@@ -153,7 +153,19 @@ class Store:
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
         self._thread = threading.get_ident()
+        self._migrate()
         return self
+
+    def _migrate(self):
+        """`CREATE TABLE IF NOT EXISTS` never adds a column to a table that already exists, so a
+        home made by an older version is brought up to date here, once, in one transaction."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(ask)")}
+        if "confirmed" not in cols:
+            with self.tx() as db:
+                db.execute("ALTER TABLE ask ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0")
+                # whatever an older version recorded as answered is settled history, not an
+                # answer still waiting to be seen to arrive
+                db.execute("UPDATE ask SET confirmed=1")
 
     def close(self):
         if self.db is not None:

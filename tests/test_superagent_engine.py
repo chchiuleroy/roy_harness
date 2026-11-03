@@ -220,7 +220,8 @@ class TestAnswerDelivery(unittest.TestCase):
         alive = True
 
         def __init__(self, deliver):
-            self.deliver, self.calls = deliver, []
+            import queue
+            self.deliver, self.calls, self.events = deliver, [], queue.Queue()
 
         def answer(self, rid, yes):
             self.calls.append((rid, yes))
@@ -286,7 +287,7 @@ class TestAnswerConfirmation(unittest.TestCase):
         def stop(self, force=False, grace=5.0):
             self.stopped = True
 
-    def setup_run(self, home):
+    def setup_run(self, home, queued_before_answer=()):
         store = Store(home).open()
         tid, _ = store.new_ticket("s", "t", Strength.EXPLICIT, lambda i: ("c", "s", "c"))
         engine = Engine(store, None, None, Policy(), RuleAssessor(), lambda t: None)
@@ -296,8 +297,38 @@ class TestAnswerConfirmation(unittest.TestCase):
         run = _Run(tid, stub, gen, 1)
         engine.runs[tid] = run
         ask_id = store.add_ask(tid, gen, "q1", "dir")
+        for ev in queued_before_answer:
+            stub.events.put(ev)
         engine.answer_ask(ask_id, True)
         return store, engine, run, stub, ask_id
+
+    def test_an_event_that_was_already_queued_cannot_confirm_a_later_answer(self):
+        """Found by review: the control channel is served before the executor's queue, so a
+        tool result produced BEFORE the answer can be read AFTER it. It says nothing about whether
+        the answer arrived; if the process then dies, the answer must still count as lost."""
+        with tempfile.TemporaryDirectory() as home:
+            store, engine, run, stub, ask_id = self.setup_run(
+                home, queued_before_answer=[{"kind": "tool_result", "text": "old", "_pid": 1}])
+            try:
+                stub.events.put({"kind": "exited", "code": 1, "_pid": 1})
+                engine.pump(run)
+                self.assertEqual(store.ask(ask_id)["state"], AskState.ORPHANED.value)
+                self.assertEqual(engine.events[-1]["unconfirmed_answers"], [ask_id])
+            finally:
+                store.close()
+
+    def test_an_event_after_the_answer_still_confirms_it(self):
+        with tempfile.TemporaryDirectory() as home:
+            store, engine, run, stub, ask_id = self.setup_run(
+                home, queued_before_answer=[{"kind": "tool_result", "text": "old", "_pid": 1}])
+            try:
+                stub.events.put({"kind": "tool_result", "text": "after the answer", "_pid": 1})
+                stub.events.put({"kind": "exited", "code": 0, "_pid": 1})
+                engine.pump(run)
+                self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
+                self.assertEqual(engine.events[-1]["unconfirmed_answers"], [])
+            finally:
+                store.close()
 
     def test_process_that_dies_straight_after_the_answer_does_not_count_as_answered(self):
         with tempfile.TemporaryDirectory() as home:
