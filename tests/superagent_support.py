@@ -20,6 +20,7 @@ class FakeLLM:
          {"text": "..."}                         a final answer
          {"calls": [("read_file", {...}), ...]}  tool calls (the harness runs them, then asks again)
          {"status": 503}                         an HTTP error
+       any entry may carry {"delay": seconds} to answer slowly
     When the script runs out it answers "(script exhausted)" so a test never hangs on the model.
     Every request is kept: `requests` (bodies) and `headers`."""
 
@@ -39,6 +40,8 @@ class FakeLLM:
                     outer.requests.append(body)
                     outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                     entry = outer.script.pop(0) if outer.script else {"text": "(script exhausted)"}
+                if entry.get("delay"):
+                    time.sleep(entry["delay"])
                 if "status" in entry:
                     self.send_response(entry["status"])
                     self.end_headers()
@@ -61,6 +64,8 @@ class FakeLLM:
                 self.wfile.write(out)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.server.block_on_close = False
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     @property

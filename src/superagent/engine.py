@@ -11,14 +11,16 @@ Rules it keeps (each has a test):
   * after a crash, an input that was in flight is replayed with a warning, not guessed about.
 """
 import json
+import math
 import os
 import time
 
 from . import executor as ex
 from . import frame, gate, procutil
+from . import main_session as ms
 from .model import AskState, Decision, InputState, Strength, TicketState, Trigger, Verdict
 from .outbox import Outbox
-from .store import AskRejected
+from .store import AskRejected, StaleBatch
 
 MAX_QUICK_DEATHS = 3          # an executor that dies this many times without finishing a turn is parked
 QUICK = 30.0                  # seconds: "quick" for the above
@@ -36,7 +38,25 @@ class _Run:
 
 class Engine:
     def __init__(self, store, source, sink, policy, assessor, executor_factory, *,
-                 ask_timeout=3600.0, max_running=4, clock=time.time):
+                 ask_timeout=3600.0, max_running=4, clock=time.time,
+                 main=None, batch_max=ms.BATCH_MAX, batch_min=1, batch_wait=3.0, eval_timeout=180.0,
+                 card_cap=ms.CARD_CAP):
+        """main: a MainSession turns on model assessment of inferred candidates (otherwise the
+        rule-based assessor decides them, exactly as in Slice 1)."""
+        if main is not None:
+            # `type(...) is int` keeps out True/False; math.isfinite keeps out nan (every comparison with it
+            # is false, so `nan <= 0` would pass and `elapsed > nan` would never time out) and infinity.
+            whole = lambda v: type(v) is int                                          # noqa: E731
+            number = lambda v: type(v) in (int, float) and math.isfinite(v)           # noqa: E731
+            if not (whole(batch_max) and 1 <= batch_max <= 100):
+                raise ValueError("batch_max must be a whole number from 1 to 100 (it bounds how much one "
+                                 "poisoned batch can do)")
+            if not (whole(batch_min) and 1 <= batch_min <= batch_max):
+                raise ValueError("batch_min must be a whole number from 1 up to batch_max")
+            if not (number(batch_wait) and batch_wait >= 0 and number(eval_timeout) and eval_timeout > 0
+                    and whole(card_cap) and card_cap >= 1):
+                raise ValueError("batch_wait must be a finite number, 0 or more; eval_timeout a finite number "
+                                 "above 0; card_cap a whole number, 1 or more")
         self.store, self.source, self.policy, self.assessor = store, source, policy, assessor
         self.outbox = Outbox(store, sink)
         self.executor_factory = executor_factory
@@ -46,6 +66,13 @@ class Engine:
         self.deaths = {}               # ticket_id -> consecutive quick deaths
         self.events = []               # what happened, for status and tests (bounded)
         self.fault = lambda point: None    # tests raise from here to simulate a crash at a point
+        self.main = main
+        self.batch_max, self.batch_min, self.batch_wait = batch_max, batch_min, batch_wait
+        self.eval_timeout, self.card_cap = eval_timeout, card_cap
+        self.main_retry_at = 0.0
+        if main is not None:                # the model session is a process like any other: record it
+            main.on_start = lambda pid, ctime, cwd: self.store.record_process(pid, ctime, 0, cwd)
+            main.on_stop = lambda pid: self.store.forget_process(pid, 0)
 
     # ------------------------------------------------------------------ helpers
     def note(self, kind, **data):
@@ -70,6 +97,8 @@ class Engine:
                 self.note("killed_orphan", pid=row["pid"], ticket=row["ticket_id"])
             self.store.end_run(row["ticket_id"], row["pid"])
         self.store.recover_inflight()
+        for b in self.store.sent_batches():       # the model's answer was never applied: ask again
+            self.store.requeue_eval(b["id"], "orchestrator restarted", count=False)
         for t in self.store.tickets({TicketState.WAITING}):
             if not t["note"] and not self.store.open_asks(t["id"]):
                 self.store.set_ticket_state(t["id"], TicketState.OPEN)
@@ -85,6 +114,7 @@ class Engine:
         for tid in [t["id"] for t in self.store.tickets({TicketState.OPEN, TicketState.WAITING})]:
             self.drive(tid)
         self.expire_asks()
+        self.eval_stage()
         self.outbox.flush()
 
     def handle_trigger(self, t, trigger_id):
@@ -96,6 +126,10 @@ class Engine:
                 trigger_id, Decision(Verdict.FANOUT, gate.admit(t, self.policy, True),
                                      f"delivered to ticket(s) {live}"), live[0])
             return
+        if self.main is not None and gate.admit(t, self.policy, False) is Strength.INFERRED:
+            self.store.enqueue_eval(trigger_id, self.clock())       # the model decides; no decision yet
+            self.note("queued_for_model", trigger=trigger_id)
+            return
         d = gate.evaluate(t, self.policy, self.assessor, False)
         if d.verdict is Verdict.ACCEPT:
             tid, _ = self.store.new_ticket(t.source, t.thread, d.strength, self.paths)
@@ -106,6 +140,66 @@ class Engine:
             self.note("ticket_opened", ticket=tid)
         else:
             self.store.record_decision(trigger_id, d)
+
+    # ------------------------------------------------------------------ the model's share
+    def eval_stage(self):
+        """Hand pending candidates to the model session in batches, and apply its answers. Never waits."""
+        if self.main is None:
+            return
+        sent = self.store.sent_batch()
+        if sent is not None and self.clock() - sent["sent_at"] > self.eval_timeout:
+            # Past the deadline: give up BEFORE looking at anything the model sent, so a late answer
+            # that happens to be waiting in the queue cannot open a ticket either.
+            self.note("eval_timeout", batch=sent["id"])
+            self.main.stop()
+            self.store.requeue_eval(sent["id"], "timeout")
+            return
+        for ev in self.main.poll():
+            self.on_main_event(ev)
+        if self.store.sent_batch() is not None:
+            return
+        items = self.store.peek_eval_items(self.batch_max)
+        if not items or self.clock() < self.main_retry_at:
+            return
+        if len(items) < self.batch_min and self.clock() - items[0]["ts"] < self.batch_wait:
+            return
+        if not self.main.ensure_running():
+            self.note("main_cannot_start", why=self.main.last_error)
+            self.main_retry_at = self.clock() + 30.0
+            return
+        text = ms.build_batch_text(items, self.policy.rules, self.card_cap)
+        batch_id = self.store.create_eval_batch([i["trigger_id"] for i in items], text,
+                                                self.main.generation, self.clock())
+        self.fault("after_batch_commit")
+        if not self.main.submit(batch_id, text):
+            self.store.requeue_eval(batch_id, "the model session is not running")
+
+    def on_main_event(self, ev):
+        batch = self.store.eval_batch(ev.batch_id)
+        if batch is None or batch["state"] != "sent":
+            return                                                  # an answer to a batch that is no longer in flight
+        if ev.kind == "failed":
+            self.store.requeue_eval(ev.batch_id, ev.text)
+            self.note("batch_failed", batch=ev.batch_id, why=ev.text)
+            return
+        ids = self.store.eval_batch_items(ev.batch_id)
+        self.note("model_reply", batch=ev.batch_id, text=ev.text[:2000])
+        parsed = ms.parse_reply(ev.text, ids)
+        if not parsed.valid_json:
+            self.store.requeue_eval(ev.batch_id, "unreadable reply")
+            self.note("batch_failed", batch=ev.batch_id, why="unreadable reply", errors=parsed.errors)
+            return
+        try:
+            report = self.store.finish_eval(ev.batch_id, parsed.ok, self.policy, self.paths, self._opened_by_model)
+        except StaleBatch as e:
+            self.note("batch_stale", batch=ev.batch_id, why=str(e))
+            return
+        self.note("batch_done", batch=ev.batch_id, **report)
+
+    def _opened_by_model(self, trig, ticket_id):
+        self.store.enqueue_input(ticket_id, trig["id"], f"{ticket_id}:{trig['id']}")
+        self.outbox.enqueue(ticket_id, f"Ticket {ticket_id} opened for this request.")
+        self.note("ticket_opened", ticket=ticket_id, by="model")
 
     def drive(self, ticket_id):
         run = self.runs.get(ticket_id)
@@ -270,6 +364,10 @@ class Engine:
             run.executor.stop()
             self.store.end_run(tid, run.pid)
         self.store.recover_inflight()
+        if self.main is not None:
+            self.main.stop()
+            for b in self.store.sent_batches():
+                self.store.requeue_eval(b["id"], "orchestrator stopped", count=False)
 
     # ------------------------------------------------------------------ views
     def status(self):
@@ -282,4 +380,8 @@ class Engine:
             "open_asks": [{"ask_id": a["ask_id"], "ticket": a["ticket_id"], "what": a["what"]}
                           for a in self.store.open_asks()],
             "outbox": {s: len(self.store.outbox_rows(s)) for s in ("pending", "sent", "failed")},
+            "eval": self.store.eval_counts(),
+            "model_session": None if self.main is None else {
+                "generation": self.main.generation, "alive": self.main.alive, "busy": self.main.busy,
+                "last_error": self.main.last_error},
         }

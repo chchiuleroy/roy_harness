@@ -19,7 +19,8 @@ from . import lifecycle
 from .control import Channel
 from .engine import Engine
 from .executor import ExecutorConfig, HarnessExecutor
-from .gate import Policy, RuleAssessor
+from .gate import Policy, Rule, RuleAssessor
+from .main_session import BATCH_MAX, CARD_CAP, MainSession
 from .sources import FileInbox, FileSink
 from .store import AskRejected, Store, StoreLocked
 
@@ -30,14 +31,38 @@ def build_engine(args, store):
     cfg = ExecutorConfig(
         provider=args.provider, base_url=args.base_url, model=args.model,
         api_key=os.environ.get("SUPERAGENT_API_KEY", ""), backoff=args.backoff)
+    rules = []
+    for text in args.rule:
+        name, sep, instruction = text.partition("=")
+        if not sep:
+            raise SystemExit(f"--rule needs NAME=description, got {text!r}")
+        try:
+            rules.append(Rule(name.strip(), instruction.strip()))
+        except ValueError as e:
+            raise SystemExit(f"--rule: {e}")
     policy = Policy(allowed_senders=frozenset(filter(None, args.allow.split(","))),
                     bot_senders=frozenset(filter(None, args.bots.split(","))),
-                    accept_mode=args.accept_mode)
+                    accept_mode=args.accept_mode, rules=tuple(rules))
     home = store.home
     inbox = FileInbox(args.inbox or os.path.join(home, "inbox"))
     sink = FileSink(args.outbox or os.path.join(home, "outbox"))
-    return Engine(store, inbox, sink, policy, RuleAssessor(), lambda tid: HarnessExecutor(cfg),
-                  ask_timeout=args.ask_timeout, max_running=args.max_running)
+    main = None
+    if args.assessor == "model":
+        main_cfg = ExecutorConfig(
+            provider=args.provider, base_url=args.main_base_url or args.base_url,
+            model=args.main_model or args.model, api_key=os.environ.get("SUPERAGENT_API_KEY", ""),
+            backoff=args.backoff)
+        main = MainSession(main_cfg, policy, home, lambda label: HarnessExecutor(main_cfg),
+                           reset_every=args.main_reset_batches)
+    if args.main_reset_batches < 1:
+        raise SystemExit("--main-reset-batches must be 1 or more")
+    try:
+        return Engine(store, inbox, sink, policy, RuleAssessor(), lambda tid: HarnessExecutor(cfg),
+                      ask_timeout=args.ask_timeout, max_running=args.max_running, main=main,
+                      batch_max=args.batch_max, batch_min=args.batch_min, batch_wait=args.batch_wait,
+                      eval_timeout=args.eval_timeout)
+    except ValueError as e:
+        raise SystemExit(f"--assessor model: {e}")
 
 
 def dispatch(engine, ch, name, cmd):
@@ -101,6 +126,10 @@ def cmd_status(args):
         "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
         "running": lifecycle.running(args.home),
     }
+    try:                                   # homes made before the model session have no such table
+        out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
+    except sqlite3.OperationalError:
+        pass
     print(json.dumps(out, indent=1, ensure_ascii=False))
     return 0
 
@@ -135,6 +164,18 @@ def main(argv=None):
     r.add_argument("--backoff", type=float, default=1.0)
     r.add_argument("--ask-timeout", type=float, default=3600.0)
     r.add_argument("--max-running", type=int, default=4)
+    r.add_argument("--assessor", choices=("rules", "model"), default="rules",
+                   help="who judges messages that are not direct requests: keyword rules (default) or a model session")
+    r.add_argument("--rule", action="append", default=[], metavar="NAME=DESCRIPTION",
+                   help="a proactive rule for the model to match (repeatable; name: a-z, 0-9, -)")
+    r.add_argument("--batch-max", type=int, default=BATCH_MAX)
+    r.add_argument("--batch-min", type=int, default=1)
+    r.add_argument("--batch-wait", type=float, default=3.0)
+    r.add_argument("--eval-timeout", type=float, default=180.0)
+    r.add_argument("--main-reset-batches", type=int, default=1,
+                   help="start a fresh model session every N batches (1 = every batch; larger keeps context between batches)")
+    r.add_argument("--main-model")
+    r.add_argument("--main-base-url")
     sub.add_parser("status")
     a = sub.add_parser("answer")
     a.add_argument("ask_id", type=int)
