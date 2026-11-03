@@ -1,14 +1,27 @@
 # roy_harness
 
-一個給本機模型用的 coding agent 外殼（harness）：把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復，以及一個網頁 GUI。
+兩樣東西放在同一個 repo，彼此獨立：
 
-- 只用 Python 標準函式庫，零依賴；主程式 [`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 2,000 行）。
-- 另有一個**可選、可整個拿掉**的疊加層 [`src/superagent/`](docs/superagent.md)：讓外部事件自己開工單、交給隔離的 harness 子行程做、把結果送回來（見下方〈疊加層：superagent〉）。不用它，harness 一個字都不會變。
+- **harness**：一個給本機模型用的 coding agent 外殼。把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復，以及一個網頁 GUI。
+- **superagent**：疊在 harness 之上、**可選也可整個拿掉**的編排層。讓外部事件自己開工單，交給隔離的 harness 子行程去做，把結果送回來，做完的工單閒置後自己結束、有人再發言就重開。
+
+> 這是教學／實驗用的程式，不是產品。harness 的 `shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。
+
+## 先看哪裡
+
+| 我想… | 看這裡 |
+|---|---|
+| 在本機模型上跑一個 coding agent | 〈一、harness〉的「快速開始」 |
+| 用網頁操作、貼圖給模型看 | 〈一、harness〉的「網頁 GUI」、[docs/images-and-gui.md](docs/images-and-gui.md) |
+| 讓外部事件自動開工單並回覆 | 〈二、疊加層：superagent〉、[docs/superagent.md](docs/superagent.md) |
+| 知道哪些東西實測過、哪些沒有 | 〈三、測試與驗證〉、〈四、已知限制〉 |
+
+- 只用 Python 標準函式庫，零依賴；harness 主程式 [`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 2,000 行）。
 - 本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字是 CC BY-NC-ND，不可改作）。上游：[IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。
 
-> 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。
+## 一、harness
 
-## 快速開始
+### 快速開始
 
 ```bash
 export VLLM_BASE_URL=http://localhost:8000/v1          # 你的端點（或寫進 .harness.env）
@@ -39,7 +52,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 - 明文 `http://` 送金鑰一律拒絕（託管 provider 只允許 localhost；自架 provider 沒帶金鑰才可用內網 http）；要接受風險請設 `HARNESS_ALLOW_HTTP=1`。**所有模型請求都不跟隨 HTTP 重新導向**（urllib 會把 `Authorization` 帶過去）。
 - 細節（各家送出的欄位、`/cache` 的指標來源）見 [docs/reference.md](docs/reference.md)。
 
-## 它做了什麼
+### 它做了什麼
 
 | | |
 |---|---|
@@ -78,7 +91,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 完整清單與統計欄位（`/stats`）見 [docs/reference.md](docs/reference.md)。
 
-## 網頁 GUI
+### 網頁 GUI
 
 ```bash
 python src/harness/harness_gui.py     # 印出帶 token 的網址並開瀏覽器；--port（預設 8791）、--no-browser
@@ -86,13 +99,13 @@ python src/harness/harness_gui.py     # 印出帶 token 的網址並開瀏覽器
 
 多個 session 分頁與續跑、核准卡片、背景任務面板、模式切換，可以貼上或拖進圖片。每個 session 是一個子行程 `harness_vllm.py --jsonl`；只綁 `127.0.0.1`，每次啟動隨機 token、檢查 `Host`／`Origin`、CSP。**token 外洩等於交出執行權**，重啟伺服器才換新。架構、限制與測試過程見 [docs/images-and-gui.md](docs/images-and-gui.md)。
 
-## 圖片
+### 圖片
 
 `view_image(path)` 讓模型看圖：session 只存參照（不存位元組），組請求時才讀檔並驗 sha256，只送最近 3 張；從檔頭判斷格式，上限 5 MB、3840×2160。預設只對 `vllm` 開；託管的第三方 provider 每張圖都會問你。
 
-## 疊加層：superagent（可選、可拔除）
+## 二、疊加層：superagent
 
-harness 一次只服務一個 session。`superagent` 把它包成「事件 → 工單 → 做事 → 回覆」的迴圈，設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型（Trigger／Thread／Ticket／Mandate、訂閱透傳、observe→auto 的灰度、先落庫再動作）。**這是研究／實驗用的實作，不是產品。**
+harness 一次只服務一個 session。`superagent` 把它包成「事件 → 工單 → 做事 → 回覆」的迴圈。**這是研究／實驗用的實作，不是產品。**
 
 ```
 inbox/*.json ─► 准入（確定性）─► Ticket：一個目錄＋一個 session＋一個 harness 子行程（safe 模式）
@@ -113,20 +126,24 @@ python -X utf8 -m superagent --home <資料夾> run --allow alice \
 python -X utf8 -m superagent --home <資料夾> status
 ```
 
-**限制**：只在 Windows 11 測過；除一個 live 測試外都用腳本化的假模型端點；真模型只做過單次、單一模型、少量樣本的端到端；來源只有本機檔案收件匣，沒有 GitHub／飛書，也沒有 Watchdog 或遠端 daemon。完整說明、事件檔格式、Outbox 契約（`executor_output` 的文字是**資料，不是指令**）與限制清單見 [docs/superagent.md](docs/superagent.md)。
+**和 DeepSeek 的 Super-agent 原型的關係**：設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型（Trigger／Thread／Ticket／Mandate、訂閱透傳、observe→auto 的灰度、先落庫再動作），但這是**另一份 Python 實作**，沒有複製其程式碼，也和它不相容：原型是 TypeScript、打包成 DeepSeek Harness 的 bundle，來源是 GitHub／飛書；這裡的執行端是本 repo 的 harness，來源目前只有本機檔案收件匣。
 
-## 測試
+**限制**：只在 Windows 11 測過；除兩個 live 測試外都用腳本化的假模型端點；真模型只做過單次、單一模型、少量樣本的端到端；沒有 GitHub／飛書來源，也沒有 Watchdog 或遠端 daemon。完整說明、事件檔格式、Outbox 契約（`executor_output` 的文字是**資料，不是指令**）與限制清單見 [docs/superagent.md](docs/superagent.md)。
+
+## 三、測試與驗證
 
 ```bash
 python -X utf8 -m unittest discover -s tests          # 離線
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests   # 加上打真實伺服器的 live 測試
-SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模型的端到端（C5）
+SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模型的端到端（模型判斷＋整個工單迴圈，兩個測試）
 SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 superagent 後結果不變」檢查
 ```
 
 2026-11-03 在作者機器上（含 `SUPERAGENT_REMOVAL=1`）：**785 項 OK、略過 26 項**，全程約 870 秒，單次執行（主要是 live 測試，其中兩個是 superagent 的，另加一項需要符號連結權限的測試，作者的機器沒有，從未實跑）。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
-## 已知限制
+## 四、已知限制
+
+**harness**
 
 - **沒有 OS 級 sandbox**：shell 指令仍可讀寫專案外的檔案；寫入限制與環境清理是行程內的強制。
 - 保護 `AGENT.md`、hook／MCP 設定、skills 資料夾，對 shell 只是字串比對，**可被刻意混淆**（例如用變數分段組檔名）。
@@ -134,7 +151,11 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 - 除了 `vllm`，其他 provider 只做了離線測試；模型回應與 `/cache` 的回應沒有大小上限。
 - 白名單與風險字串偏 Windows／cmd；沒有在 POSIX 實跑過。
 - GUI：同一個瀏覽器開 6 個以上「執行中」的 session 會用光連線；「停止」是強制結束、不能只中斷一輪。
-- superagent：見上一節；Ticket 的行程仍以你的 OS 帳號執行，`safe` 模式靠人答 `y` 把關，不是隔離。
+
+**superagent**
+
+- Ticket 的行程仍以你的 OS 帳號執行，`safe` 模式靠人答 `y` 把關，不是隔離。
+- 只在 Windows 11 測過；真模型端到端只有單次；來源只有本機收件匣。其餘見上一節與 [docs/superagent.md](docs/superagent.md)。
 
 完整清單見 [docs/reference.md](docs/reference.md)。
 
@@ -146,7 +167,7 @@ src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）�
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
-docs/          從 README 拆出的詳細文件（原文未改）
+docs/          詳細文件：harness 的細節（從 README 拆出，原文未改）與 superagent.md
 ```
 
 ## 出處與授權
