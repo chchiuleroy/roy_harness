@@ -252,6 +252,49 @@ class TestAnswerable(StoreCase):
             self.s.answerable(a)
 
 
+class TestOlderDatabase(unittest.TestCase):
+    def make_old_home(self, d):
+        """A home as the first version created it: the ask table has no `confirmed` column."""
+        import sqlite3
+        from superagent import store as store_mod
+        old = store_mod.SCHEMA.replace("ts REAL NOT NULL,\n  confirmed INTEGER NOT NULL DEFAULT 0);",
+                                       "ts REAL NOT NULL);")
+        self.assertNotEqual(old, store_mod.SCHEMA, "the test no longer builds the old schema")
+        db = sqlite3.connect(os.path.join(d, "state.sqlite"))
+        db.executescript(old)
+        db.execute("INSERT INTO ticket(id, source, thread, state, created) VALUES(1,'s','t','open',1.0)")
+        db.execute("INSERT INTO ask(ticket_id, run_gen, rid, what, what_sha, state, ts) "
+                   "VALUES(1,1,'q1','dir','x','answered',1.0)")
+        db.commit()
+        db.close()
+
+    def test_a_home_made_by_the_first_version_is_upgraded_not_broken(self):
+        """Found by review: the new `confirmed` column was only in CREATE TABLE IF NOT EXISTS, so an
+        existing home failed with 'no such column' the first time an answer was confirmed."""
+        with tempfile.TemporaryDirectory() as d:
+            self.make_old_home(d)
+            with Store(d) as s:
+                cols = {r["name"] for r in s._q("PRAGMA table_info(ask)")}
+                self.assertIn("confirmed", cols)
+                self.assertEqual(s.ask(1)["confirmed"], 1, "old history must not look like an unseen answer")
+                s.confirm_answers(1)                          # the statement that used to fail
+                self.assertEqual(s.end_run(1, 99), [])
+                g = s.start_run(1, 100, 1.0, "w")
+                a = s.add_ask(1, g, "q1", "dir")
+                self.assertEqual(s.ask(a)["confirmed"], 0)
+            with Store(d) as s:                               # and a second open changes nothing
+                self.assertEqual(s.ask(1)["confirmed"], 1)
+
+    def test_a_new_home_needs_no_upgrade(self):
+        with tempfile.TemporaryDirectory() as d:
+            with Store(d) as s:
+                g = None
+                tid, _ = s.new_ticket("s", "t", Strength.EXPLICIT, lambda i: ("c", "s", "c"))
+                g = s.start_run(tid, 1, 1.0, "c")
+                a = s.add_ask(tid, g, "q1", "dir")
+                self.assertEqual(s.ask(a)["confirmed"], 0)
+
+
 class TestSingleWriter(StoreCase):
     def test_other_threads_cannot_use_the_store(self):
         """SQLite writes are only serialised if one thread owns them; a reader thread that

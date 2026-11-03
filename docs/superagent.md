@@ -65,8 +65,8 @@ python -X utf8 -m superagent --home C:/Users/roy/superagent_home down --mode pur
 - 並行上限 `--max-running`（預設 4）只限制同時啟動的 harness 行程數，沒有為「人的追問」預留名額。
 - `ask_timeout` 內若 orchestrator 不在線，逾時不會發生（逾時由 engine 的每一輪檢查）。
 - 清除時殘留的孫行程（`cmd.exe` 的子行程）若其父行程已先死，命令列不含 home，掃描找不到；正常停機走 `taskkill /T` 不受影響。緊急掃描只認「命令列同時含 home、`--jsonl`、`harness_vllm`」的行程，這是刻意收窄，寧可漏掉也不誤殺。
-- 答案送達才算數：`answer` 在寫進 harness 的管線成功之後才把問題標成已答；寫入失敗時問題仍開著，可以再答一次。管線寫入成功不代表 harness 已讀到，所以只要 harness 之後回報任何進展（工具結果、回合結束、下一個問題）才算「確認收到」；若它在那之前就結束，這筆答案改標 orphaned，狀態不會謊稱已答。
+- 答案送達才算數：`answer` 在寫進 harness 的管線成功之後才把問題標成已答；寫入失敗時問題仍開著，可以再答一次。管線寫入成功不代表 harness 已讀到，所以只要 harness 在**答案寫入之後**回報任何進展（工具結果、回合結束、下一個問題）才算「確認收到」（答案寫入時佇列裡已有的事件不算，它們不可能是這個答案的結果）；若它在那之前就結束，這筆答案改標 orphaned，狀態不會謊稱已答。
 - `run` 啟動時取 home 鎖會等最多 1 秒（`status` 與 `down` 探測鎖時會瞬間佔住它）；真的有第二個 orchestrator 時，等完仍失敗並以退出碼 3 結束。
-- 資料庫的舊紀錄不會被刪除，會一直成長。
+- 資料庫的舊紀錄不會被刪除，會一直成長。舊版本建立的 home 在 `Store.open()` 時會自動補上新增的欄位（目前只有 `ask.confirmed`），不需手動遷移。
 - 沒有 Watchdog、BYOM／daemon、Chain of Recall、模型 Main、GitHub／飛書 Source。
 - 所有測試用腳本化的假模型端點；**對真實模型的端到端（C5）尚未做**。

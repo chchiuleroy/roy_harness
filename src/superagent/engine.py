@@ -31,6 +31,7 @@ class _Run:
         self.ticket_id, self.executor, self.run_gen, self.pid = ticket_id, executor, run_gen, pid
         self.started = time.time()
         self.turns = 0
+        self.skip_confirm = 0      # events already queued when an answer was written: they cannot be its consequence
 
 
 class Engine:
@@ -180,11 +181,14 @@ class Engine:
                 ev = q.get_nowait()
             except Exception:
                 break
+            stale = run.skip_confirm > 0                            # queued before the last answer was written
+            if stale:
+                run.skip_confirm -= 1
             kind = ev.get("kind")
             if ev.get("_pid") not in (None, run.pid):
                 continue                                            # a late event of an older process
-            if kind in ("tool_result", "turn_end", "ask"):
-                self.store.confirm_answers(run.ticket_id)          # progress proves the answer arrived
+            if kind in ("tool_result", "turn_end", "ask") and not stale:
+                self.store.confirm_answers(run.ticket_id)          # progress AFTER the answer proves it arrived
             if kind == "turn_end":
                 run.turns += 1
                 self.deaths.pop(run.ticket_id, None)
@@ -234,8 +238,10 @@ class Engine:
         run = self.runs.get(row["ticket_id"])
         if run is None or run.run_gen != row["run_gen"] or not run.executor.alive:
             raise AskRejected(f"question {ask_id} has no live process")
+        queued = run.executor.events.qsize()                      # everything in the queue predates the answer
         if not run.executor.answer(row["rid"], bool(yes)):       # delivered, or it stays open
             raise AskRejected(f"question {ask_id}: the answer could not be delivered; try again")
+        run.skip_confirm = queued
         self.store.mark_answered(ask_id)
         self.note("answered", ticket=row["ticket_id"], ask_id=ask_id, yes=bool(yes))
 
