@@ -174,6 +174,46 @@ class TestOutbox(unittest.TestCase):
         self.assertEqual(self.store.outbox_rows("failed")[0]["attempts"], MAX_ATTEMPTS)
         self.assertEqual(ob.flush(), 0)
 
+    def test_a_row_queued_before_messages_had_a_kind_is_sent_as_a_status(self):
+        """Found by review: a home from before Slice 3 can hold pending rows with no `kind`. The
+        contract says every message has one, so such a row is a status message (the only kind
+        there was) when it goes out."""
+        self.store.outbox_enqueue(self.tid, {"ticket_id": self.tid, "text": "old style"})
+        Outbox(self.store, FileSink(self.out)).flush()
+        bodies = [self.read(n) for n in self.files()]
+        self.assertEqual([(b["kind"], b["text"]) for b in bodies], [("status", "old style")])
+
+    def test_a_text_the_file_cannot_hold_fails_that_message_and_not_the_engine(self):
+        """A lone surrogate (a model can emit one through a JSON escape) cannot be written as UTF-8.
+        It used to raise out of flush() on every pass; now it is a failed try like a full disk, and
+        the next message still goes out."""
+        bad = self.store.outbox_enqueue(self.tid, {"kind": "executor_output", "ticket_id": self.tid,
+                                                    "text": "x\ud800y"})[1]
+        ob = Outbox(self.store, FileSink(self.out))
+        good = ob.enqueue(self.tid, "fine")
+        for _ in range(MAX_ATTEMPTS):
+            ob.flush()
+        self.assertEqual({r["msg_id"] for r in self.store.outbox_rows("failed")}, {bad})
+        self.assertEqual({r["msg_id"] for r in self.store.outbox_rows("sent")}, {good})
+        self.assertEqual(self.files(), [f"{good}.json"])
+
+    def test_a_row_that_cannot_be_read_is_a_failed_try_and_blocks_nothing(self):
+        """Found by the second review: a damaged or hand-made payload (not JSON, or JSON that is not
+        an object) raised out of flush() on every pass, never counted a try, and kept everything
+        behind it from going out."""
+        bad = []
+        for text in ("{not json", "[1, 2]", "null", '"just a string"'):
+            row_id, msg_id = self.store.outbox_enqueue(self.tid, {})
+            self.store.db.execute("UPDATE outbox SET payload=? WHERE id=?", (text, row_id))
+            bad.append(msg_id)
+        ob = Outbox(self.store, FileSink(self.out))
+        good = ob.enqueue(self.tid, "still goes out")
+        for _ in range(MAX_ATTEMPTS):
+            ob.flush()
+        self.assertEqual({r["msg_id"] for r in self.store.outbox_rows("failed")}, set(bad))
+        self.assertEqual({r["msg_id"] for r in self.store.outbox_rows("sent")}, {good})
+        self.assertEqual(self.store.outbox_rows("pending"), [])
+
     def test_file_name_carries_the_msg_id(self):
         """Without the id in the name a recovery write would make a second, differently named
         file for the same reply."""

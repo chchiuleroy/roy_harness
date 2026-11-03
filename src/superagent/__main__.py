@@ -60,9 +60,9 @@ def build_engine(args, store):
         return Engine(store, inbox, sink, policy, RuleAssessor(), lambda tid: HarnessExecutor(cfg),
                       ask_timeout=args.ask_timeout, max_running=args.max_running, main=main,
                       batch_max=args.batch_max, batch_min=args.batch_min, batch_wait=args.batch_wait,
-                      eval_timeout=args.eval_timeout)
+                      eval_timeout=args.eval_timeout, idle_end=args.idle_end)
     except ValueError as e:
-        raise SystemExit(f"--assessor model: {e}")
+        raise SystemExit(f"invalid setting: {e}")
 
 
 def dispatch(engine, ch, name, cmd):
@@ -164,6 +164,8 @@ def main(argv=None):
     r.add_argument("--backoff", type=float, default=1.0)
     r.add_argument("--ask-timeout", type=float, default=3600.0)
     r.add_argument("--max-running", type=int, default=4)
+    r.add_argument("--idle-end", type=float, default=600.0,
+                   help="seconds of inactivity after which a ticket with nothing left to do ends and frees its slot")
     r.add_argument("--assessor", choices=("rules", "model"), default="rules",
                    help="who judges messages that are not direct requests: keyword rules (default) or a model session")
     r.add_argument("--rule", action="append", default=[], metavar="NAME=DESCRIPTION",

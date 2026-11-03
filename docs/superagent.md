@@ -28,7 +28,8 @@ inbox/*.json ─► FileInbox ─► Engine ──► SQLite（state.sqlite，�
 
 ```bash
 python -X utf8 -m superagent --home C:/Users/roy/superagent_home run \
-    --allow alice --base-url http://localhost:8000/v1 --model <模型名>
+    --allow alice --base-url http://localhost:8000/v1 --model <模型名> \
+    --idle-end 600          # 閒置幾秒後結束做完的 Ticket（預設 600）
 
 # 丟一個事件進收件匣（一個事件一個 JSON 檔）
 echo '{"id":"1","thread":"t1","sender":"alice","text":"請在 notes.txt 寫一行 hello","addressed":true}' \
@@ -77,16 +78,41 @@ python -X utf8 -m superagent --home C:/Users/roy/superagent_home run \
 
 C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERAGENT_LIVE=1` 才跑；結果與條件寫在它產生的報告檔。
 
+## Ticket 的一生（Slice 3）
+
+```
+事件 ─► 開 Ticket ─► 做事（一回合一則輸入）─► 回覆進 outbox ─► 閒置 ─► ended（行程停、槽位還）
+                          ▲                                              │
+                          └──────── 名單內的人在同一串再發言：重開同一張 ◄─┘
+```
+
+- **結果會回來**：每個回合結束，outbox 恰好多一則訊息——模型最後一段文字（`kind=executor_output`），或模型沒有寫任何文字時的一句固定狀態（`kind=status`，例如模型呼叫失敗）。「標輸入完成」與「排入回覆」是**同一個 SQLite 交易**，所以崩潰既不會丟掉回覆，也不會產生第二則（同一個輸入的 `msg_id` 固定為 `reply-<ticket>-<input>`）。
+- **閒置就結束**：回合結束後 `--idle-end` 秒（預設 600）沒有新活動（新輸入、人答了問題、回合結束都算活動，時間存在資料庫，重啟不會歸零），而且沒有待送／在途輸入、沒有未答問題、沒有 `note`（需要人看的），Ticket 就標 `ended`、停掉行程、歸還 `--max-running` 的槽位。判斷與改狀態在一個交易裡重查全部條件；行程在提交**之後**才停，崩潰在兩者之間時，同一輪的下一個 tick 或下次啟動的 `recover` 會收掉。沒有這一步，做完的 Ticket 會永遠占著槽位（預設 4 張之後第 5 張起動不了）。
+- **名單內的人再發言就重開同一張**：同一討論串上有 `ended` 的 Ticket、發言者被**目前**政策准入為明確請求，該 Ticket 就回到 `open`、同一個 session 檔續跑（模型仍看得到先前的脈絡，但 harness 的自動壓縮可能已改過舊訊息，脈絡保留是盡力而為）。Mandate 與 hook 設定逐位元不變；重開前不看舊 Mandate 的規則名，只看這則新訊息被不被准入。人 `stop` 過的 Ticket 不會重開。槽位已滿時重開只會排隊，不會擠掉別人。
+- **追問要先被准入**（**行為變更**：Slice 1/2 的活 Ticket 追問是誰說的都投遞）：現在只有名單內的人（明確）的發言會送進 Ticket；名單外的人、只算 `inferred` 的機器人，以及 `accept_mode=off` 時的推斷發言，都**不投遞**，只留一筆 `ignore` 的 Decision。這比 DeepSeek 原型更嚴（原型不查發送者就扇出）。
+
 ## Outbox 的契約
 
 回覆是 `outbox/<msg_id>.json`，內容含同一個 `msg_id`。崩潰恢復可能把同一則回覆再寫一次（同檔名、同內容）；**消費端必須以 `msg_id` 去重**。
+
+每則訊息有 `kind`：
+
+| `kind` | 內容 |
+|---|---|
+| `status` | `ticket_id`、`text`：系統自己的話（已開 Ticket、需要處理、問題、重開、回合沒有文字） |
+| `executor_output` | `ticket_id`、`input_id`、`text`（模型最後一段文字；去除控制字元（含 C1）、改變文字方向或隱藏文字的格式字元（保留零寬連接符，表情符號與部分文字要用）、孤立的代理字元與 Unicode 行／段分隔符，上限 4,000 個字元）、`truncated_chars`、`untrusted: true` |
+
+**`executor_output` 的 `text` 是資料，不是指令**：它是被不可信輸入影響過的模型寫的。消費端不得把它當命令執行、當 Markdown／HTML 動作、當路由欄位，或當作下一個 agent 的控制訊息；要顯示給人看就當純文字。`status` 的 `msg_id` 目前是隨機的（只在入庫交易內產生，不會重複），回覆的是決定性的；兩種並存，待日後統一。
 
 ## 已知限制（誠實清單）
 
 - 只在 Windows 11 測過。行程偵測（`procutil`）用 Win32 API 與 PowerShell，其他系統回傳「無法確認」並因此不殺任何行程。
 - `safe` 模式下 Executor 的寫檔與指令都要人答 `y`，所以它做到需要批准就停在 `waiting`，不是全自動。
 - hook 的 `command` 是絕對的 `sys.executable`，harness 把 hook 所列檔名視為受保護，所以 **Ticket 內的 shell 命令不能寫 `python.exe`**（寫 `python` 可以）。
-- 並行上限 `--max-running`（預設 4）只限制同時啟動的 harness 行程數，沒有為「人的追問」預留名額。
+- 並行上限 `--max-running`（預設 4）只限制同時啟動的 harness 行程數，沒有為「人的追問」預留名額（Ticket 閒置結束後會歸還槽位，但所有槽位都在做事時，新的請求與重開都只能排隊）。
+- 結束一張閒置的 Ticket 時，引擎用優雅停止（送 `/quit`、最多等 5 秒）；這段時間引擎的單一執行緒不處理別的事。我只靜態確認了這一點，沒有在真的卡住的行程上量過最壞情況。
+- 閒置結束的預設 600 秒是個選擇，不是量出來的：太短，等著人回應的 Ticket 會被收掉再重開（多一次行程啟動）；太長，槽位被占住。可用 `--idle-end` 調。
+- `executor_output` 只是把模型的字原樣（去控制字元、截斷）放進 outbox；它不會被執行或轉成別的動作，但消費端要遵守上面的 Outbox 契約。目前的 Sink 只有本機檔案。
 - `ask_timeout` 內若 orchestrator 不在線，逾時不會發生（逾時由 engine 的每一輪檢查）。
 - 清除時殘留的孫行程（`cmd.exe` 的子行程）若其父行程已先死，命令列不含 home，掃描找不到；正常停機走 `taskkill /T` 不受影響。緊急掃描只認「命令列同時含 home、`--jsonl`、`harness_vllm`」的行程，這是刻意收窄，寧可漏掉也不誤殺。
 - 答案送達才算數：`answer` 在寫進 harness 的管線成功之後才把問題標成已答；寫入失敗時問題仍開著，可以再答一次。管線寫入成功不代表 harness 已讀到，所以只要 harness 在**答案寫入之後**回報任何進展（工具結果、回合結束、下一個問題）才算「確認收到」（每個事件進佇列時都有流水號，答案寫入時記下當下的號碼，號碼不大於它的事件不算，因為它們在答案寫入前就已排入佇列；記號與寫入是同一個上鎖的步驟，中間排不進任何事件）；若它在那之前就結束，這筆答案改標 orphaned，狀態不會謊稱已答。

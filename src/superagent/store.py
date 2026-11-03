@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS trigger(
 CREATE TABLE IF NOT EXISTS ticket(
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, thread TEXT NOT NULL, state TEXT NOT NULL,
   run_gen INTEGER NOT NULL DEFAULT 0, cwd TEXT, session TEXT, created REAL NOT NULL,
-  note TEXT);
+  note TEXT, last_activity REAL);
 CREATE TABLE IF NOT EXISTS mandate(
   ticket_id INTEGER PRIMARY KEY REFERENCES ticket(id), body TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS mandate_no_update BEFORE UPDATE ON mandate
@@ -186,6 +186,12 @@ class Store:
                 # whatever an older version recorded as answered is settled history, not an
                 # answer still waiting to be seen to arrive
                 db.execute("UPDATE ask SET confirmed=1")
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(ticket)")}
+        if "last_activity" not in cols:
+            with self.tx() as db:
+                db.execute("ALTER TABLE ticket ADD COLUMN last_activity REAL")
+                # history is not recounted: an older ticket counts as last active when it was made
+                db.execute("UPDATE ticket SET last_activity=created")
 
     def close(self):
         if self.db is not None:
@@ -285,12 +291,13 @@ class Store:
         return self._q("SELECT * FROM decision ORDER BY id")
 
     # ---------------------------------------------------------------- tickets, mandates
-    def new_ticket(self, source, thread, strength, paths_fn, matched_rules=()):
+    def new_ticket(self, source, thread, strength, paths_fn, matched_rules=(), now=None):
         """Create a ticket and its immutable mandate in one transaction.
         paths_fn(ticket_id) -> (cwd, session_file, root_realpath). -> (ticket_id, Mandate)"""
+        now = time.time() if now is None else now
         with self.tx() as db:
-            cur = db.execute("INSERT INTO ticket(source, thread, state, created) VALUES(?,?,?,?)",
-                             (source, thread, TicketState.OPEN.value, time.time()))
+            cur = db.execute("INSERT INTO ticket(source, thread, state, created, last_activity) VALUES(?,?,?,?,?)",
+                             (source, thread, TicketState.OPEN.value, now, now))
             tid = cur.lastrowid
             cwd, session, root = paths_fn(tid)
             db.execute("UPDATE ticket SET cwd=?, session=? WHERE id=?", (cwd, session, tid))
@@ -318,6 +325,25 @@ class Store:
         return [r["id"] for r in self._q("SELECT id, state FROM ticket WHERE source=? AND thread=?",
                                          (source, thread)) if r["state"] in live]
 
+    def ended_tickets_on(self, source, thread):
+        """Ids of the ended tickets of a thread, the most recently active first. A ticket a person
+        stopped is never in the list: a stop is final."""
+        return [r["id"] for r in self._q(
+            "SELECT id FROM ticket WHERE source=? AND thread=? AND state=? "
+            "ORDER BY COALESCE(last_activity, created) DESC, id DESC",
+            (source, thread, TicketState.ENDED.value))]
+
+    def reopen_ticket(self, ticket_id, trigger_id, delivery_key, now=None):
+        """ENDED -> OPEN and the message that woke it queued, in one transaction. -> the input id,
+        or None when the ticket is not ended (nothing changes). The mandate is not touched: it is
+        what the ticket was allowed to do when it began, and it still is."""
+        with self.tx() as db:
+            cur = db.execute("UPDATE ticket SET state=? WHERE id=? AND state=?",
+                             (TicketState.OPEN.value, ticket_id, TicketState.ENDED.value))
+            if cur.rowcount != 1:
+                return None
+            return self.enqueue_input(ticket_id, trigger_id, delivery_key, now)
+
     def set_ticket_state(self, ticket_id, state):
         with self.tx() as db:
             if self.ticket(ticket_id)["state"] == TicketState.STOPPED.value \
@@ -326,18 +352,50 @@ class Store:
             db.execute("UPDATE ticket SET state=? WHERE id=?", (state.value, ticket_id))
             return True
 
+    def end_ticket_if_idle(self, ticket_id, now, idle_end):
+        """OPEN -> ENDED when the ticket has nothing left to do and has been idle for `idle_end`
+        seconds: no note (nobody has to look at it), no input waiting, sent or to be replayed, no
+        question open. Everything is checked again inside the transaction, so a message that
+        arrived a moment ago cannot be ended over. -> True when it ended."""
+        with self.tx() as db:
+            t = self.ticket(ticket_id)
+            if t is None or t["state"] != TicketState.OPEN.value or t["note"]:
+                return False
+            last = t["last_activity"] if t["last_activity"] is not None else t["created"]
+            if now - last < idle_end:
+                return False
+            busy = (InputState.PENDING.value, InputState.SENT.value, InputState.REPLAY.value)
+            if self._q("SELECT 1 FROM input WHERE ticket_id=? AND state IN (?,?,?) LIMIT 1", (ticket_id,) + busy):
+                return False
+            if self.open_asks(ticket_id):
+                return False
+            db.execute("UPDATE ticket SET state=? WHERE id=? AND state=?",
+                       (TicketState.ENDED.value, ticket_id, TicketState.OPEN.value))
+            return True
+
     def set_ticket_note(self, ticket_id, note):
         with self.tx() as db:
             db.execute("UPDATE ticket SET note=? WHERE id=?", (note, ticket_id))
 
     # ---------------------------------------------------------------- the delivery ledger
-    def enqueue_input(self, ticket_id, trigger_id, delivery_key):
+    def touch_ticket(self, ticket_id, now=None):
+        """The ticket did something: new work arrived, a person answered, a turn ended. Idle time
+        is counted from here, and it is in the database so that a restart does not forget it."""
+        with self.tx() as db:
+            db.execute("UPDATE ticket SET last_activity=? WHERE id=?",
+                       (time.time() if now is None else now, ticket_id))
+
+    def enqueue_input(self, ticket_id, trigger_id, delivery_key, now=None):
         """-> input id, or None when this delivery key already exists."""
+        now = time.time() if now is None else now
         with self.tx() as db:
             cur = db.execute("INSERT OR IGNORE INTO input(ticket_id, trigger_id, delivery_key, state, ts) "
                              "VALUES(?,?,?,?,?)", (ticket_id, trigger_id, delivery_key,
-                                                   InputState.PENDING.value, time.time()))
-            return cur.lastrowid if cur.rowcount else None
+                                                   InputState.PENDING.value, now))
+            if not cur.rowcount:
+                return None
+            self.touch_ticket(ticket_id, now)
+            return cur.lastrowid
 
     def next_deliverable(self, ticket_id):
         """The oldest input that may be sent now, or None. Never while one is in flight: one
@@ -357,6 +415,25 @@ class Store:
     def mark_input(self, input_id, state):
         with self.tx() as db:
             db.execute("UPDATE input SET state=? WHERE id=?", (state.value, input_id))
+
+    def finish_turn(self, ticket_id, input_id, payload, now=None, fault=None):
+        """A turn ended: the input it was handling is DONE and its reply is queued, in ONE
+        transaction, so a crash can neither lose the reply nor leave the input done without it.
+        Succeeds only when `input_id` belongs to `ticket_id` and is SENT; otherwise nothing at all
+        changes and the answer is False. The reply row's msg_id comes from the turn, so doing this
+        twice never queues a second reply. `fault` (tests) is called just before the commit."""
+        now = time.time() if now is None else now
+        with self.tx() as db:
+            cur = db.execute("UPDATE input SET state=? WHERE id=? AND ticket_id=? AND state=?",
+                             (InputState.DONE.value, input_id, ticket_id, InputState.SENT.value))
+            if cur.rowcount != 1:
+                return False
+            db.execute("INSERT OR IGNORE INTO outbox(ticket_id, msg_id, payload, status, ts) VALUES(?,?,?,?,?)",
+                       (ticket_id, f"reply-{ticket_id}-{input_id}", json.dumps(payload), "pending", now))
+            self.touch_ticket(ticket_id, now)
+            if fault is not None:
+                fault()
+            return True
 
     def recover_inflight(self, ticket_id=None):
         """SENT -> REPLAY: the process that was handling it is gone, so it may or may not have
@@ -436,9 +513,11 @@ class Store:
             raise AskRejected(f"question {ask_id} belongs to an earlier run")
         return a
 
-    def mark_answered(self, ask_id):
+    def mark_answered(self, ask_id, now=None):
         with self.tx() as db:
             db.execute("UPDATE ask SET state=? WHERE ask_id=?", (AskState.ANSWERED.value, ask_id))
+            for r in self._q("SELECT ticket_id FROM ask WHERE ask_id=?", (ask_id,)):
+                self.touch_ticket(r["ticket_id"], now)       # a person answering is activity
 
     def claim_answer(self, ask_id):
         """answerable + mark_answered in one step. -> the ask row."""

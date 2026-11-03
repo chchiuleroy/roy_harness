@@ -3,6 +3,7 @@
 一個給本機模型用的 coding agent 外殼（harness）：把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復，以及一個網頁 GUI。
 
 - 只用 Python 標準函式庫，零依賴；主程式 [`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 2,000 行）。
+- 另有一個**可選、可整個拿掉**的疊加層 [`src/superagent/`](docs/superagent.md)：讓外部事件自己開工單、交給隔離的 harness 子行程做、把結果送回來（見下方〈疊加層：superagent〉）。不用它，harness 一個字都不會變。
 - 本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字是 CC BY-NC-ND，不可改作）。上游：[IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。
 
 > 這是教學／實驗用的 harness，不是產品。`shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與下面的安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。
@@ -89,14 +90,41 @@ python src/harness/harness_gui.py     # 印出帶 token 的網址並開瀏覽器
 
 `view_image(path)` 讓模型看圖：session 只存參照（不存位元組），組請求時才讀檔並驗 sha256，只送最近 3 張；從檔頭判斷格式，上限 5 MB、3840×2160。預設只對 `vllm` 開；託管的第三方 provider 每張圖都會問你。
 
+## 疊加層：superagent（可選、可拔除）
+
+harness 一次只服務一個 session。`superagent` 把它包成「事件 → 工單 → 做事 → 回覆」的迴圈，設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型（Trigger／Thread／Ticket／Mandate、訂閱透傳、observe→auto 的灰度、先落庫再動作）。**這是研究／實驗用的實作，不是產品。**
+
+```
+inbox/*.json ─► 准入（確定性）─► Ticket：一個目錄＋一個 session＋一個 harness 子行程（safe 模式）
+                  │                  └─ 做完 → 回覆進 outbox ─► 閒置結束 ─► 名單內的人再發言就重開同一張
+                  └─ 不是明確請求、但可能屬於某條主動規則 → 可選：交給一個「沒有任何工具」的模型判斷
+```
+
+- **只經三條線碰 harness**：子行程 `harness_vllm.py --jsonl`、每張 Ticket 目錄裡的 hook 設定、自己組的受控環境。`src/harness/` 不 import 它；刪掉 `src/superagent/`，harness 與其測試的結果逐項不變（有測試驗證）。
+- **權限不放大**：Executor 固定 `safe` 模式，寫檔與指令都要人答 `y`（`python -m superagent answer <ask_id> y|n`，永不送會變成永久授權的 `a`）；外部文字永遠先包框；hook 把 `read_file`／`write_file`／`edit_file` 限在 Ticket 目錄，並否決 `agent`／`skill`／MCP 等工具（shell 指令不限路徑，靠人答 `y` 把關）。
+- **模型只在「推斷候選」時出現**（`--assessor model`，預設關；預設 `observe` 只記「本來會接受」，不開工單），且它沒有工具、只回一個 JSON，後果由程式碼決定。
+- **崩潰可續**：一個事件的入庫、決定、開 Ticket、排入輸入是同一個 SQLite 交易；回覆與「輸入完成」也是；投遞是至少一次。
+
+```bash
+cd src
+python -X utf8 -m superagent --home <資料夾> run --allow alice \
+    --base-url http://localhost:8000/v1 --model <模型名>
+# 丟事件進 <資料夾>/inbox/（一個事件一個 JSON 檔）；結果在 <資料夾>/outbox/
+python -X utf8 -m superagent --home <資料夾> status
+```
+
+**限制**：只在 Windows 11 測過；除一個 live 測試外都用腳本化的假模型端點；真模型只做過單次、單一模型、少量樣本的端到端；來源只有本機檔案收件匣，沒有 GitHub／飛書，也沒有 Watchdog 或遠端 daemon。完整說明、事件檔格式、Outbox 契約（`executor_output` 的文字是**資料，不是指令**）與限制清單見 [docs/superagent.md](docs/superagent.md)。
+
 ## 測試
 
 ```bash
-python -X utf8 -m unittest discover -s tests          # 離線，約 200 秒
+python -X utf8 -m unittest discover -s tests          # 離線
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests   # 加上打真實伺服器的 live 測試
+SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模型的端到端（C5）
+SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 superagent 後結果不變」檢查
 ```
 
-2026-11-02 在作者機器上：**484 項 OK、略過 24 項**（主要是 live 測試，加一項需要符號連結權限的測試，作者的機器沒有，從未實跑）。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
+2026-11-03 在作者機器上（含 `SUPERAGENT_REMOVAL=1`）：**785 項 OK、略過 26 項**，全程約 870 秒，單次執行（主要是 live 測試，其中兩個是 superagent 的，另加一項需要符號連結權限的測試，作者的機器沒有，從未實跑）。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
 ## 已知限制
 
@@ -106,6 +134,7 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests   # 加上打真實�
 - 除了 `vllm`，其他 provider 只做了離線測試；模型回應與 `/cache` 的回應沒有大小上限。
 - 白名單與風險字串偏 Windows／cmd；沒有在 POSIX 實跑過。
 - GUI：同一個瀏覽器開 6 個以上「執行中」的 session 會用光連線；「停止」是強制結束、不能只中斷一輪。
+- superagent：見上一節；Ticket 的行程仍以你的 OS 帳號執行，`safe` 模式靠人答 `y` 把關，不是隔離。
 
 完整清單見 [docs/reference.md](docs/reference.md)。
 
@@ -114,7 +143,8 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests   # 加上打真實�
 ```
 src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）、harness_hooks.py、harness_mcp.py、
                harness_skills.py、harness_gui.py ＋ .html ＋ _md.js（GUI）
-tests/         各模組的測試（含 fake_mcp_server.py 與 live_fastmcp_server.py）
+src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
+tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
 docs/          從 README 拆出的詳細文件（原文未改）
 ```
