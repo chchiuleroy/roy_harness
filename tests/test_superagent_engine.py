@@ -218,6 +218,7 @@ class TestAnswerDelivery(unittest.TestCase):
 
     class Stub:
         alive = True
+        last_answer_mark = 0
 
         def __init__(self, deliver):
             import queue
@@ -280,8 +281,16 @@ class TestAnswerConfirmation(unittest.TestCase):
             import queue
             self.events = queue.Queue()
             self.stopped = False
+            self.seq = 0
+            self.last_answer_mark = 0
+
+        def emit(self, ev):
+            """What HarnessExecutor does: number the event as it is queued."""
+            self.seq += 1
+            self.events.put(dict(ev, _seq=self.seq, _pid=1))
 
         def answer(self, rid, yes):
+            self.last_answer_mark = self.seq          # events numbered up to here predate the answer
             return True
 
         def stop(self, force=False, grace=5.0):
@@ -298,7 +307,7 @@ class TestAnswerConfirmation(unittest.TestCase):
         engine.runs[tid] = run
         ask_id = store.add_ask(tid, gen, "q1", "dir")
         for ev in queued_before_answer:
-            stub.events.put(ev)
+            stub.emit(ev)
         engine.answer_ask(ask_id, True)
         return store, engine, run, stub, ask_id
 
@@ -308,9 +317,9 @@ class TestAnswerConfirmation(unittest.TestCase):
         the answer arrived; if the process then dies, the answer must still count as lost."""
         with tempfile.TemporaryDirectory() as home:
             store, engine, run, stub, ask_id = self.setup_run(
-                home, queued_before_answer=[{"kind": "tool_result", "text": "old", "_pid": 1}])
+                home, queued_before_answer=[{"kind": "tool_result", "text": "old"}])
             try:
-                stub.events.put({"kind": "exited", "code": 1, "_pid": 1})
+                stub.emit({"kind": "exited", "code": 1})
                 engine.pump(run)
                 self.assertEqual(store.ask(ask_id)["state"], AskState.ORPHANED.value)
                 self.assertEqual(engine.events[-1]["unconfirmed_answers"], [ask_id])
@@ -320,10 +329,10 @@ class TestAnswerConfirmation(unittest.TestCase):
     def test_an_event_after_the_answer_still_confirms_it(self):
         with tempfile.TemporaryDirectory() as home:
             store, engine, run, stub, ask_id = self.setup_run(
-                home, queued_before_answer=[{"kind": "tool_result", "text": "old", "_pid": 1}])
+                home, queued_before_answer=[{"kind": "tool_result", "text": "old"}])
             try:
-                stub.events.put({"kind": "tool_result", "text": "after the answer", "_pid": 1})
-                stub.events.put({"kind": "exited", "code": 0, "_pid": 1})
+                stub.emit({"kind": "tool_result", "text": "after the answer"})
+                stub.emit({"kind": "exited", "code": 0})
                 engine.pump(run)
                 self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
                 self.assertEqual(engine.events[-1]["unconfirmed_answers"], [])
@@ -335,7 +344,7 @@ class TestAnswerConfirmation(unittest.TestCase):
             store, engine, run, stub, ask_id = self.setup_run(home)
             try:
                 self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
-                stub.events.put({"kind": "exited", "code": 1, "_pid": 1})
+                stub.emit({"kind": "exited", "code": 1})
                 engine.pump(run)
                 self.assertEqual(store.ask(ask_id)["state"], AskState.ORPHANED.value)
                 self.assertEqual(engine.events[-1]["unconfirmed_answers"], [ask_id])
@@ -346,8 +355,8 @@ class TestAnswerConfirmation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             store, engine, run, stub, ask_id = self.setup_run(home)
             try:
-                stub.events.put({"kind": "tool_result", "text": "DENIED", "_pid": 1})
-                stub.events.put({"kind": "exited", "code": 0, "_pid": 1})
+                stub.emit({"kind": "tool_result", "text": "DENIED"})
+                stub.emit({"kind": "exited", "code": 0})
                 engine.pump(run)
                 self.assertEqual(store.ask(ask_id)["state"], AskState.ANSWERED.value)
                 self.assertEqual(engine.events[-1]["unconfirmed_answers"], [])
