@@ -84,11 +84,18 @@ class Parsed:
         return f"Parsed(ok={self.ok}, missing={self.missing}, errors={self.errors}, valid_json={self.valid_json})"
 
 
-def _first_object(text):
-    """The first balanced {...} in `text`, honouring strings and escapes; None if there is none."""
-    start = text.find("{")
+MAX_START_TRIES = 64     # unbalanced "{" tried before giving up: each try can scan to the end of the reply
+
+
+def _groups(text):
+    """(group, wrapped) for the top-level balanced {...} groups of `text` in order, honouring strings
+    and escapes. `wrapped` is True when an earlier "{" never closed: a "{" that does not close
+    swallows everything after it, so such a group sits inside a wrapper that was never finished.
+    A "{" that never closes is skipped, but only MAX_START_TRIES times: a reply that is nothing but
+    "{" (65,536 of them took four minutes with an unbounded retry) must not hold the engine thread."""
+    start, tries = text.find("{"), 0
     while start != -1:
-        depth, in_str, esc = 0, False, False
+        depth, in_str, esc, end = 0, False, False, None
         for i in range(start, len(text)):
             ch = text[i]
             if in_str:
@@ -105,23 +112,57 @@ def _first_object(text):
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return text[start:i + 1]
-        start = text.find("{", start + 1)
-    return None
+                    end = i + 1
+                    break
+        if end is not None:
+            yield text[start:end], tries > 0
+            start = text.find("{", end)
+        else:
+            tries += 1
+            if tries >= MAX_START_TRIES:
+                yield None, True        # gave up: what follows was never read, so nobody may rely on it
+                return
+            start = text.find("{", start + 1)
 
 
 def parse_reply(text, expected_ids):
     """Strict reader of the model's reply. Never guesses: an id that was not clearly answered is
-    `missing`; an id that was not asked about is dropped; the first answer for an id wins."""
+    `missing`; an id that was not asked about is dropped; the first answer for an id wins.
+    The reply must hold exactly ONE JSON object. With two, nobody can tell which the model meant
+    (taking the first would silently drop a correction, or apply a valid-but-wrong answer), so the
+    whole reply is refused and the batch is tried again. Braces that are not JSON, like "{see
+    above}" or a half-written first attempt, are not answers and are ignored. A JSON object that
+    sits inside a "{" that was never closed is not trusted either: the model was in the middle of
+    something else (quoting, drafting), and its words may be a copy. A reply longer than MAX_REPLY is
+    refused whole, since the part past the limit is never looked at."""
     expected = [int(i) for i in expected_ids]
+    if isinstance(text, str) and len(text) > MAX_REPLY:
+        return Parsed({}, expected, [f"reply longer than {MAX_REPLY} characters"], False)
+    skipped, objects, deep, wrapped = [], [], 0, 0
+    for raw, inside in (_groups(text) if isinstance(text, str) else ()):
+        if raw is None:         # _groups gave up on a reply full of braces that never close
+            return Parsed({}, expected, [f"{MAX_START_TRIES} '{{' that never close: the reply was not read to the end"], False)
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            skipped.append(f"not valid JSON: {e}")
+            continue
+        except RecursionError:                          # nested thousands deep: unreadable, but may be an answer
+            deep += 1
+            skipped.append("not valid JSON: nested too deep")
+            continue
+        if inside:
+            wrapped += 1
+        else:
+            objects.append(data)
+    if len(objects) + deep + wrapped > 1:
+        return Parsed({}, expected, ["more than one JSON object in the reply"], False)
+    if wrapped:
+        return Parsed({}, expected, ["a JSON object inside a '{' that was never closed"], False)
+    if not objects:
+        return Parsed({}, expected, skipped[:1] or ["no JSON object in the reply"], False)
+    data = objects[0]
     errors = []
-    raw = _first_object(text[:MAX_REPLY]) if isinstance(text, str) else None
-    if raw is None:
-        return Parsed({}, expected, ["no JSON object in the reply"], False)
-    try:
-        data = json.loads(raw)
-    except ValueError as e:
-        return Parsed({}, expected, [f"not valid JSON: {e}"], False)
     decisions = data.get("decisions") if isinstance(data, dict) else None
     if not isinstance(decisions, list):
         return Parsed({}, expected, ["no 'decisions' list"], False)

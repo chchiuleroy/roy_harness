@@ -79,6 +79,89 @@ class TestParseReply(unittest.TestCase):
                 self.assertFalse(p.valid_json)
                 self.assertEqual((p.ok, p.missing), ({}, [1, 2]))
 
+    def test_two_json_objects_are_refused_whole(self):
+        """Found by 小o: with 'take the first', a model that wrote an answer and then a correction had
+        the correction silently dropped, and a first answer that was valid but wrong was applied.
+        Nobody can tell which one the model meant, so neither is used and the batch is tried again."""
+        first, second = reply((1, "export-bug", "first")), reply((1, None, "corrected"))
+        for text in (f"{first}\n{second}", f"{first} Sorry, I meant:\n```json\n{second}\n```",
+                     f'{first} {{"note": "x"}}', f"{second}{first}"):
+            with self.subTest(text=text[:30]):
+                p = ms.parse_reply(text, [1])
+                self.assertEqual((p.ok, p.missing, p.valid_json), ({}, [1], False))
+                self.assertIn("more than one", p.errors[0])
+
+    def test_braces_in_prose_around_one_object_are_not_a_second_object(self):
+        """Only JSON counts as a second answer. A note in braces must not cost a retry."""
+        body = reply((1, None, "x"))
+        for text in (f"{{see below}}\n{body}", f"{body}\n{{that is all}}", f"{body} {{ unfinished"):
+            with self.subTest(text=text[:30]):
+                self.assertEqual(ms.parse_reply(text, [1]).ok, {1: (None, "x")})
+
+    def test_a_broken_first_attempt_followed_by_one_valid_object_is_read(self):
+        """A half-written attempt is not an answer, so it cannot be 'the other one'. Exactly one valid
+        object is left, and that is the answer. (Seen in C5: the model corrected its own typo.)"""
+        good = reply((1, None, "x"))
+        for text in (f'{{"decisions": [{{"trigger_id": 1, "rule": null, "reason": "x"}},]}}\n{good}',
+                     f"{{not json}}\n{good}"):
+            with self.subTest(text=text[:30]):
+                p = ms.parse_reply(text, [1])
+                self.assertEqual((p.ok, p.errors, p.valid_json), ({1: (None, "x")}, [], True))
+
+    def test_an_object_inside_a_brace_that_never_closes_is_not_taken_as_the_answer(self):
+        """Found by 小o: an unclosed '{' swallows what follows, so a valid object after it is really
+        INSIDE a wrapper the model never finished (a quote, a draft); the old reader promoted it. The
+        same goes for a closed wrapper, which already made the inner object nested, not top-level."""
+        good = reply((1, None, "x"))
+        for text in (f'{{"quoted": {good}', f"{{ broken {good}", f'{{"a": [{good}'):
+            with self.subTest(text=text[:20]):
+                p = ms.parse_reply(text, [1])
+                self.assertEqual((p.ok, p.missing, p.valid_json), ({}, [1], False))
+                self.assertIn("never closed", p.errors[0])
+        # an unfinished brace AFTER the answer swallows nothing that matters
+        self.assertEqual(ms.parse_reply(f"{good} {{ unfinished", [1]).ok, {1: (None, "x")})
+
+    def test_the_part_of_a_reply_past_the_length_limit_cannot_hide_a_second_object(self):
+        """Found by 小o: only the first MAX_REPLY characters were read, so 'one object' was true only of
+        that window; an answer, padding, and a correction after the cut passed as a single answer."""
+        first, second = reply((1, "export-bug", "a")), reply((1, None, "b"))
+        text = first + " " * ms.MAX_REPLY + second
+        p = ms.parse_reply(text, [1])
+        self.assertEqual((p.ok, p.valid_json), ({}, False))
+        self.assertIn("longer than", p.errors[0])
+        self.assertTrue(ms.parse_reply(first + " " * (ms.MAX_REPLY - len(first)), [1]).valid_json)   # exactly at the limit
+
+    def test_giving_up_on_unclosed_braces_refuses_the_reply_instead_of_trusting_what_was_read(self):
+        """Found by 小o: the scanner stopped after MAX_START_TRIES unclosed braces and the parser then saw
+        only the first answer, so a correction hidden behind enough '{' was never noticed and the old
+        answer was applied. Giving up must refuse, whatever was found before. Tried at the edge."""
+        first, second = reply((1, "export-bug", "a")), reply((1, None, "b"))
+        for n in (ms.MAX_START_TRIES - 2, ms.MAX_START_TRIES - 1, ms.MAX_START_TRIES, ms.MAX_START_TRIES + 1,
+                  ms.MAX_START_TRIES * 3):
+            with self.subTest(braces=n):
+                p = ms.parse_reply(f"{first} {'{' * n} {second}", [1])
+                self.assertEqual((p.ok, p.valid_json), ({}, False))
+
+    def test_a_second_object_nested_inside_the_first_is_not_a_second_answer(self):
+        """The items of `decisions` are objects too; only top-level groups count."""
+        p = ms.parse_reply(reply((1, None, "a"), (2, "billing", "b")), [1, 2])
+        self.assertEqual(sorted(p.ok), [1, 2])
+
+    def test_a_reply_that_is_only_open_braces_is_given_up_quickly(self):
+        """An unbounded retry took four minutes on 65,536 braces, with the engine thread waiting."""
+        import time
+        t0 = time.time()
+        p = ms.parse_reply("{" * ms.MAX_REPLY, [1])
+        self.assertFalse(p.valid_json)
+        self.assertLess(time.time() - t0, 5.0)
+
+    def test_a_reply_nested_too_deep_for_the_json_reader_is_unreadable_not_a_crash(self):
+        deep = '{"a":' * 3000 + "1" + "}" * 3000
+        p = ms.parse_reply(deep, [1])
+        self.assertEqual((p.ok, p.valid_json), ({}, False))
+        p = ms.parse_reply(reply((1, None, "x")) + deep, [1])        # the second one cannot be read either
+        self.assertEqual((p.ok, p.valid_json), ({}, False))
+
     def test_a_huge_reply_is_cut_before_it_is_read(self):
         """A runaway model must not make the reader chew megabytes."""
         text = "x" * (ms.MAX_REPLY + 10) + reply((1, None, "late"))
