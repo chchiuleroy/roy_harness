@@ -30,6 +30,58 @@ class TestAnswer(unittest.TestCase):
         self.assertTrue(all(o["type"] == "answer" for o in sent))
 
 
+class TestEventNumbers(unittest.TestCase):
+    """The sequence numbers that tell an answer's consequences from events that came before it."""
+
+    def fresh(self):
+        e = ex.HarnessExecutor(ex.ExecutorConfig("vllm", "http://example.com/v1", "m"))
+        e.sent = []
+        e._send_raw = lambda obj: e.sent.append(obj) or True
+        return e
+
+    def test_events_are_numbered_in_queue_order(self):
+        e = self.fresh()
+        for k in ("a", "b", "c"):
+            e._emit({"kind": k})
+        got = [e.events.get_nowait() for _ in range(3)]
+        self.assertEqual([g["_seq"] for g in got], [1, 2, 3])
+
+    def test_the_mark_separates_earlier_events_from_later_ones(self):
+        e = self.fresh()
+        e._emit({"kind": "tool_result"})
+        e.answer("q1", True)
+        e._emit({"kind": "tool_result"})
+        first, second = e.events.get_nowait(), e.events.get_nowait()
+        self.assertLessEqual(first["_seq"], e.last_answer_mark)
+        self.assertGreater(second["_seq"], e.last_answer_mark)
+
+    def test_nothing_can_be_queued_between_noting_the_mark_and_writing(self):
+        """Found by review: counting the queue and then writing left a gap in which a reader
+        thread could queue an older event that the count did not include. The mark and the write
+        are now one locked step: an event offered during the write waits, and gets a later number."""
+        import threading
+        e = self.fresh()
+        late = threading.Thread(target=lambda: e._emit({"kind": "tool_result", "text": "during"}))
+        seen_during = []
+
+        def write(obj):
+            late.start()
+            late.join(0.3)                                # it must still be waiting for the lock
+            seen_during.append(e.events.qsize())
+            return True
+        e._send_raw = write
+        e.answer("q1", True)
+        late.join(5)
+        self.assertEqual(seen_during, [0], "an event was queued while the answer was being written")
+        ev = e.events.get_nowait()
+        self.assertGreater(ev["_seq"], e.last_answer_mark)
+
+    def test_an_answer_that_fails_to_write_still_reports_false(self):
+        e = self.fresh()
+        e._send_raw = lambda obj: False
+        self.assertFalse(e.answer("q1", True))
+
+
 class TestQuestions(RealProcess):
     def ask_for_command(self, command="echo superagent-ok"):
         self.boot([{"calls": [("run_command", {"command": command})]}, {"text": "finished"}])

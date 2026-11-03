@@ -157,6 +157,9 @@ class HarnessExecutor:
     def __init__(self, cfg, harness_path=HARNESS_PATH):
         self.cfg, self.harness_path = cfg, harness_path
         self.events = queue.Queue()
+        self._seq = 0                       # every event gets the next number as it is queued
+        self._seq_lock = threading.Lock()
+        self.last_answer_mark = 0           # the number of the last event queued before an answer was written
         self.proc = None
         self.create_time = None
         self._write_lock = threading.Lock()
@@ -192,14 +195,33 @@ class HarnessExecutor:
                     raise ValueError
             except ValueError:
                 ev = {"kind": "log", "text": line}
-            self.events.put(dict(ev, _pid=proc.pid))
+            self._emit(dict(ev, _pid=proc.pid))
         code = proc.wait()
-        self.events.put({"kind": "exited", "code": code, "_pid": proc.pid})
+        self._emit({"kind": "exited", "code": code, "_pid": proc.pid})
 
     def _pump_err(self, proc):
         for raw in proc.stderr:
-            self.events.put({"kind": "stderr", "text": raw.decode("utf-8", "replace").rstrip("\r\n"),
-                             "_pid": proc.pid})
+            self._emit({"kind": "stderr", "text": raw.decode("utf-8", "replace").rstrip("\r\n"),
+                        "_pid": proc.pid})
+
+    def _emit(self, ev):
+        """Queue an event with the next sequence number (`_seq`). Numbering and queuing are one step
+        under a lock, so a number says exactly where an event sits relative to an answer."""
+        with self._seq_lock:
+            self._seq += 1
+            ev["_seq"] = self._seq
+            self.events.put(ev)
+
+    def _send_answer(self, obj):
+        """Write an answer and note which events were already queued at that moment. The lock is
+        held across the write, so no event can be queued between 'noting' and 'writing': every event
+        numbered after the mark was queued after the write began. Holding the lock over a pipe write is
+        safe because the harness child reads stdin on its own thread into an unbounded queue (see
+        start_reader in harness_vllm.py), whatever its stdout is doing: the write cannot wait on our
+        pumps, so there is no cycle. (Review 5 suspected one; a child that is frozen blocks any write.)"""
+        with self._seq_lock:
+            self.last_answer_mark = self._seq
+            return self._send_raw(obj)
 
     def _send_raw(self, obj):
         data = (json.dumps(obj) + "\n").encode("ascii")      # ensure_ascii: no codepage in between
@@ -219,11 +241,11 @@ class HarnessExecutor:
 
     def answer(self, rid, yes):
         """Only y or n. An `a` would be written into the harness' permanent grants."""
-        return self._send_raw({"type": "answer", "rid": str(rid), "text": "y" if yes else "n"})
+        return self._send_answer({"type": "answer", "rid": str(rid), "text": "y" if yes else "n"})
 
     def answer_empty(self, rid):
         """Close a free-text question (ask_user) with an empty answer; nobody may type one."""
-        return self._send_raw({"type": "answer", "rid": str(rid), "text": ""})
+        return self._send_answer({"type": "answer", "rid": str(rid), "text": ""})
 
     def stop(self, force=False, grace=5.0):
         proc = self.proc

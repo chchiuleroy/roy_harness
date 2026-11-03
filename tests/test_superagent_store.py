@@ -295,6 +295,24 @@ class TestOlderDatabase(unittest.TestCase):
                 self.assertEqual(s.ask(a)["confirmed"], 0)
 
 
+class TestOpenFailure(unittest.TestCase):
+    def test_a_failed_open_gives_the_lock_back(self):
+        """Found by review: if the upgrade step raised, open() kept the home lock and a
+        half-open connection, so a caller that caught the error and tried again was locked out by
+        itself."""
+        with tempfile.TemporaryDirectory() as d:
+            broken = Store(d)
+
+            def boom():
+                raise RuntimeError("upgrade failed")
+            broken._migrate = boom
+            with self.assertRaises(RuntimeError):
+                broken.open()
+            self.assertIsNone(broken.db)
+            with Store(d, lock_wait=0) as again:          # no waiting: the lock must already be free
+                self.assertEqual(again.tickets(), [])
+
+
 class TestSingleWriter(StoreCase):
     def test_other_threads_cannot_use_the_store(self):
         """SQLite writes are only serialised if one thread owns them; a reader thread that

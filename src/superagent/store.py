@@ -147,13 +147,17 @@ class Store:
     def open(self):
         os.makedirs(self.home, exist_ok=True)
         self._take_lock()
-        self.db = sqlite3.connect(os.path.join(self.home, "state.sqlite"), isolation_level=None,
-                                  check_same_thread=False)
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA busy_timeout=5000")
-        self.db.executescript(SCHEMA)
-        self._thread = threading.get_ident()
-        self._migrate()
+        try:
+            self.db = sqlite3.connect(os.path.join(self.home, "state.sqlite"), isolation_level=None,
+                                      check_same_thread=False)
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA busy_timeout=5000")
+            self.db.executescript(SCHEMA)
+            self._thread = threading.get_ident()
+            self._migrate()
+        except BaseException:
+            self.close()                    # do not keep the home lock or a half-open connection
+            raise
         return self
 
     def _migrate(self):
@@ -171,6 +175,7 @@ class Store:
         if self.db is not None:
             self.db.close()
             self.db = None
+        self._thread = None
         self._release_lock()
 
     def __enter__(self):
