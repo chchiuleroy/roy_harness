@@ -97,6 +97,17 @@ def dispatch(engine, ch, name, cmd):
     return False
 
 
+def work_left(engine, store):
+    """What `run --once` waits for: a ticket still running, a reply not yet delivered, an event file still in
+    the inbox, or a message still waiting for (or being judged by) the model session. The last two were
+    missing: with --assessor model the loop used to exit after the first tick with every candidate pending."""
+    counts = store.eval_counts()
+    folder = getattr(engine.source, "folder", None)               # only the file inbox has one
+    inbox_left = folder is not None and any(n.endswith(".json") for n in os.listdir(folder))
+    return bool(engine.runs) or bool(store.outbox_rows("pending")) or inbox_left \
+        or counts["pending"] + counts["sent"] > 0
+
+
 def cmd_run(args):
     store = Store(args.home).open()
     engine = build_engine(args, store)
@@ -111,7 +122,7 @@ def cmd_run(args):
                 if dispatch(engine, ch, name, cmd):
                     stop.set()
             engine.tick()
-            if args.once and not engine.runs and not store.outbox_rows("pending"):
+            if args.once and not work_left(engine, store):
                 break
             time.sleep(args.interval)
     finally:
@@ -167,6 +178,12 @@ def cmd_eval(args):
     from . import replay as rp
     from .sanitize import json_safe
     rules = parse_rules(args.rule)
+    if args.out:                  # a bad path found after the model work would waste it (the JSON is still printed then)
+        parent = os.path.dirname(os.path.abspath(args.out))
+        if not os.path.isdir(parent) or os.path.isdir(args.out):
+            print(f"[superagent] eval refused:\n  --out {args.out}: the folder {parent} does not exist "
+                  f"(or the path is a folder); nothing was run", file=sys.stderr)
+            return 1
     cfg = rp.ReplayConfig(
         provider=args.provider, base_url=args.base_url, model=args.model, rules=tuple(rules),
         repeats=args.repeats, order_check=args.order_check, batch_max=args.batch_max, card_cap=args.card_cap,
@@ -257,7 +274,8 @@ def main(argv=None):
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for a running orchestrator")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--once", action="store_true", help="exit when nothing is running and the outbox is empty")
+    r.add_argument("--once", action="store_true", help="exit when nothing is running, the outbox is empty, the inbox has no event files left and "
+                        "no message is waiting for the model")
     r.add_argument("--interval", type=float, default=0.5)
     r.add_argument("--inbox")
     r.add_argument("--outbox")

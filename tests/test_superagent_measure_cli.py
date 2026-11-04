@@ -8,7 +8,11 @@ import io
 import json
 import os
 import re
+import stat
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 import superagent_support as sup
@@ -241,12 +245,29 @@ class TestOperatingCommands(Cli):
         self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
         path = self.corpus([{"id": "r1", "text": "about a", "label": "a"}])
         rules = [x for r in RULES for x in ("--rule", r)]
+        locked = os.path.join(self.dir, "locked.json")                 # the folder exists; the file cannot be written
+        with open(locked, "w") as f:
+            f.write("{}")
+        os.chmod(locked, stat.S_IREAD)
+        self.addCleanup(lambda: os.path.exists(locked) and os.chmod(locked, stat.S_IWRITE))
         code, out, err = run(["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model",
-                              "--backoff", "0.01", "--quiet", "--out", missing + ".json"])
+                              "--backoff", "0.01", "--quiet", "--out", locked])
         self.assertEqual(code, 1)
         self.assertIn("cannot write the report", err)
         self.assertEqual(json.loads(out)["schema"], 1, "the finished report is not lost: it is on stdout")
         self.assertEqual(json.loads(out)["corpus"]["rows"], 1)
+
+    def test_an_output_folder_that_does_not_exist_is_refused_before_any_model_work(self):
+        """Operating trial (小o): the bad path was only found after the whole measurement had run."""
+        path = self.corpus([{"id": "r1", "text": "about a", "label": "a"}])
+        rules = [x for r in RULES for x in ("--rule", r)]
+        for target in (os.path.join(self.dir, "nope", "r.json"), self.dir):        # a missing folder; a folder as the file
+            with self.subTest(target=target):
+                code, out, err = run(["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url,
+                                      "--model", "fake-model", "--out", target])
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("nothing was run", err)
+        self.assertEqual(self.llm.requests, [], "the model was never called")
 
     def test_hashed_ids_still_get_their_message_openings_in_the_error_list(self):
         """Second review: --hash-ids changed the ids in the report, and the snippets were looked up by the
@@ -272,6 +293,99 @@ class TestOperatingCommands(Cli):
             code, out, err = run(["report", target])
             self.assertEqual((code, out), (1, ""))
             self.assertIn("cannot read the report", err)
+
+
+class TestOperatingFixes(Cli):
+    """Found by 小o operating the tool for the first time (docs only + --help), each with its reproduction."""
+
+    def setUp(self):
+        super().setUp()
+        self.llm = sup.FakeLLM([])
+
+    def tearDown(self):
+        self.llm.close()
+        super().tearDown()
+
+    def test_run_once_with_the_model_assessor_waits_for_the_decisions(self):
+        """The loop used to exit after its first tick: nothing was running and the outbox was empty, while
+        every candidate was still waiting for the model. `decisions` was then empty."""
+        inbox = os.path.join(self.home, "inbox")
+        os.makedirs(inbox)
+        for i, text in enumerate(("the export fails", "lunch?"), 1):
+            path = os.path.join(inbox, f"{i:03d}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"id": f"e{i}", "sender": "alice", "thread": f"t{i}", "text": text, "addressed": False}, f)
+            os.utime(path, (time.time() - 10, time.time() - 10))
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+        rules = [x for r in RULES for x in ("--rule", r)]
+        done = subprocess.run(
+            [sys.executable, "-X", "utf8", "-m", "superagent", "--home", self.home, "run", "--once", "--allow", "alice",
+             "--assessor", "model", *rules, "--base-url", self.llm.base_url, "--model", "fake-model", "--backoff", "0.01",
+             "--interval", "0.1", "--batch-wait", "0.3"],
+            capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, PYTHONPATH=sup.SRC), timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        code, out, err = run(["--home", self.home, "decisions", "--jsonl"])
+        self.assertEqual([json.loads(x)["model_rule"] for x in out.splitlines()], ["a", ""])
+        self.assertEqual([n for n in os.listdir(inbox) if n.endswith(".json")], [], "every event file was taken")
+
+    def test_what_run_once_waits_for_is_each_of_its_four_things(self):
+        """work_left on stand-ins: a running ticket, an undelivered reply, an event file still in the inbox, a
+        candidate pending or in flight with the model. Only when all are clear may `--once` exit."""
+        from types import SimpleNamespace
+        from superagent.__main__ import work_left
+
+        def state(runs=(), outbox=(), files=(), pending=0, sent=0, folder=True):
+            d = self.dir if folder else None
+            for n in os.listdir(self.dir):
+                os.remove(os.path.join(self.dir, n))
+            for n in files:
+                open(os.path.join(self.dir, n), "w").close()
+            engine = SimpleNamespace(runs=list(runs), source=SimpleNamespace(folder=d) if folder else object())
+            store = SimpleNamespace(outbox_rows=lambda status: list(outbox),
+                                    eval_counts=lambda: {"pending": pending, "sent": sent, "done": 0, "unavailable": 0})
+            return work_left(engine, store)
+
+        self.assertFalse(state())
+        self.assertFalse(state(files=("readme.txt",)), "only event files count")
+        self.assertFalse(state(folder=False), "a source without a folder has nothing to wait for")
+        for why, kw in (("a running ticket", dict(runs=[1])), ("an undelivered reply", dict(outbox=[1])),
+                        ("an event file in the inbox", dict(files=("001.json",))),
+                        ("a candidate waiting for the model", dict(pending=1)),
+                        ("a batch in flight", dict(sent=1))):
+            with self.subTest(why):
+                self.assertTrue(state(**kw))
+
+    def test_a_pipe_closed_under_a_pump_thread_ends_quietly(self):
+        """stop() closes a child's pipe while the pump thread reads it; on Windows that raised ValueError
+        ('PyMemoryView_FromBuffer(): info->buf must not be NULL') as a traceback on stderr."""
+        from superagent.executor import HarnessExecutor
+
+        def pipe(error):
+            yield b"first\n"
+            yield b"second\n"
+            raise error
+
+        for error in (ValueError("PyMemoryView_FromBuffer(): info->buf must not be NULL"), OSError("closed")):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(list(HarnessExecutor._lines(pipe(error))), [b"first\n", b"second\n"])
+        self.assertEqual(list(HarnessExecutor._lines(iter([b"a\n"]))), [b"a\n"])
+
+    @unittest.skipUnless(os.name == "nt", "the PowerShell code page is a Windows matter")
+    def test_a_command_line_with_non_ascii_text_is_read_back_whole(self):
+        """`down` printed UnicodeDecodeError from a reader thread: PowerShell answered in the console code
+        page (cp950 here) and the answer was decoded as UTF-8."""
+        from superagent import procutil
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "中文參數"],
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            line = procutil.cmdline(child.pid)
+            self.assertIn("中文參數", line or "")
+        finally:
+            child.kill()
+            child.wait()
 
 
 if __name__ == "__main__":
