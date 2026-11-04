@@ -70,6 +70,21 @@ class TestAGoodCorpus(CorpusCase):
         self.assertEqual(len(self.load().rows), 1)
 
 
+class TestLineSeparators(CorpusCase):
+    def test_unicode_line_separators_inside_a_message_do_not_split_the_row(self):
+        """Found while building the labelling page: str.splitlines() also breaks at U+2028, U+2029, U+0085,
+        form feed and others, and a browser's JSON.stringify writes them raw. A message containing one
+        used to be cut in the middle of its JSON string and the file was refused (or worse, misread)."""
+        text = "a b c\u0085d\x0ce\x1cf"
+        self.write(row(1, text=text), row(2))
+        got = self.load()
+        self.assertEqual([r.id for r in got.rows], ["m1", "m2"])
+
+    def test_windows_line_endings_are_fine(self):
+        self.write(raw=b'{"id": "a", "text": "x", "label": null}\r\n{"id": "b", "text": "y", "label": null}\r\n')
+        self.assertEqual(len(self.load().rows), 2)
+
+
 class TestEveryProblemAtOnce(CorpusCase):
     def test_all_problems_are_listed_not_just_the_first(self):
         """A labeller fixing one error per run would give up."""

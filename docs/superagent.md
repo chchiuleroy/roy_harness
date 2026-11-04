@@ -109,6 +109,16 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 - **`--order-check`**：每個 chunk 再倒序重跑一次（同一批成員、只改批內順序），報告「第一次與倒序結果不同的列數」，旁邊放「同序重跑」的基線當雜訊參考；單獨成批的列不計。這是描述性的，**不是**位置效應的估計。
 - **報告不含**訊息文字、模型寫的理由、端點網址、暫存路徑；列 id、規則名與說明、模型名會留（`--hash-ids` 可把列 id 換成雜湊）。有測試鎖定欄位白名單，新增欄位要先改測試。
 
+**親手操作的流程**（不需要真實部署的 home 也能走完）：
+
+1. **準備訊息**：一個文字檔（一行一則）、或 JSONL（每行至少有 `text`，可有 `id`／`sender`／`thread`），或 `decisions --for-labeling` 的匯出。
+2. **做標註頁**：`python -X utf8 -m superagent label --input 訊息檔 --rule NAME=說明 [--rule ...] --out label.html`。產生一個**離線單檔網頁**（不連網、不需伺服器）：一次一則，按鈕或鍵盤（數字鍵選規則、`0` 無規則、`u` 不確定、←／→ 換則、Backspace 清除）；答案自動暫存在瀏覽器裡（key 依內容指紋，不同批次不會互相污染）；文字超過卡片上限會在上限處截斷並明說，所以你標的就是模型看到的。頁面裡**沒有任何模型的回答**，訊息以純文字顯示（控制字元、改變方向的字元會拼成 `\uXXXX`）。
+3. **下載**：「下載已標註的」給 `eval` 用；「下載全部」是續標用（沒標的列沒有 `label` 欄，`eval` 會拒絕它，不會默默當成「無規則」；把這個檔再丟給 `label` 就能接著標）。
+4. **量測**：`python -X utf8 -m superagent eval --corpus corpus_labelled.jsonl --rule ... --base-url ... --model ... --out report.json --errors`。標註檔裡有被截斷的列（頁面上有橘字提示）要加 `--allow-truncated`（照常重放但不計分）；有多列同一個 `thread`（真實匯出可能發生）要加 `--allow-shared-threads`（區間會偏窄，報告會警告）。沒加時 `eval` 會**一次列出全部問題**再拒絕，不會跑一半。stderr 會印進度（`[eval] pass 1/3: batch 4/17`，`--quiet` 關掉）；stdout 印可讀的摘要（主要指標、逐規則、穩定度、順序敏感度、失敗、警告、報告的結論原文，加上答錯的列和訊息開頭——**訊息開頭只印在終端，不寫進 report.json**）。
+5. **之後再看**：`python -X utf8 -m superagent report report.json [--errors --corpus corpus_labelled.jsonl]`。
+
+跑一次要多久：每批一次模型呼叫；列數 ÷ `--batch-max` 就是一趟的批數，再乘上趟數（`--repeats`、加 `--order-check` 多一趟）。
+
 **限制（誠實）**：目前**沒有**真實部署的收件匣或人工標註的真實語料，所以第一份有意義的準確度數字要等你提供標註語料；在那之前 `eval` 只有用合成語料做過「工具測試」（見該次報告，註明不是準確度證據）。`rows_needed` 與區間都假設各列獨立；同一討論串多列、或語料不代表實際流量時，區間會偏樂觀。模型取樣設定用端點預設，不同端點的結果不可直接比較。
 
 ## Outbox 的契約

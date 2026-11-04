@@ -44,6 +44,11 @@ class Corpus:
     shared_thread_rows: int         # rows that share a thread with another row (0 unless allowed)
 
 
+def hashed_id(row_id):
+    """The short stable id a report uses under --hash-ids (and the summary uses to match them back)."""
+    return hashlib.sha256(row_id.encode("utf-8")).hexdigest()[:12]
+
+
 def _names(rules):
     return {getattr(r, "name", r) for r in rules}
 
@@ -54,9 +59,10 @@ def load(path, rules, card_cap, allow_shared_threads=False, allow_truncated=Fals
     names = _names(rules)
     problems, warnings, rows, seen = [], [], [], {}
     cap_differs = 0
-    for n, line in enumerate(raw.decode("utf-8-sig").splitlines(), 1):
+    for n, line in enumerate(raw.decode("utf-8-sig").split("\n"), 1):   # not splitlines(): U+2028 etc. may sit inside a JSON string
         if not line.strip():
             continue
+        line = line.rstrip("\r")
         where = f"line {n}"
         try:
             obj = json.loads(line)

@@ -3,7 +3,9 @@
   run        start the orchestrator (stays in the foreground; Ctrl-C stops it cleanly)
   status     show tickets, open questions and the outbox (works while it runs)
   decisions  show recorded decisions (read-only);  --for-labeling exports the messages without the answers
+  label      make a single offline HTML page for labelling messages by hand (no model answers in it)
   eval       replay a labelled corpus through the model session offline and report (a measurement, not a verdict)
+  report     print a saved eval report as readable text;  --errors --corpus FILE lists the rows the model got wrong
   answer     answer a question:   answer <ask_id> y|n
   stop       stop a ticket for good
   resume     clear the note on a ticket that was parked, so it starts again
@@ -169,7 +171,8 @@ def cmd_eval(args):
         provider=args.provider, base_url=args.base_url, model=args.model, rules=tuple(rules),
         repeats=args.repeats, order_check=args.order_check, batch_max=args.batch_max, card_cap=args.card_cap,
         half_width=args.half_width, confidence=args.confidence, eval_timeout=args.eval_timeout,
-        chunk_timeout=args.chunk_timeout, backoff=args.backoff, hash_ids=args.hash_ids)
+        chunk_timeout=args.chunk_timeout, backoff=args.backoff, hash_ids=args.hash_ids,
+        progress=None if args.quiet else (lambda text: print(f"[eval] {text}", file=sys.stderr, flush=True)))
     try:
         cfg.validate()
         corpus = corpus_mod.load(args.corpus, cfg.rules, cfg.card_cap, allow_shared_threads=args.allow_shared_threads,
@@ -181,11 +184,59 @@ def cmd_eval(args):
     report = rp.replay(corpus, cfg)
     text = json_safe(json.dumps(report, indent=1, ensure_ascii=False))
     if args.out:
-        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text + "\n")
+        try:
+            with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text + "\n")
+        except OSError as e:
+            print(f"[superagent] cannot write the report to {args.out}: {e}\n"
+                  f"  the finished report is printed below on stdout; save it from there",
+                  file=sys.stderr)
+            print(text)                       # an hour of model calls must not be lost to a bad path
+            return 1
         print(f"[superagent] report written to {args.out}")
+        from . import summary
+        texts = summary.snippets(args.corpus, hash_ids=args.hash_ids) if args.errors else None
+        sys.stdout.write("\n" + summary.render(report, errors=args.errors, texts=texts))
     else:
         print(text)
+    return 0
+
+
+def cmd_report(args):
+    from . import summary
+    try:
+        with open(args.report, encoding="utf-8") as f:
+            report = json.load(f)
+        texts = summary.snippets(args.corpus, hash_ids=bool(report["meta"].get("hash_ids"))) if args.corpus else None
+        sys.stdout.write(summary.render(report, errors=args.errors, texts=texts))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"[superagent] cannot read the report: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_label(args):
+    from . import labeler
+    rules = parse_rules(args.rule)
+    if not rules:
+        raise SystemExit("label needs at least one --rule NAME=DESCRIPTION")
+    try:
+        if isinstance(args.card_cap, bool) or args.card_cap < 1:
+            raise labeler.LabelerError("card_cap must be a whole number, 1 or more")
+        rows = labeler.read_unlabelled(args.input, args.card_cap)
+        page = labeler.build_html(rows, rules, title=args.title)
+    except (OSError, labeler.LabelerError) as e:
+        print(f"[superagent] label refused: {e}", file=sys.stderr)
+        return 1
+    try:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(page)
+    except OSError as e:
+        print(f"[superagent] cannot write the page to {args.out}: {e}", file=sys.stderr)
+        return 1
+    cut = sum(1 for r in rows if r["truncated_chars"])
+    print(f"[superagent] {len(rows)} messages ({cut} cut at {args.card_cap} characters) -> {args.out}\n"
+          f"  open it in a browser, label, then use the 'download labelled' button and run eval on that file")
     return 0
 
 
@@ -263,7 +314,19 @@ def main(argv=None):
     e.add_argument("--backoff", type=float, default=1.0)
     e.add_argument("--allow-truncated", action="store_true", help="accept rows longer than the card cap")
     e.add_argument("--allow-shared-threads", action="store_true", help="accept several rows in one thread")
-    e.add_argument("--out", help="write the report here instead of stdout")
+    e.add_argument("--out", help="write the JSON report here (a readable summary is then printed) instead of stdout")
+    e.add_argument("--errors", action="store_true", help="with --out: also list the rows the model got wrong")
+    e.add_argument("--quiet", action="store_true", help="no progress lines on stderr")
+    lb = sub.add_parser("label", help="make an offline HTML page for labelling messages")
+    lb.add_argument("--input", required=True, help="JSONL (text per line, optional id) or a text file, one message per line")
+    lb.add_argument("--rule", action="append", default=[], metavar="NAME=DESCRIPTION", required=True)
+    lb.add_argument("--out", required=True, help="the HTML file to write")
+    lb.add_argument("--card-cap", type=int, default=CARD_CAP, help="characters of text the model sees per card")
+    lb.add_argument("--title", default="標註訊息")
+    rp_ = sub.add_parser("report", help="print a saved eval report as readable text")
+    rp_.add_argument("report", help="the JSON file eval wrote with --out")
+    rp_.add_argument("--errors", action="store_true", help="list the rows the model got wrong")
+    rp_.add_argument("--corpus", help="the corpus file, to show the first words of those messages (terminal only)")
     a = sub.add_parser("answer")
     a.add_argument("ask_id", type=int)
     a.add_argument("choice", choices=("y", "n"))
@@ -286,6 +349,10 @@ def main(argv=None):
         return cmd_status(args)
     if args.cmd == "decisions":
         return cmd_decisions(args)
+    if args.cmd == "label":
+        return cmd_label(args)
+    if args.cmd == "report":
+        return cmd_report(args)
     if args.cmd == "eval":
         if not args.base_url or not args.model:
             ap.error("eval needs --base-url and --model (or HARNESS_BASE_URL / HARNESS_MODEL)")

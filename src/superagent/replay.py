@@ -66,6 +66,7 @@ class ReplayConfig:
     hash_ids: bool = False
     executor_factory: object = None    # label -> executor; tests inject a private harness tree
     harness_path: str = None
+    progress: object = None            # callable(str): one-line status; the CLI prints it to stderr
 
     def validate(self):
         def whole(v, lo, hi, name):
@@ -200,12 +201,19 @@ class _Pass:
         return {r["ext_id"]: r for r in rows if r["ext_id"] in want}
 
 
-def _run_pass(cfg, rows, reverse):
+def _say(cfg, text):
+    if cfg.progress is not None:
+        cfg.progress(text)
+
+
+def _run_pass(cfg, rows, reverse, label=""):
     """One full pass over the corpus. -> ({row id: outcome}, {row id: why}, {row id: failure}, {row id: chunk size})"""
     outcomes, whys, failures, sizes = {}, {}, {}, {}
     p = _Pass(cfg, rows)
     try:
-        for chunk in corpus_mod.chunks(rows, cfg.batch_max):
+        chunks = list(corpus_mod.chunks(rows, cfg.batch_max))
+        for k, chunk in enumerate(chunks, 1):
+            _say(cfg, f"{label}: batch {k}/{len(chunks)}")
             ordered = list(reversed(chunk)) if reverse else chunk
             for rid, (oc, why, fail) in p.run_chunk(ordered).items():
                 outcomes[rid], sizes[rid] = oc, len(chunk)
@@ -252,8 +260,10 @@ def replay(corpus, cfg):
     cfg.validate()
     rows = list(corpus.rows)
     names = [r.name for r in cfg.rules]
-    forward = [_run_pass(cfg, rows, False) for _ in range(cfg.repeats)]
-    reversed_pass = _run_pass(cfg, rows, True) if cfg.order_check else None
+    total = cfg.repeats + (1 if cfg.order_check else 0)
+    forward = [_run_pass(cfg, rows, False, f"pass {i + 1}/{total}") for i in range(cfg.repeats)]
+    reversed_pass = (_run_pass(cfg, rows, True, f"pass {total}/{total} (reversed order)")
+                     if cfg.order_check else None)
 
     scored = [i for i, r in enumerate(rows) if not r.uncertain and r.truncated_chars == 0]
 
@@ -286,7 +296,7 @@ def replay(corpus, cfg):
             confidence=cfg.confidence)
 
     def rid(r):
-        return _sha(r.id)[:12] if cfg.hash_ids else r.id
+        return corpus_mod.hashed_id(r.id) if cfg.hash_ids else r.id
 
     return {
         "schema": SCHEMA,
