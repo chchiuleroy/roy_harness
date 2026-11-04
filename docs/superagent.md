@@ -91,6 +91,26 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 - **名單內的人再發言就重開同一張**：同一討論串上有 `ended` 的 Ticket、發言者被**目前**政策准入為明確請求，該 Ticket 就回到 `open`、同一個 session 檔續跑（模型仍看得到先前的脈絡，但 harness 的自動壓縮可能已改過舊訊息，脈絡保留是盡力而為）。Mandate 與 hook 設定逐位元不變；重開前不看舊 Mandate 的規則名，只看這則新訊息被不被准入。人 `stop` 過的 Ticket 不會重開。槽位已滿時重開只會排隊，不會擠掉別人。
 - **追問要先被准入**（**行為變更**：Slice 1/2 的活 Ticket 追問是誰說的都投遞）：現在只有名單內的人（明確）的發言會送進 Ticket；名單外的人、只算 `inferred` 的機器人，以及 `accept_mode=off` 時的推斷發言，都**不投遞**，只留一筆 `ignore` 的 Decision。這比 DeepSeek 原型更嚴（原型不查發送者就扇出）。
 
+## Slice 4：量測（`decisions`、`eval`）
+
+這一刀**不改任何行為**：不自動切換 `auto`、不調提示詞、報告也**不寫「通過」**。它只給兩樣東西——看得見模型到底說了什麼，以及一把用人工標註語料量模型的尺。
+
+**`decisions`（唯讀）**——`python -X utf8 -m superagent --home <資料夾> decisions [--since 時間] [--verdict accept|ignore|unavailable] [--would-accept] [--limit N] [--jsonl]`。用 `mode=ro` 開資料庫，不建檔、不改檔（有測試比對整個資料夾每個檔的內容與 mtime）；orchestrator 在跑也能看。WAL 模式的 home 與留有未回復 journal 的 home 會拒絕並說明，不去碰。文字裡的控制字元、改方向字元等一律拼成 `\uXXXX` 顯示。
+
+**`decisions --for-labeling`**——匯出「模型看過的那些訊息」讓人標註：**只有**訊息文字（截到 `--card-cap`，並寫明被截掉幾個字元與用了哪個上限）、`sender`／`thread`、`uncertain`，**沒有**模型的判決、規則名或理由（看了會帶偏標註者）。`id` 是不透明的 `c0001`…（依檔案順序，不是資料庫主鍵，所以標註檔不能靠主鍵連回模型答案；仍可靠文字本身對回去，所以這防的是「被帶偏」，不是防刻意去查）；**刻意沒有 `label` 欄**，沒標的列會被 `eval` 的載入器拒絕，而不是被默默當成「沒有規則適用」。匯出時已被截掉的部分（`truncated_chars`）載入時仍算被截（與超過 `eval --card-cap` 的列同樣處理：沒加 `--allow-truncated` 就拒絕，加了就重放但不計分）；匯出用的 `card_cap` 與 `eval` 不同時會警告。home 沒有記錄過去那次運行用的卡片上限，所以 `--card-cap` 是你的聲明（目前 `run` 固定用預設值），必須是 1 以上的整數。這個篩選（只匯出送過模型的候選）是 Gate 2 之後加的，為了不讓規則式的 `ignore` 混進標註集。
+
+**`decision.model_rule` 三態**：`NULL` ＝ 沒有模型答案（舊資料、規則式決定、試滿次數放棄的候選）；`''` ＝ 模型答「都不符合」；規則名 ＝ 模型選的規則（不在設定裡的名字先去控制字元再截 64 字元，決定記為 `unavailable`）。舊 home 開啟時補欄位、**不回填**——回填 `''` 會把「沒記錄」變成「模型說沒有」。
+
+**`eval`**——`python -X utf8 -m superagent eval --corpus 語料.jsonl --rule NAME=說明 ... --base-url ... --model ... [--repeats N] [--order-check] [--hash-ids] [--out 報告.json]`。語料每行一個 JSON：`id`、`text`、`label`（規則名或 `null`）、選填 `uncertain`／`sender`／`thread`／`note`；有任何問題會**一次列出全部**再拒絕（標籤不在規則裡、超過卡片上限而沒加 `--allow-truncated`、同一討論串多列而沒加 `--allow-shared-threads` 等）。
+
+- **走真的引擎**：臨時資料夾裡跑真的 `Engine`＋`MainSession`（`accept_mode=observe`、`max_running=0`），一個 chunk（≤ `--batch-max` 列）一次丟進收件匣就恰好是一批。報告的 `differences` 列出和實際運行仍不同的地方（收件匣是暫存檔案、批次由語料切塊而非到達時間、每趟全新 store、標籤是人寫的）。
+- **統計定義**（先定好，結果出來才不會挑）：分析單位是被標註的**列**；主要數字只看**第一個 repeat**，後面的 repeat 只用來看穩定度，不併進 n；沒得到可用答案（`unavailable`）的列**留在分母**（intention-to-classify），所以放棄作答會讓召回下降而不是讓精確度變好；區間用 Wilson（不用 Wald）；另附只算有答案列的 `diagnostic`。`uncertain` 與被截斷的列照常重播但不計分，超過 10% 會警告。
+- **`conclusion` 不下判決**：只說在目標半寬（`--half-width`，預設 0.10）下每個指標「精確度達到／未達到／無資料」，給 `rows_needed`（假設各列獨立、比例不變）；另一句固定寫「尚未設定驗收門檻，本報告不說模型夠不夠好」。
+- **`--order-check`**：每個 chunk 再倒序重跑一次（同一批成員、只改批內順序），報告「第一次與倒序結果不同的列數」，旁邊放「同序重跑」的基線當雜訊參考；單獨成批的列不計。這是描述性的，**不是**位置效應的估計。
+- **報告不含**訊息文字、模型寫的理由、端點網址、暫存路徑；列 id、規則名與說明、模型名會留（`--hash-ids` 可把列 id 換成雜湊）。有測試鎖定欄位白名單，新增欄位要先改測試。
+
+**限制（誠實）**：目前**沒有**真實部署的收件匣或人工標註的真實語料，所以第一份有意義的準確度數字要等你提供標註語料；在那之前 `eval` 只有用合成語料做過「工具測試」（見該次報告，註明不是準確度證據）。`rows_needed` 與區間都假設各列獨立；同一討論串多列、或語料不代表實際流量時，區間會偏樂觀。模型取樣設定用端點預設，不同端點的結果不可直接比較。
+
 ## Outbox 的契約
 
 回覆是 `outbox/<msg_id>.json`，內容含同一個 `msg_id`。崩潰恢復可能把同一則回覆再寫一次（同檔名、同內容）；**消費端必須以 `msg_id` 去重**。
@@ -117,6 +137,6 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 - 清除時殘留的孫行程（`cmd.exe` 的子行程）若其父行程已先死，命令列不含 home，掃描找不到；正常停機走 `taskkill /T` 不受影響。緊急掃描只認「命令列同時含 home、`--jsonl`、`harness_vllm`」的行程，這是刻意收窄，寧可漏掉也不誤殺。
 - 答案送達才算數：`answer` 在寫進 harness 的管線成功之後才把問題標成已答；寫入失敗時問題仍開著，可以再答一次。管線寫入成功不代表 harness 已讀到，所以只要 harness 在**答案寫入之後**回報任何進展（工具結果、回合結束、下一個問題）才算「確認收到」（每個事件進佇列時都有流水號，答案寫入時記下當下的號碼，號碼不大於它的事件不算，因為它們在答案寫入前就已排入佇列；記號與寫入是同一個上鎖的步驟，中間排不進任何事件）；若它在那之前就結束，這筆答案改標 orphaned，狀態不會謊稱已答。
 - `run` 啟動時取 home 鎖會等最多 1 秒（`status` 與 `down` 探測鎖時會瞬間佔住它）；真的有第二個 orchestrator 時，等完仍失敗並以退出碼 3 結束。
-- 資料庫的舊紀錄不會被刪除，會一直成長。舊版本建立的 home 在 `Store.open()` 時會自動補上新增的欄位（目前只有 `ask.confirmed`），不需手動遷移。
+- 資料庫的舊紀錄不會被刪除，會一直成長。舊版本建立的 home 在 `Store.open()` 時會自動補上新增的欄位（目前有 `ask.confirmed` 與 `decision.model_rule`；後者舊列保持 `NULL`），不需手動遷移。
 - 沒有 Watchdog、BYOM／daemon、Chain of Recall、跨批脈絡、模型決定 attach／stop、GitHub／飛書 Source。
 - 除了 `test_superagent_live.py`（需要 `SUPERAGENT_LIVE=1` 與真實端點），所有測試用腳本化的假模型端點。

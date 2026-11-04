@@ -5,7 +5,8 @@ turn is the text the model wrote AFTER its last tool event in that turn. Text fr
 call is void (it was thinking aloud, and the answer comes after the tools have run).
 """
 import dataclasses
-import unicodedata
+
+from . import sanitize
 
 REPLY_CAP = 4000          # characters of a reply that leave the system
 
@@ -50,18 +51,6 @@ def reply_payload(ticket_id, input_id, text):
             "text": cleaned, "truncated_chars": dropped}
 
 
-_KEEP_FORMAT = "‌‍"        # zero-width (non-)joiner: part of how some scripts and emoji are spelled
-
-
-def _allowed(ch):
-    if ch in "\n\t":
-        return True
-    cat = unicodedata.category(ch)
-    if cat == "Cf":
-        return ch in _KEEP_FORMAT     # the rest (bidi overrides and isolates, BOM, soft hyphen...) can reorder or hide text
-    return cat not in ("Cc", "Cs", "Zl", "Zp")   # controls (C0, DEL, C1), lone surrogates, line/paragraph separators
-
-
 def clean_reply(text, cap=REPLY_CAP):
     """-> (text, characters_dropped). A reply is data for a reader, not something that can steer a
     terminal, reorder what is shown or break a file write: control characters (the C0 and C1
@@ -69,5 +58,5 @@ def clean_reply(text, cap=REPLY_CAP):
     (bidirectional overrides and isolates and the like; the joiners are kept), lone surrogates (they
     cannot be written as UTF-8) and the Unicode line and paragraph separators are removed. Then the
     text is cut to `cap` characters."""
-    text = "".join(ch for ch in str(text) if _allowed(ch))
+    text = sanitize.clean(text)
     return text[:cap], max(0, len(text) - cap)

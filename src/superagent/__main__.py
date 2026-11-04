@@ -2,6 +2,8 @@
 
   run        start the orchestrator (stays in the foreground; Ctrl-C stops it cleanly)
   status     show tickets, open questions and the outbox (works while it runs)
+  decisions  show recorded decisions (read-only);  --for-labeling exports the messages without the answers
+  eval       replay a labelled corpus through the model session offline and report (a measurement, not a verdict)
   answer     answer a question:   answer <ask_id> y|n
   stop       stop a ticket for good
   resume     clear the note on a ticket that was parked, so it starts again
@@ -27,12 +29,9 @@ from .store import AskRejected, Store, StoreLocked
 DEFAULT_HOME = "C:/Users/roy/superagent_home"
 
 
-def build_engine(args, store):
-    cfg = ExecutorConfig(
-        provider=args.provider, base_url=args.base_url, model=args.model,
-        api_key=os.environ.get("SUPERAGENT_API_KEY", ""), backoff=args.backoff)
+def parse_rules(texts):
     rules = []
-    for text in args.rule:
+    for text in texts:
         name, sep, instruction = text.partition("=")
         if not sep:
             raise SystemExit(f"--rule needs NAME=description, got {text!r}")
@@ -40,6 +39,14 @@ def build_engine(args, store):
             rules.append(Rule(name.strip(), instruction.strip()))
         except ValueError as e:
             raise SystemExit(f"--rule: {e}")
+    return rules
+
+
+def build_engine(args, store):
+    cfg = ExecutorConfig(
+        provider=args.provider, base_url=args.base_url, model=args.model,
+        api_key=os.environ.get("SUPERAGENT_API_KEY", ""), backoff=args.backoff)
+    rules = parse_rules(args.rule)
     policy = Policy(allowed_senders=frozenset(filter(None, args.allow.split(","))),
                     bot_senders=frozenset(filter(None, args.bots.split(","))),
                     accept_mode=args.accept_mode, rules=tuple(rules))
@@ -134,6 +141,54 @@ def cmd_status(args):
     return 0
 
 
+def cmd_decisions(args):
+    from . import decisions_view as dv
+    try:
+        since = dv.parse_since(args.since) if args.since else None
+        rows = dv.read_decisions(args.home, since=since, verdict=args.verdict,
+                                 would_accept=True if args.would_accept else None, limit=args.limit,
+                                 candidates_only=args.for_labeling)
+        if args.for_labeling or args.jsonl:
+            out = dv.to_jsonl(rows, text_cap=args.text_cap, blind=args.for_labeling, card_cap=args.card_cap)
+        else:
+            out = dv.to_table(rows)
+    except dv.DecisionsError as e:
+        print(f"[superagent] {e}", file=sys.stderr)
+        return 1
+    if out:
+        sys.stdout.write(out if out.endswith("\n") else out + "\n")
+    return 0
+
+
+def cmd_eval(args):
+    from . import corpus as corpus_mod
+    from . import replay as rp
+    from .sanitize import json_safe
+    rules = parse_rules(args.rule)
+    cfg = rp.ReplayConfig(
+        provider=args.provider, base_url=args.base_url, model=args.model, rules=tuple(rules),
+        repeats=args.repeats, order_check=args.order_check, batch_max=args.batch_max, card_cap=args.card_cap,
+        half_width=args.half_width, confidence=args.confidence, eval_timeout=args.eval_timeout,
+        chunk_timeout=args.chunk_timeout, backoff=args.backoff, hash_ids=args.hash_ids)
+    try:
+        cfg.validate()
+        corpus = corpus_mod.load(args.corpus, cfg.rules, cfg.card_cap, allow_shared_threads=args.allow_shared_threads,
+                                 allow_truncated=args.allow_truncated)
+    except (ValueError, corpus_mod.CorpusError) as e:
+        problems = getattr(e, "problems", None) or [str(e)]
+        print("[superagent] eval refused:\n  " + "\n  ".join(problems), file=sys.stderr)
+        return 1
+    report = rp.replay(corpus, cfg)
+    text = json_safe(json.dumps(report, indent=1, ensure_ascii=False))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text + "\n")
+        print(f"[superagent] report written to {args.out}")
+    else:
+        print(text)
+    return 0
+
+
 def send(args, cmd, **kw):
     ch = Channel(args.home)
     res = ch.wait(ch.submit(cmd, **kw), args.wait)
@@ -179,6 +234,36 @@ def main(argv=None):
     r.add_argument("--main-model")
     r.add_argument("--main-base-url")
     sub.add_parser("status")
+    v = sub.add_parser("decisions", help="show the recorded decisions (read-only; works while it runs)")
+    v.add_argument("--since", help="epoch seconds or an ISO time")
+    v.add_argument("--verdict", help="accept, ignore or unavailable")
+    v.add_argument("--would-accept", action="store_true", help="only observe-mode rows where a rule matched")
+    v.add_argument("--limit", type=int, help="the latest N rows")
+    v.add_argument("--jsonl", action="store_true", help="one JSON object per line instead of a table")
+    v.add_argument("--text-cap", type=int, default=200)
+    v.add_argument("--for-labeling", action="store_true",
+                   help="blind JSONL of the messages the model saw, without what it answered (implies --jsonl)")
+    v.add_argument("--card-cap", type=int, default=CARD_CAP, help="characters of text the model sees per card (for --for-labeling); the home does not "
+                        "record the cap a past run used, so give the one it ran with")
+    e = sub.add_parser("eval", help="replay a labelled corpus through the model session, offline, and report")
+    e.add_argument("--corpus", required=True, help="JSONL file: id, text, label (rule name or null), optional uncertain/sender/thread/note")
+    e.add_argument("--rule", action="append", default=[], metavar="NAME=DESCRIPTION", required=True)
+    e.add_argument("--provider", default=os.environ.get("HARNESS_PROVIDER", "vllm"))
+    e.add_argument("--base-url", default=os.environ.get("HARNESS_BASE_URL", ""))
+    e.add_argument("--model", default=os.environ.get("HARNESS_MODEL", ""))
+    e.add_argument("--repeats", type=int, default=1)
+    e.add_argument("--order-check", action="store_true", help="also replay each batch in reverse order")
+    e.add_argument("--hash-ids", action="store_true", help="replace row ids by a short hash in the report")
+    e.add_argument("--batch-max", type=int, default=BATCH_MAX)
+    e.add_argument("--card-cap", type=int, default=CARD_CAP)
+    e.add_argument("--half-width", type=float, default=0.10, help="target half-width for the rows-needed estimate")
+    e.add_argument("--confidence", type=float, default=0.95)
+    e.add_argument("--eval-timeout", type=float, default=180.0)
+    e.add_argument("--chunk-timeout", type=float, default=600.0)
+    e.add_argument("--backoff", type=float, default=1.0)
+    e.add_argument("--allow-truncated", action="store_true", help="accept rows longer than the card cap")
+    e.add_argument("--allow-shared-threads", action="store_true", help="accept several rows in one thread")
+    e.add_argument("--out", help="write the report here instead of stdout")
     a = sub.add_parser("answer")
     a.add_argument("ask_id", type=int)
     a.add_argument("choice", choices=("y", "n"))
@@ -199,6 +284,12 @@ def main(argv=None):
             return 3
     if args.cmd == "status":
         return cmd_status(args)
+    if args.cmd == "decisions":
+        return cmd_decisions(args)
+    if args.cmd == "eval":
+        if not args.base_url or not args.model:
+            ap.error("eval needs --base-url and --model (or HARNESS_BASE_URL / HARNESS_MODEL)")
+        return cmd_eval(args)
     if args.cmd == "answer":
         return send(args, "answer", ask_id=args.ask_id, yes=args.choice == "y")
     if args.cmd == "stop":

@@ -58,7 +58,8 @@ CREATE TRIGGER IF NOT EXISTS mandate_no_delete BEFORE DELETE ON mandate
 CREATE TABLE IF NOT EXISTS decision(
   id INTEGER PRIMARY KEY, trigger_id INTEGER NOT NULL REFERENCES trigger(id), verdict TEXT NOT NULL,
   strength TEXT NOT NULL, reason TEXT NOT NULL, would_accept INTEGER NOT NULL,
-  ticket_id INTEGER, ts REAL NOT NULL);
+  ticket_id INTEGER, ts REAL NOT NULL,
+  model_rule TEXT);      -- NULL: no model answer; '': the model said no rule; else the name it gave
 CREATE TABLE IF NOT EXISTS input(
   id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES ticket(id),
   trigger_id INTEGER NOT NULL REFERENCES trigger(id), delivery_key TEXT NOT NULL UNIQUE,
@@ -186,6 +187,12 @@ class Store:
                 # whatever an older version recorded as answered is settled history, not an
                 # answer still waiting to be seen to arrive
                 db.execute("UPDATE ask SET confirmed=1")
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(decision)")}
+        if "model_rule" not in cols:
+            with self.tx() as db:
+                # NOT filled in for old rows: NULL there means "nobody recorded it", and writing ''
+                # would turn that into "the model said no rule applies"
+                db.execute("ALTER TABLE decision ADD COLUMN model_rule TEXT")
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(ticket)")}
         if "last_activity" not in cols:
             with self.tx() as db:
@@ -283,9 +290,9 @@ class Store:
     def record_decision(self, trigger_id, d, ticket_id=None):
         with self.tx() as db:
             db.execute("INSERT INTO decision(trigger_id, verdict, strength, reason, would_accept, "
-                       "ticket_id, ts) VALUES(?,?,?,?,?,?,?)",
+                       "ticket_id, ts, model_rule) VALUES(?,?,?,?,?,?,?,?)",
                        (trigger_id, d.verdict.value, d.strength.value, d.reason,
-                        int(d.would_accept), ticket_id, time.time()))
+                        int(d.would_accept), ticket_id, time.time(), d.model_rule))
 
     def decisions(self):
         return self._q("SELECT * FROM decision ORDER BY id")
