@@ -153,5 +153,126 @@ class TestEvalCommand(Cli):
         self.assertEqual(os.listdir(scratch), [], "the replay's temporary folders must be gone")
 
 
+class TestOperatingCommands(Cli):
+    """The commands a person uses by hand: label (make the page), eval with progress and a readable
+    summary, report (read a saved report)."""
+
+    def setUp(self):
+        super().setUp()
+        self.llm = sup.FakeLLM([])
+
+    def tearDown(self):
+        self.llm.close()
+        super().tearDown()
+
+    def messages(self, n=2):
+        path = os.path.join(self.dir, "msgs.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(f"message {i}" for i in range(1, n + 1)) + "\n")
+        return path
+
+    def test_label_writes_a_page_and_says_what_to_do_next(self):
+        out_path = os.path.join(self.dir, "label.html")
+        code, out, err = run(["label", "--input", self.messages(3), "--out", out_path,
+                              "--rule", RULES[0], "--rule", RULES[1]])
+        self.assertEqual(code, 0, err)
+        self.assertIn("3 messages", out)
+        with open(out_path, encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn('"name": "a"', html)
+        self.assertIn("message 2", html)
+
+    def test_label_refuses_what_it_cannot_use_with_a_message(self):
+        out_path = os.path.join(self.dir, "label.html")
+        code, out, err = run(["label", "--input", os.path.join(self.dir, "missing.txt"), "--out", out_path, "--rule", RULES[0]])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("label refused", err)
+        empty = os.path.join(self.dir, "empty.txt")
+        open(empty, "w").close()
+        code, _, err = run(["label", "--input", empty, "--out", out_path, "--rule", RULES[0]])
+        self.assertEqual(code, 1)
+        code, _, err = run(["label", "--input", self.messages(), "--out", out_path, "--rule", RULES[0], "--card-cap", "0"])
+        self.assertEqual(code, 1)
+        self.assertEqual(run(["label", "--input", self.messages(), "--out", out_path])[0], 2, "no rule is a usage error")
+        self.assertFalse(os.path.exists(out_path), "nothing is written when it refuses")
+
+    def test_eval_prints_progress_and_a_summary_and_quiet_turns_progress_off(self):
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+        path = self.corpus([{"id": "r1", "text": "about a", "label": "a"}, {"id": "r2", "text": "about nothing", "label": None}])
+        rules = [x for r in RULES for x in ("--rule", r)]
+        base = ["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model", "--backoff", "0.01"]
+        report_path = os.path.join(self.dir, "r.json")
+        code, out, err = run(base + ["--out", report_path, "--errors"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[eval] pass 1/1: batch 1/1", err)
+        self.assertIn("召回 recall", out)
+        self.assertIn("答錯或沒答案的計分列（第 1 次）：0", out)
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+        code, out, err = run(base + ["--out", report_path, "--quiet"])
+        self.assertEqual((code, "[eval]" in err), (0, False))
+        # without --out the JSON itself goes to stdout and no summary is mixed into it
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+        code, out, err = run(base + ["--quiet"])
+        self.assertEqual(json.loads(out)["schema"], 1)
+
+    def test_report_reads_a_saved_file_and_lists_errors_with_the_corpus_text(self):
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": None, "reason": "r"},
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+        path = self.corpus([{"id": "r1", "text": "this one is about a", "label": "a"}, {"id": "r2", "text": "x", "label": None}])
+        rules = [x for r in RULES for x in ("--rule", r)]
+        report_path = os.path.join(self.dir, "r.json")
+        run(["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model",
+             "--backoff", "0.01", "--out", report_path, "--quiet"])
+        code, out, err = run(["report", report_path])
+        self.assertEqual(code, 0, err)
+        self.assertIn("召回 recall", out)
+        self.assertNotIn("this one is about a", out)
+        code, out, _ = run(["report", report_path, "--errors", "--corpus", path])
+        self.assertIn("r1  標註 a  模型 null  | this one is about a", out)
+
+    def test_an_output_path_that_cannot_be_written_is_a_message_not_a_traceback(self):
+        missing = os.path.join(self.dir, "no_such_folder", "x")
+        code, out, err = run(["label", "--input", self.messages(), "--out", missing + ".html", "--rule", RULES[0]])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("cannot write the page", err)
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
+        path = self.corpus([{"id": "r1", "text": "about a", "label": "a"}])
+        rules = [x for r in RULES for x in ("--rule", r)]
+        code, out, err = run(["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model",
+                              "--backoff", "0.01", "--quiet", "--out", missing + ".json"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot write the report", err)
+        self.assertEqual(json.loads(out)["schema"], 1, "the finished report is not lost: it is on stdout")
+        self.assertEqual(json.loads(out)["corpus"]["rows"], 1)
+
+    def test_hashed_ids_still_get_their_message_openings_in_the_error_list(self):
+        """Second review: --hash-ids changed the ids in the report, and the snippets were looked up by the
+        original ids, so no opening was ever shown."""
+        from superagent.corpus import hashed_id
+        self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": None, "reason": "r"}]})}]
+        path = self.corpus([{"id": "r1", "text": "this one is about a", "label": "a"}])
+        rules = [x for r in RULES for x in ("--rule", r)]
+        report_path = os.path.join(self.dir, "r.json")
+        code, out, err = run(["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model",
+                              "--backoff", "0.01", "--quiet", "--hash-ids", "--errors", "--out", report_path])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{hashed_id('r1')}  標註 a  模型 null  | this one is about a", out)
+        self.assertNotIn("r1  標註", out)
+        code, out, _ = run(["report", report_path, "--errors", "--corpus", path])
+        self.assertIn(f"{hashed_id('r1')}  標註 a  模型 null  | this one is about a", out)
+
+    def test_report_on_a_bad_file_is_a_message_not_a_traceback(self):
+        junk = os.path.join(self.dir, "junk.json")
+        with open(junk, "w") as f:
+            f.write('{"not": "a report"}')
+        for target in (junk, os.path.join(self.dir, "nope.json")):
+            code, out, err = run(["report", target])
+            self.assertEqual((code, out), (1, ""))
+            self.assertIn("cannot read the report", err)
+
+
 if __name__ == "__main__":
     unittest.main()
