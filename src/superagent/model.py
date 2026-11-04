@@ -1,7 +1,7 @@
 """Plain data used across the package. No behaviour, no I/O."""
 import dataclasses
 import enum
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 class Strength(enum.Enum):
@@ -56,6 +56,11 @@ class Decision:
     strength: Strength
     reason: str
     would_accept: bool = False         # observe mode: an inferred candidate that auto would take
+    # What the model said, for the audit trail (never the grounds for a decision):
+    #   None  no model answer (rule-based decision, explicit request, a candidate given up on)
+    #   ""    the model said no rule applies
+    #   name  the rule the model named; a name the policy does not know is kept cleaned and cut to 64 characters
+    model_rule: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)

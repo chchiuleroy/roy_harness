@@ -7,10 +7,12 @@ import dataclasses
 import re
 from typing import FrozenSet, Literal, Optional, Protocol, Tuple
 
+from . import sanitize
 from .model import Authorized, Decision, Strength, Trigger, Verdict
 
 RULE_NAME = re.compile(r"^[a-z0-9-]{1,32}$")
 RULE_MAX = 300
+UNKNOWN_RULE_MAX = 64          # a rule name the model made up is kept this long, for the audit trail
 _FORBIDDEN_IN_RULE = ("```", "[SUPERAGENT-", "[END-OF-")
 
 
@@ -106,14 +108,20 @@ def authorize(model_rule, reason, strength, policy) -> Authorized:
     """
     if strength is not Strength.INFERRED:
         raise ValueError("only inferred candidates are assessed by the model")
-    why = reason[:RULE_MAX] if isinstance(reason, str) else ""
+    # The model's words go into the database and to a screen: cleaned first (a lone surrogate, which a
+    # JSON "\ud800" escape produces, cannot be stored at all), cut after.
+    why = sanitize.clean_line(reason)[:RULE_MAX] if isinstance(reason, str) else ""
     if model_rule is None:
-        return Authorized(Decision(Verdict.IGNORE, strength, f"model: {why}" if why else "model: no rule matches"))
+        return Authorized(Decision(Verdict.IGNORE, strength, f"model: {why}" if why else "model: no rule matches",
+                                   model_rule=""))
     if not isinstance(model_rule, str) or model_rule not in {r.name for r in policy.rules}:
-        return Authorized(Decision(Verdict.UNAVAILABLE, strength, "unknown rule"))
+        # What the model wrote is kept for the audit only, cleaned first and cut after.
+        said = sanitize.clean_line(model_rule)[:UNKNOWN_RULE_MAX]
+        return Authorized(Decision(Verdict.UNAVAILABLE, strength, "unknown rule", model_rule=said))
     if policy.accept_mode == "auto":
-        return Authorized(Decision(Verdict.ACCEPT, strength, f"rule {model_rule}: {why}"), (model_rule,))
+        return Authorized(Decision(Verdict.ACCEPT, strength, f"rule {model_rule}: {why}", model_rule=model_rule),
+                          (model_rule,))
     if policy.accept_mode == "observe":
         return Authorized(Decision(Verdict.IGNORE, strength, f"observe: would accept (rule {model_rule}): {why}",
-                                   would_accept=True))
-    return Authorized(Decision(Verdict.IGNORE, strength, "accept mode is off"))
+                                   would_accept=True, model_rule=model_rule))
+    return Authorized(Decision(Verdict.IGNORE, strength, "accept mode is off", model_rule=model_rule))

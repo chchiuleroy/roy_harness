@@ -124,6 +124,7 @@ python -X utf8 -m superagent --home <資料夾> run --allow alice \
     --base-url http://localhost:8000/v1 --model <模型名>
 # 丟事件進 <資料夾>/inbox/（一個事件一個 JSON 檔）；結果在 <資料夾>/outbox/
 python -X utf8 -m superagent --home <資料夾> status
+python -X utf8 -m superagent --home <資料夾> decisions        # 唯讀看模型到底判了什麼；eval 用人工標註語料量模型（只量不判通過，見 docs）
 ```
 
 **和 DeepSeek 的 Super-agent 原型的關係**：設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型（Trigger／Thread／Ticket／Mandate、訂閱透傳、observe→auto 的灰度、先落庫再動作），但這是**另一份 Python 實作**，沒有複製其程式碼，也和它不相容：原型是 TypeScript、打包成 DeepSeek Harness 的 bundle，來源是 GitHub／飛書；這裡的執行端是本 repo 的 harness，來源目前只有本機檔案收件匣。
