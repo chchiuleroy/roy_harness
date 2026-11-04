@@ -186,8 +186,19 @@ class HarnessExecutor:
         threading.Thread(target=self._pump_out, args=(proc,), daemon=True).start()
         threading.Thread(target=self._pump_err, args=(proc,), daemon=True).start()
 
+    @staticmethod
+    def _lines(pipe):
+        """Lines of a child's pipe. stop() closes the pipe while the pump threads are reading it; on
+        Windows that makes the read raise (ValueError 'PyMemoryView_FromBuffer(): info->buf must not be
+        NULL', or OSError). The pipe is simply finished then, so end quietly instead of printing a traceback."""
+        try:
+            for raw in pipe:
+                yield raw
+        except (OSError, ValueError):
+            return
+
     def _pump_out(self, proc):
-        for raw in proc.stdout:
+        for raw in self._lines(proc.stdout):
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             try:
                 ev = json.loads(line)
@@ -200,7 +211,7 @@ class HarnessExecutor:
         self._emit({"kind": "exited", "code": code, "_pid": proc.pid})
 
     def _pump_err(self, proc):
-        for raw in proc.stderr:
+        for raw in self._lines(proc.stderr):
             self._emit({"kind": "stderr", "text": raw.decode("utf-8", "replace").rstrip("\r\n"),
                         "_pid": proc.pid})
 

@@ -6,6 +6,10 @@ import os
 import subprocess
 import sys
 
+# PowerShell writes to the console code page (cp950 here) unless told otherwise; decoding that as UTF-8
+# raised UnicodeDecodeError in a reader thread (printed as a traceback by `down`)
+UTF8_OUT = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -45,10 +49,10 @@ def cmdline(pid):
         return None
     ps = os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32", "WindowsPowerShell",
                       "v1.0", "powershell.exe")
-    script = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"
+    script = UTF8_OUT + f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"
     try:
         out = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
-                             capture_output=True, text=True, encoding="utf-8", timeout=30,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -76,11 +80,11 @@ def find_by_cmdline(*fragments):
                       "v1.0", "powershell.exe")
     tests = " -and ".join("$_.CommandLine.ToLower().Contains('" + os.path.normcase(f).replace("'", "''") + "')"
                           for f in fragments)
-    script = ("Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and "
+    script = (UTF8_OUT + "Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and "
               "$_.CommandLine -and " + tests + " } | ForEach-Object { $_.ProcessId }")
     try:
         out = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
-                             capture_output=True, text=True, encoding="utf-8", timeout=60,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return []
