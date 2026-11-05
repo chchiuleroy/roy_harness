@@ -21,7 +21,6 @@ from superagent.store import Store
 from test_superagent_engine import Rig
 
 REPO = os.path.normpath(os.path.join(sup.HERE, ".."))
-BASELINE = "a10ef4e"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -45,12 +44,55 @@ def not_green(outcomes):
                   if outcome not in ("ok", "skipped", "expected failure"))
 
 
+def without_superagent_tests(outcomes):
+    """The outcomes of the tests that are still there once the superagent test files are deleted
+    (the removal copy deletes every tests/ file with 'superagent' in its name, so match the same way)."""
+    return {name: o for name, o in outcomes.items() if "superagent" not in name.split(".")[0]}
+
+
+def passed_count(outcomes):
+    """How many tests actually passed (skipped ones did not run anything)."""
+    return sum(1 for o in outcomes.values() if o == "ok")
+
+
+def suite_env(environ):
+    """The environment for a nested suite run. The full tree now contains this very test, so the
+    nested run must not see SUPERAGENT_REMOVAL (it would start another nested run, forever); the
+    live switches go too, so both sides of the comparison are the offline suite."""
+    return {k: v for k, v in environ.items() if k not in ("HARNESS_LIVE", "SUPERAGENT_LIVE", "SUPERAGENT_REMOVAL")}
+
+
 class TestRemovalGuard(unittest.TestCase):
+    def test_a_suite_that_mostly_skipped_does_not_count_as_having_run(self):
+        """'Identical' is only worth something if the tests ran. Skipped counts as green in
+        not_green, so a suite that discovered 200 tests and skipped them all would otherwise
+        pass the comparison without any harness code having been executed."""
+        self.assertEqual(passed_count({"a": "ok", "b": "skipped", "c": "FAIL", "d": "ok"}), 2)
+        self.assertEqual(passed_count({name: "skipped" for name in "abcdef"}), 0)
+
+    def test_a_nested_run_cannot_start_another_removal_check(self):
+        env = suite_env({"SUPERAGENT_REMOVAL": "1", "SUPERAGENT_LIVE": "1", "HARNESS_LIVE": "1", "PATH": "p"})
+        self.assertEqual(env, {"PATH": "p"})
+
     def test_a_baseline_that_is_not_green_is_reported(self):
         self.assertEqual(not_green({"a": "ok", "b": "skipped"}), [])
         self.assertEqual(not_green({"a": "ok", "b": "FAIL", "c": "ERROR"}), ["b", "c"])
         self.assertEqual(not_green({"unittest.loader._FailedTest.x": "ERROR"}),
                          ["unittest.loader._FailedTest.x"])
+
+    def test_only_the_tests_that_survive_removal_are_compared(self):
+        """The removal check runs the whole suite, then compares what is left once the superagent
+        tests are dropped. If the filter kept a superagent test, the copy without superagent could
+        never match it; if it dropped a harness test, a harness test that needs superagent would
+        slip through. Matching on the module name (the first dotted part of the id) is what the
+        copy does when it deletes files with 'superagent' in their name."""
+        got = without_superagent_tests({
+            "test_harness_vllm.TestA.test_x": "ok",
+            "test_harness_gui.TestB.test_y": "FAIL",
+            "test_superagent_cli.TestC.test_z": "ok",
+            "test_superagent_engine.TestD.test_w": "ok"})
+        self.assertEqual(got, {"test_harness_vllm.TestA.test_x": "ok",
+                               "test_harness_gui.TestB.test_y": "FAIL"})
 
 
 class TestControlChannel(unittest.TestCase):
@@ -232,40 +274,35 @@ class TestCommandLine(Rig):
 @unittest.skipUnless(os.environ.get("SUPERAGENT_REMOVAL") == "1",
                      "slow: set SUPERAGENT_REMOVAL=1 to run the removal check")
 class TestRemovable(unittest.TestCase):
-    """C1a: the harness is byte-for-byte what it was, and its own tests give the same results
-    with the superagent folder and its tests deleted."""
+    """C1a: the harness's own tests give the same results with the superagent folder and its tests
+    deleted as they do in the full tree. (This used to also pin src/harness to one commit; that
+    made the check go red the first time anyone legitimately changed the harness, and it measured
+    'nobody touched the harness' rather than 'the harness does not need superagent'.)"""
 
     def run_suite(self, root):
         """{test id: outcome} for the suite in `root`, from a runner that records nothing else."""
         runner = os.path.join(sup.HERE, "superagent_removal_runner.py")
         r = subprocess.run([sys.executable, "-X", "utf8", runner, root], capture_output=True, text=True,
-                           encoding="utf-8", env={k: v for k, v in os.environ.items() if k != "HARNESS_LIVE"})
+                           encoding="utf-8", env=suite_env(os.environ))
         lines = [ln for ln in r.stdout.splitlines() if ln.startswith("{")]
         self.assertTrue(lines, r.stderr[-2000:])
         return json.loads(lines[-1])
 
-    def test_harness_untouched_and_suite_identical_without_superagent(self):
-        def git(*a):
-            return subprocess.run(["git", *a], cwd=REPO, capture_output=True, text=True, encoding="utf-8")
-        if git("cat-file", "-t", BASELINE).stdout.strip() != "commit":
-            self.skipTest("baseline commit is not available in this clone")
-        self.assertEqual(git("diff", BASELINE, "--", "src/harness").stdout, "")
-        self.assertEqual(git("status", "--porcelain", "--", "src/harness").stdout, "",
-                         "src/harness has changes or new files")
-        with tempfile.TemporaryDirectory() as base, tempfile.TemporaryDirectory() as cur:
-            subprocess.run(["git", "archive", BASELINE, "--output", os.path.join(base, "a.tar")], cwd=REPO, check=True)
-            subprocess.run(["tar", "-xf", os.path.join(base, "a.tar"), "-C", base], check=True)
-            for name in ("src", "tests", "bench"):
-                if os.path.isdir(os.path.join(REPO, name)):
-                    shutil.copytree(os.path.join(REPO, name), os.path.join(cur, name),
-                                    ignore=shutil.ignore_patterns("__pycache__"))
-            shutil.rmtree(os.path.join(cur, "src", "superagent"))
-            for f in os.listdir(os.path.join(cur, "tests")):
+    def test_suite_identical_without_superagent(self):
+        with tempfile.TemporaryDirectory() as full, tempfile.TemporaryDirectory() as cut:
+            for root in (full, cut):
+                for name in ("src", "tests", "bench"):
+                    if os.path.isdir(os.path.join(REPO, name)):
+                        shutil.copytree(os.path.join(REPO, name), os.path.join(root, name),
+                                        ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.rmtree(os.path.join(cut, "src", "superagent"))
+            for f in os.listdir(os.path.join(cut, "tests")):
                 if "superagent" in f:
-                    os.remove(os.path.join(cur, "tests", f))
-            before, after = self.run_suite(base), self.run_suite(cur)
-        self.assertGreater(len(before), 50, "the baseline suite did not run")
-        self.assertEqual(not_green(before), [], "the baseline suite is not green, so 'identical' proves little")
+                    os.remove(os.path.join(cut, "tests", f))
+            before = without_superagent_tests(self.run_suite(full))
+            after = self.run_suite(cut)
+        self.assertGreater(passed_count(before), 50, "the full-tree suite did not run (skipped tests ran nothing)")
+        self.assertEqual(not_green(before), [], "the full-tree suite is not green, so 'identical' proves little")
         self.assertEqual(after, before)
 
 

@@ -1,7 +1,8 @@
 """Run another checkout's test suite and print {test id: outcome} as JSON.
 
-Used by TestRemovable: the same runner is pointed at the baseline commit and at a copy of the
-working tree with superagent deleted, and the two dictionaries must be equal. It records only
+Used by TestRemovable: the same runner is pointed at a copy of the working tree and at another
+copy with superagent deleted, and the two dictionaries (the first one without the superagent
+tests) must be equal. It records only
 the test id and one word, never messages or timings, so nothing machine- or run-specific
 (temp folders, process ids) can make two identical suites look different.
 
