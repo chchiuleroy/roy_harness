@@ -70,6 +70,13 @@ def is_ours(pid, expected_create_time, must_contain, tolerance=2.0):
     return bool(line) and os.path.normcase(must_contain) in os.path.normcase(line)
 
 
+def _ps_single_quoted(text):
+    """`text` ready to sit between PowerShell single quotes. PowerShell reads the typographic quotes
+    U+2018..U+201B as quotes too, so each of them is doubled like the plain one (a home folder named
+    "Roy's files" with a curly apostrophe made the whole scan fail with a parse error and find nothing)."""
+    return "".join(c * 2 if c in "'‘’‚‛" else c for c in text)
+
+
 def find_by_cmdline(*fragments):
     """Pids of processes whose command line contains EVERY fragment (case-insensitive), not
     counting the scan itself. Used by the emergency path when the database cannot be trusted;
@@ -78,7 +85,7 @@ def find_by_cmdline(*fragments):
         return []
     ps = os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32", "WindowsPowerShell",
                       "v1.0", "powershell.exe")
-    tests = " -and ".join("$_.CommandLine.ToLower().Contains('" + os.path.normcase(f).replace("'", "''") + "')"
+    tests = " -and ".join("$_.CommandLine.ToLower().Contains('" + _ps_single_quoted(os.path.normcase(f)) + "')"
                           for f in fragments)
     script = (UTF8_OUT + "Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and "
               "$_.CommandLine -and " + tests + " } | ForEach-Object { $_.ProcessId }")
