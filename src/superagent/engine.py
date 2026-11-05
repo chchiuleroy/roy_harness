@@ -76,6 +76,7 @@ class Engine:
         self.batch_max, self.batch_min, self.batch_wait = batch_max, batch_min, batch_wait
         self.eval_timeout, self.card_cap = eval_timeout, card_cap
         self.main_retry_at = 0.0
+        self.main_blocked = None       # why the model session could not start (None: it can, or was not needed yet)
         if main is not None:                # the model session is a process like any other: record it
             main.on_start = lambda pid, ctime, cwd: self.store.record_process(pid, ctime, 0, cwd)
             main.on_stop = lambda pid: self.store.forget_process(pid, 0)
@@ -191,8 +192,10 @@ class Engine:
             return
         if not self.main.ensure_running():
             self.note("main_cannot_start", why=self.main.last_error)
+            self.main_blocked = self.main.last_error or "unknown reason"
             self.main_retry_at = self.clock() + 30.0
             return
+        self.main_blocked = None
         text = ms.build_batch_text(items, self.policy.rules, self.card_cap)
         batch_id = self.store.create_eval_batch([i["trigger_id"] for i in items], text,
                                                 self.main.generation, self.clock())

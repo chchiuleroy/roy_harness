@@ -247,7 +247,29 @@ class TestRetriesAndLimits(Rig):
         self.assertEqual(self.engine.store.eval_counts()["pending"], 1)
         self.assertTrue([e for e in self.engine.events if e["kind"] == "main_cannot_start"])
         self.assertIn("characters", self.engine.status()["model_session"]["last_error"])
+        self.assertIn("characters", self.engine.main_blocked, "`run --once` reads this to know it must give up")
         self.assertEqual(self.llm.requests, [])
+
+    def test_the_cannot_start_mark_is_cleared_when_the_session_starts_later(self):
+        """`run --once` gives up while the mark is set. A stale mark after a late success would end it while
+        the batch is still with the model, and the candidates would be left unjudged."""
+        self.llm.script[:] = [{"text": answer((1, "export-bug"))}]
+        real, calls = self.engine.main.ensure_running, []
+
+        def first_start_fails():
+            calls.append(1)
+            if len(calls) == 1:
+                self.engine.main.last_error = "OSError: the first start fails"
+                return False
+            return real()
+
+        self.engine.main.ensure_running = first_start_fails
+        self.drop("001.json", "the export fails")
+        self.until(lambda: self.engine.main_blocked, what="the failed start to be noted")
+        self.assertEqual(self.engine.main_blocked, "OSError: the first start fails")
+        self.now[0] += 31.0                                    # past the 30 s wait before the next try
+        self.until(self.settled(1), what="the decision after the late start")
+        self.assertIsNone(self.engine.main_blocked)
 
 
 class TestInjection(Rig):

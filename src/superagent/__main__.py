@@ -97,15 +97,16 @@ def dispatch(engine, ch, name, cmd):
     return False
 
 
-def work_left(engine, store):
+def work_left(engine, store, model=True):
     """What `run --once` waits for: a ticket still running, a reply not yet delivered, an event file still in
     the inbox, or a message still waiting for (or being judged by) the model session. The last two were
-    missing: with --assessor model the loop used to exit after the first tick with every candidate pending."""
+    missing: with --assessor model the loop used to exit after the first tick with every candidate pending.
+    model=False leaves out the candidates only the model session can judge (it cannot start: see cmd_run)."""
     counts = store.eval_counts()
     folder = getattr(engine.source, "folder", None)               # only the file inbox has one
     inbox_left = folder is not None and any(n.endswith(".json") for n in os.listdir(folder))
     return bool(engine.runs) or bool(store.outbox_rows("pending")) or inbox_left \
-        or counts["pending"] + counts["sent"] > 0
+        or (model and counts["pending"] + counts["sent"] > 0)
 
 
 def cmd_run(args):
@@ -113,6 +114,7 @@ def cmd_run(args):
     engine = build_engine(args, store)
     ch = Channel(args.home)
     stop = threading.Event()
+    blocked = None
     signal.signal(signal.SIGINT, lambda *a: stop.set())
     try:
         engine.recover()
@@ -124,10 +126,18 @@ def cmd_run(args):
             engine.tick()
             if args.once and not work_left(engine, store):
                 break
+            if args.once and engine.main_blocked and not work_left(engine, store, model=False):
+                blocked = engine.main_blocked          # nothing else is going on and nothing will judge the rest
+                left = store.eval_counts()["pending"]
+                break
             time.sleep(args.interval)
     finally:
         engine.shutdown()
         store.close()
+    if blocked:
+        print(f"[superagent] run --once stopped: the model session cannot start ({blocked}); "
+              f"{left} message(s) were left pending for a later run", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -275,7 +285,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--once", action="store_true", help="exit when nothing is running, the outbox is empty, the inbox has no event files left and "
-                        "no message is waiting for the model")
+                        "no message is waiting for the model (exit 1 if the model session cannot start)")
     r.add_argument("--interval", type=float, default=0.5)
     r.add_argument("--inbox")
     r.add_argument("--outbox")

@@ -14,9 +14,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import superagent_support as sup
 from superagent.__main__ import main
+from superagent.engine import Engine
+from superagent.main_session import MainSession
 from superagent.model import Decision, Strength, Trigger, Verdict
 from superagent.store import Store
 
@@ -331,6 +334,45 @@ class TestOperatingFixes(Cli):
         self.assertEqual([json.loads(x)["model_rule"] for x in out.splitlines()], ["a", ""])
         self.assertEqual([n for n in os.listdir(inbox) if n.endswith(".json")], [], "every event file was taken")
 
+    def test_run_once_gives_up_when_the_model_session_cannot_start(self):
+        """With --assessor model every candidate waits for the model session. If that session can never start
+        (preflight or process-start error) nothing will ever judge them, and `--once` used to wait forever
+        (the review of PR #16 found it). It must stop, say why, exit 1, and leave the candidates pending so a
+        later run can still judge them."""
+        inbox = os.path.join(self.home, "inbox")
+        os.makedirs(inbox)
+        path = os.path.join(inbox, "001.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"id": "e1", "sender": "alice", "thread": "t1", "text": "the export fails",
+                       "addressed": False}, f)
+        os.utime(path, (time.time() - 10, time.time() - 10))
+        ticks, real_tick = [], Engine.tick
+
+        def counted_tick(engine):
+            ticks.append(1)
+            if len(ticks) > 300:                      # a loop that never ends is a failure, not a hung test run
+                raise AssertionError("run --once was still waiting after 300 ticks")
+            return real_tick(engine)
+
+        def cannot_start(session):
+            session.last_error = "OSError: simulated start failure"
+            return False
+
+        rules = [x for r in RULES for x in ("--rule", r)]
+        with mock.patch.object(Engine, "tick", counted_tick), \
+                mock.patch.object(MainSession, "ensure_running", cannot_start):
+            code, out, err = run(["--home", self.home, "run", "--once", "--allow", "alice", "--assessor", "model",
+                                  *rules, "--base-url", "http://127.0.0.1:9/v1", "--model", "fake-model",
+                                  "--interval", "0.01", "--batch-wait", "0.1"])
+        self.assertEqual(code, 1)
+        self.assertIn("simulated start failure", err)
+        self.assertIn("1 message", err)
+        store = Store(self.home).open()
+        try:
+            self.assertEqual(store.eval_counts()["pending"], 1, "the candidate is still waiting for a later run")
+        finally:
+            store.close()
+
     def test_what_run_once_waits_for_is_each_of_its_four_things(self):
         """work_left on stand-ins: a running ticket, an undelivered reply, an event file still in the inbox, a
         candidate pending or in flight with the model. Only when all are clear may `--once` exit."""
@@ -357,6 +399,19 @@ class TestOperatingFixes(Cli):
                         ("a batch in flight", dict(sent=1))):
             with self.subTest(why):
                 self.assertTrue(state(**kw))
+
+    def test_work_left_without_the_model_ignores_only_the_model_part(self):
+        """When the model session cannot start, `--once` must still wait for what does not need the model (a
+        running ticket, a reply to deliver, an event file) but not for candidates only the model can judge."""
+        from types import SimpleNamespace
+        from superagent.__main__ import work_left
+        store = SimpleNamespace(outbox_rows=lambda status: [],
+                                eval_counts=lambda: {"pending": 2, "sent": 1, "done": 0, "unavailable": 0})
+        engine = SimpleNamespace(runs=[], source=object())
+        self.assertTrue(work_left(engine, store))
+        self.assertFalse(work_left(engine, store, model=False))
+        engine.runs = [1]
+        self.assertTrue(work_left(engine, store, model=False))
 
     def test_a_pipe_closed_under_a_pump_thread_ends_quietly(self):
         """stop() closes a child's pipe while the pump thread reads it; on Windows that raised ValueError
