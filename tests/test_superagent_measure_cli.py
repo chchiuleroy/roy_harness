@@ -443,5 +443,63 @@ class TestOperatingFixes(Cli):
             child.wait()
 
 
+class TestPumpsReadThroughTheQuietWrapper(unittest.TestCase):
+    """PR #16 mutation re-run: bypassing `_lines` in either pump thread left every test green, because the
+    existing test only calls `_lines` itself. These run the real pump methods."""
+
+    @staticmethod
+    def proc(stdout, stderr):
+        from types import SimpleNamespace
+        return SimpleNamespace(pid=4242, stdout=stdout, stderr=stderr, wait=lambda: 0)
+
+    @staticmethod
+    def broken_pipe(lines, error):
+        yield from lines
+        raise error
+
+    def drain(self, ex):
+        out = []
+        while not ex.events.empty():
+            out.append(ex.events.get_nowait())
+        return out
+
+    def test_stdout_pump_ends_with_an_exit_event_when_the_pipe_is_closed_under_it(self):
+        """stop() closes the pipe while this thread reads it; the thread must still report the exit."""
+        from superagent.executor import HarnessExecutor
+        ex = HarnessExecutor(cfg=None)
+        pipe = self.broken_pipe([b'{"kind": "hello"}\n'], ValueError("PyMemoryView_FromBuffer(): info->buf must not be NULL"))
+        ex._pump_out(self.proc(pipe, iter([])))
+        self.assertEqual([e["kind"] for e in self.drain(ex)], ["hello", "exited"])
+
+    def test_stderr_pump_keeps_what_it_read_when_the_pipe_is_closed_under_it(self):
+        from superagent.executor import HarnessExecutor
+        ex = HarnessExecutor(cfg=None)
+        pipe = self.broken_pipe([b"warning\n"], OSError("closed"))
+        ex._pump_err(self.proc(iter([]), pipe))
+        self.assertEqual([(e["kind"], e["text"]) for e in self.drain(ex)], [("stderr", "warning")])
+
+
+@unittest.skipUnless(os.name == "nt", "the PowerShell scan is a Windows matter")
+class TestScanByCommandLine(unittest.TestCase):
+    """`find_by_cmdline` is the emergency path that finds our harness children when the database cannot be
+    trusted (lifecycle.kill_all). A fragment is pasted into a PowerShell script, so what PowerShell reads as a
+    quote matters: it treats the typographic quotes U+2018..U+201B like the plain one."""
+
+    FRAGMENTS = ("plain", "it's", "Roy’s files", "left‘quote", "low‚quote", "rev‛quote",
+                 "中文參數", "$dollar", "back`tick")
+
+    def test_a_process_is_found_whatever_quotes_or_letters_its_command_line_holds(self):
+        from superagent import procutil
+        for fragment in self.FRAGMENTS:
+            with self.subTest(fragment=fragment):
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", fragment],
+                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                try:
+                    self.assertIn(child.pid, procutil.find_by_cmdline("time.sleep(60)", fragment))
+                finally:
+                    child.kill()
+                    child.wait()
+
+
 if __name__ == "__main__":
     unittest.main()
