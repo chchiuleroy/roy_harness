@@ -3020,9 +3020,14 @@ class TestSessionStats(HookBase):
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         hv.STATS.reset()
         self._rl = hv.read_line
+        # main() run in this process rebinds these (HookBase puts back HOOKS and SESSION_ID);
+        # a stub left in hv.MCP breaks every later test that goes through gate()
+        self._main_globals = {n: getattr(hv, n) for n in ("MCP", "SKILLS", "MEMORY", "SESSION_FILE")}
 
     def tearDown(self):
         hv.read_line = self._rl
+        for n, v in self._main_globals.items():
+            setattr(hv, n, v)
         self.srv.shutdown()
         super().tearDown()
 
@@ -3125,6 +3130,18 @@ class TestSessionStats(HookBase):
             del hv.STATS.line
             sys.argv, sys.stdin, hv.call_llm, hv.harness_mcp.connect_all = saved
         self.assertEqual(closed, [True])
+
+    def test_a_test_that_runs_main_does_not_leave_its_stub_servers_behind(self):
+        """main() rebinds module globals. The test above puts a stub in `hv.MCP`; if that
+        outlives the test, every later `gate()` call reads `reg.cfg` off the stub and fails
+        (TestMemoryFileIsProtected failed 8 times that way, only when the whole file ran)."""
+        before = hv.MCP
+        name = "test_mcp_servers_are_still_closed_when_the_summary_cannot_be_printed"
+        result = unittest.TextTestRunner(stream=io.StringIO()).run(TestSessionStats(name))
+        leaked = hv.MCP
+        hv.MCP = before                      # do not let a failure here poison the tests after it
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertIs(leaked, before)
 
     def test_odd_usage_values_neither_crash_the_run_nor_poison_the_summary(self):
         """A compatibility layer may send strings, lists, floats or NaN. Whole numbers count; the
