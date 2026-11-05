@@ -32,6 +32,10 @@ class AskRejected(Exception):
     """An answer that does not match a live question."""
 
 
+class TicketRejected(Exception):
+    """A person's command (stop, resume) that names a ticket that does not exist."""
+
+
 class StaleBatch(Exception):
     """An evaluation result that does not match the batch it claims to answer: the batch is not in
     flight any more, or a trigger is not part of it, or already has a decision."""

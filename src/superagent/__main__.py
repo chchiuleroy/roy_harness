@@ -26,7 +26,7 @@ from .executor import ExecutorConfig, HarnessExecutor
 from .gate import Policy, Rule, RuleAssessor
 from .main_session import BATCH_MAX, CARD_CAP, MainSession
 from .sources import FileInbox, FileSink
-from .store import AskRejected, Store, StoreLocked
+from .store import AskRejected, Store, StoreLocked, TicketRejected
 
 DEFAULT_HOME = "C:/Users/roy/superagent_home"
 
@@ -92,7 +92,7 @@ def dispatch(engine, ch, name, cmd):
             return True
         else:
             ch.reply(name, False, f"unknown command {kind!r}")
-    except (AskRejected, KeyError, ValueError, TypeError) as e:
+    except (AskRejected, TicketRejected, KeyError, ValueError, TypeError) as e:
         ch.reply(name, False, f"{type(e).__name__}: {e}")
     return False
 

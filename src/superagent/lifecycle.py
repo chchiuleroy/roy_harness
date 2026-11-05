@@ -75,7 +75,10 @@ def down(home, mode="stop", wait_for_engine=30.0):
         name = ch.submit("shutdown")
         res = ch.wait(name, wait_for_engine)
         if res is None:
-            raise RuntimeError("the orchestrator did not answer the shutdown request")
+            raise RuntimeError(
+                f"the orchestrator did not answer the shutdown request within {wait_for_engine:g} seconds; "
+                "it may still be shutting down (it closes its tickets first). "
+                "Run `status` to see whether it has stopped; there is no need to ask again.")
         deadline = time.time() + wait_for_engine
         while running(home) and time.time() < deadline:
             time.sleep(0.2)

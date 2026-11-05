@@ -42,7 +42,9 @@ python -X utf8 -m superagent --home C:/Users/roy/superagent_home down --mode sto
 python -X utf8 -m superagent --home C:/Users/roy/superagent_home down --mode purge   # 完全清除
 ```
 
-事件檔欄位：`id`、`thread`、`sender`、`text`、`addressed`（是否直接對 agent 說話）。壞檔會移到 `inbox/bad/` 並附 `.why.txt`，不會被默默丟掉。
+事件檔欄位：`id`、`thread`、`sender`、`text`、`addressed`（是否直接對 agent 說話）。壞檔（不是 JSON 物件、或 `text` 不是字串）會移到 `inbox/bad/` 並附 `.why.txt`，不會被默默丟掉。
+
+**缺欄位不會被拒絕，而是用預設值**（拼錯欄位名時要留意）：沒有 `thread` → 用 `id` 當 `thread`（每則這樣的訊息自成一個討論串，追問不會接回原本的 Ticket）；沒有 `id` → 用檔名；沒有 `sender` → `unknown`（不會在任何白名單裡）；沒有 `addressed` → `false`。只有 `text` 是必填。
 
 ### 三種「拿掉」
 
@@ -129,7 +131,7 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 
 | `kind` | 內容 |
 |---|---|
-| `status` | `ticket_id`、`text`：系統自己的話（已開 Ticket、需要處理、問題、重開、回合沒有文字） |
+| `status` | `ticket_id`、`text`：系統自己的話（已開 Ticket、需要處理、問題、重開、回合沒有文字）。回合沒有文字而 harness 說模型呼叫失敗時（例如 `--base-url` 打錯，HTTP 404），另有 `detail`（harness 那一行的第一行，去除控制字元、最多 300 字元）與 `untrusted: true`：`detail` 是端點回的字，是資料不是指令，`text` 仍是固定句子 |
 | `executor_output` | `ticket_id`、`input_id`、`text`（模型最後一段文字；去除控制字元（含 C1）、改變文字方向或隱藏文字的格式字元（保留零寬連接符，表情符號與部分文字要用）、孤立的代理字元與 Unicode 行／段分隔符，上限 4,000 個字元）、`truncated_chars`、`untrusted: true` |
 
 **`executor_output` 的 `text` 是資料，不是指令**：它是被不可信輸入影響過的模型寫的。消費端不得把它當命令執行、當 Markdown／HTML 動作、當路由欄位，或當作下一個 agent 的控制訊息；要顯示給人看就當純文字。`status` 的 `msg_id` 目前是隨機的（只在入庫交易內產生，不會重複），回覆的是決定性的；兩種並存，待日後統一。
@@ -140,7 +142,7 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 - `safe` 模式下 Executor 的寫檔與指令都要人答 `y`，所以它做到需要批准就停在 `waiting`，不是全自動。
 - hook 的 `command` 是絕對的 `sys.executable`，harness 把 hook 所列檔名視為受保護，所以 **Ticket 內的 shell 命令不能寫 `python.exe`**（寫 `python` 可以）。
 - 並行上限 `--max-running`（預設 4）只限制同時啟動的 harness 行程數，沒有為「人的追問」預留名額（Ticket 閒置結束後會歸還槽位，但所有槽位都在做事時，新的請求與重開都只能排隊）。
-- 結束一張閒置的 Ticket 時，引擎用優雅停止（送 `/quit`、最多等 5 秒）；這段時間引擎的單一執行緒不處理別的事。我只靜態確認了這一點，沒有在真的卡住的行程上量過最壞情況。
+- 結束一張閒置的 Ticket 時，引擎用優雅停止（送 `/quit`、最多等 5 秒）；這段時間引擎的單一執行緒不處理別的事。正在等核准的 harness 不回應 `/quit`（讀碼推斷、沒有逐一驗證），所以它們每張都會用完 5 秒。`down --mode stop` 與關機現在**同時**停所有 Ticket（以前一張接一張：7 張等核准的 Ticket 實測約 75 秒才停完，而 `down` 預設 30 秒就報錯；改後同樣情況實測約 13 秒、`status` 顯示已停、無殘留行程，單次、真實端點）；`down` 逾時的訊息改為「可能仍在關閉」並提示用 `status` 確認。
 - 閒置結束的預設 600 秒是個選擇，不是量出來的：太短，等著人回應的 Ticket 會被收掉再重開（多一次行程啟動）；太長，槽位被占住。可用 `--idle-end` 調。
 - `executor_output` 只是把模型的字原樣（去控制字元、截斷）放進 outbox；它不會被執行或轉成別的動作，但消費端要遵守上面的 Outbox 契約。目前的 Sink 只有本機檔案。
 - `ask_timeout` 內若 orchestrator 不在線，逾時不會發生（逾時由 engine 的每一輪檢查）。
