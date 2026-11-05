@@ -9,11 +9,14 @@ import dataclasses
 from . import sanitize
 
 REPLY_CAP = 4000          # characters of a reply that leave the system
+DETAIL_CAP = 300          # characters of a failure reason that leave the system
+FAILURE_MARK = "model call failed"       # what harness_vllm prints when it gives up on a turn
 
 
 @dataclasses.dataclass(frozen=True)
 class TurnEnd:
     text: "str | None"    # None: the turn ended without any text after its last tool event
+    failure: "str | None" = None    # the harness' own line when the model call failed in this turn
 
 
 class ReplyTracker:
@@ -21,9 +24,11 @@ class ReplyTracker:
 
     def __init__(self):
         self.text = None
+        self.failure = None
 
     def reset(self):
         self.text = None
+        self.failure = None
 
     def feed(self, ev):
         """-> a TurnEnd when this event ends a turn, else None."""
@@ -32,18 +37,34 @@ class ReplyTracker:
             self.text = str(ev.get("text", ""))
         elif kind in ("turn_start", "tool_call", "tool_result"):
             self.text = None
+            if kind == "turn_start":
+                self.failure = None
+        elif kind == "log":
+            if FAILURE_MARK in str(ev.get("text", "")):
+                self.failure = str(ev["text"]).strip()
         elif kind == "turn_end":
             text, self.text = self.text, None
-            return TurnEnd(text)
+            failure, self.failure = self.failure, None
+            return TurnEnd(text, failure if not (text and text.strip()) else None)
         return None
 
 
-def reply_payload(ticket_id, input_id, text):
+def reply_payload(ticket_id, input_id, text, failure=None):
     """The outbox payload for a turn that handled `input_id`. The model's words are DATA in one
     field, marked untrusted; a consumer must not treat them as a command, a markup action, a routing
     field or a control message for another agent. A turn with no text still gets one message, so a
-    failed model call is not silence."""
+    failed model call is not silence. When the harness said why (`failure`), the reason rides along as
+    `detail`: one cleaned, shortened line of the endpoint's own words, marked untrusted like a reply, and the
+    sentence in `text` stays fixed."""
     if text is None or not text.strip():
+        if failure:
+            lines = str(failure).strip().splitlines()
+            detail = sanitize.clean_line(lines[0])[:DETAIL_CAP].strip() if lines else ""
+            if detail:
+                return {"kind": "status", "ticket_id": ticket_id, "input_id": input_id, "untrusted": True,
+                        "text": f"Ticket {ticket_id} finished a turn without a reply: the model call failed "
+                                f"(see detail).",
+                        "detail": detail}
         return {"kind": "status", "ticket_id": ticket_id, "input_id": input_id,
                 "text": f"Ticket {ticket_id} finished a turn without a reply (see its folder)."}
     cleaned, dropped = clean_reply(text)

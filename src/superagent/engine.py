@@ -13,6 +13,7 @@ Rules it keeps (each has a test):
 import json
 import math
 import os
+import threading
 import time
 
 from . import executor as ex
@@ -20,7 +21,7 @@ from . import frame, gate, procutil
 from . import main_session as ms
 from .model import AskState, Decision, InputState, Strength, TicketState, Trigger, Verdict
 from .outbox import Outbox
-from .store import AskRejected, StaleBatch
+from .store import AskRejected, StaleBatch, TicketRejected
 from .turnreply import ReplyTracker, reply_payload
 
 MAX_QUICK_DEATHS = 3          # an executor that dies this many times without finishing a turn is parked
@@ -282,7 +283,8 @@ class Engine:
         self.note("parked", ticket=ticket_id, why=why)
 
     def resume(self, ticket_id):
-        """A person has dealt with whatever parked the ticket."""
+        """A person has dealt with whatever parked the ticket. Raises TicketRejected for a ticket that does not exist."""
+        self.require_ticket(ticket_id)
         self.store.set_ticket_note(ticket_id, None)
         self.deaths.pop(ticket_id, None)
         self.store.set_ticket_state(ticket_id, TicketState.OPEN)
@@ -330,12 +332,12 @@ class Engine:
         if flight is None:
             self.note("turn_end_without_input", ticket=run.ticket_id)
             return
-        payload = reply_payload(run.ticket_id, flight["id"], ended.text)
+        payload = reply_payload(run.ticket_id, flight["id"], ended.text, ended.failure)
         if not self.store.finish_turn(run.ticket_id, flight["id"], payload, self.clock(),
                                       fault=lambda: self.fault("in_finish_turn")):
             self.note("turn_not_finished", ticket=run.ticket_id, input=flight["id"])
         elif payload["kind"] == "status":
-            self.note("turn_without_reply", ticket=run.ticket_id)
+            self.note("turn_without_reply", ticket=run.ticket_id, why=payload.get("detail"))
 
     def on_ask(self, run, ev):
         if ev.get("question"):                                      # ask_user: nobody types free text
@@ -407,8 +409,14 @@ class Engine:
             run.executor.stop()
             self.store.end_run(ticket_id, run.pid)
 
+    def require_ticket(self, ticket_id):
+        if self.store.ticket(ticket_id) is None:
+            raise TicketRejected(f"no ticket {ticket_id}")
+
     def stop_ticket(self, ticket_id):
-        """A person's stop is final: the process ends and nothing more is delivered."""
+        """A person's stop is final: the process ends and nothing more is delivered. Raises
+        TicketRejected for a ticket that does not exist."""
+        self.require_ticket(ticket_id)
         self.store.set_ticket_state(ticket_id, TicketState.STOPPED)
         run = self.runs.pop(ticket_id, None)
         if run is not None:
@@ -417,16 +425,38 @@ class Engine:
         self.note("stopped", ticket=ticket_id)
 
     def shutdown(self):
-        """Stop every executor; inputs in flight become REPLAY so a restart repeats them."""
-        for tid in list(self.runs):
-            run = self.runs.pop(tid)
-            run.executor.stop()
-            self.store.end_run(tid, run.pid)
+        """Stop every executor; inputs in flight become REPLAY so a restart repeats them. The executors
+        are stopped together: a harness that waits for an approval does not answer /quit, so each
+        graceful stop uses its whole grace period, and one after the other they added up to more than
+        the time `down` waits. The database is touched only from this thread.
+
+        An executor whose stop() raised is not forgotten: its process record stays, so the next start (or
+        `down`) can still find and kill it. The rest of the shutdown goes on, and the first error is raised
+        at the end, as it always was."""
+        runs = [self.runs.pop(tid) for tid in list(self.runs)]
+        failed = {}
+
+        def stop_one(run):
+            try:
+                run.executor.stop()
+            except Exception as e:                  # noqa: BLE001 - re-raised below, after the others are done
+                failed[run.ticket_id] = e
+
+        stoppers = [threading.Thread(target=stop_one, args=(run,), daemon=True) for run in runs]
+        for th in stoppers:
+            th.start()
+        for th in stoppers:
+            th.join()
+        for run in runs:
+            if run.ticket_id not in failed:
+                self.store.end_run(run.ticket_id, run.pid)
         self.store.recover_inflight()
         if self.main is not None:
             self.main.stop()
             for b in self.store.sent_batches():
                 self.store.requeue_eval(b["id"], "orchestrator stopped", count=False)
+        if failed:
+            raise next(iter(failed.values()))
 
     # ------------------------------------------------------------------ views
     def status(self):
