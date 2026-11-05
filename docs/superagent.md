@@ -1,8 +1,8 @@
-# superagent：疊在 roy_harness 之上的編排層（Slice 1）
+# superagent：疊在 roy_harness 之上的編排層
 
 > 一個**可以疊加、也可以整個拿掉**的獨立套件，放在 `src/superagent/`。它只經三條線碰 harness：子行程 `harness_vllm.py --jsonl`、每張 Ticket 目錄裡的 `.harness.hooks.json`、以及它自己組出來的環境。`src/harness/` 從不 import 它，它也不 import `src/harness/` 的任何模組。刪掉 `src/superagent/`，harness 一個位元組都不會變。
 >
-> 設計來自 DeepSeek Harness 團隊的 Super-agent 設計文章與開源原型（重點借用：Trigger／Thread／Ticket／Mandate 的分工、訂閱透傳、observe→auto 的灰度、先落庫再做外部動作）。**這是研究／實驗用的第一刀，不是產品**；Slice 2（模型 Main，`--assessor model`）見下，沒有 GitHub／飛書 Source。
+> 設計來自 DeepSeek Harness 團隊的 Super-agent 設計文章與開源原型（重點借用：Trigger／Thread／Ticket／Mandate 的分工、訂閱透傳、observe→auto 的灰度、先落庫再做外部動作）。**這是研究／實驗用的實作，不是產品**；功能是分刀加上來的（Slice 1 收件匣到工單、Slice 2 模型 Main `--assessor model`、Slice 3 結果回送與閒置結束、Slice 4 量測），各節標題標明來源；沒有 GitHub／飛書 Source。
 
 ## 做了什麼
 
