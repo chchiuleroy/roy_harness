@@ -638,7 +638,7 @@ def to_openai_tools(tools):
 class LLMError(Exception):
     pass
 
-RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}   # 529: Claude API `overloaded_error`
 
 def _headers():
     h = {"content-type": "application/json", "user-agent": "harness101-vllm/0.2"}

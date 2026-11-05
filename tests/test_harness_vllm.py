@@ -1499,6 +1499,15 @@ class TestWire(Base):
         self.assertEqual(r["choices"][0]["message"]["content"], "ok")
         self.assertEqual(FakeServer.hits, 3)
 
+    def test_retries_529_overloaded_then_succeeds(self):
+        """529 is the Claude API's `overloaded_error` ("temporarily overloaded", the same kind of
+        failure as 503). The `anthropic-compat` provider talks to that API; a 529 that is not
+        retried would end a long task on a failure that clears by itself."""
+        FakeServer.script = [("status", (529, {})), ("json", llm_reply("ok"))]
+        r = self.go()
+        self.assertEqual(r["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(FakeServer.hits, 2)
+
     def test_does_not_retry_client_errors(self):
         """A 400 will fail identically forever; retrying only burns time."""
         FakeServer.script = [("status", (400, {})), ("json", llm_reply("never"))]
