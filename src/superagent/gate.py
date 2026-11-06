@@ -115,6 +115,13 @@ def authorize(model_rule, reason, strength, policy) -> Authorized:
     # The model's words go into the database and to a screen: cleaned first (a lone surrogate, which a
     # JSON "\ud800" escape produces, cannot be stored at all), cut after.
     why = sanitize.clean_line(reason)[:RULE_MAX] if isinstance(reason, str) else ""
+    # The word "null" in quotes is the model's way of saying "no rule" (all 27 of the unavailable answers in
+    # the 2026-11-06 re-run were exactly that). It goes only toward "do nothing", so it cannot open a ticket;
+    # a rule that is really named "null" keeps working.
+    # ponytail: one word, from evidence; "none"/"n/a" stay unknown names until someone sees them in the data
+    if (isinstance(model_rule, str) and model_rule.strip().lower() == "null"
+            and "null" not in {r.name for r in policy.rules}):
+        model_rule = None
     if model_rule is None:
         return Authorized(Decision(Verdict.IGNORE, strength, f"model: {why}" if why else "model: no rule matches",
                                    model_rule=""))
