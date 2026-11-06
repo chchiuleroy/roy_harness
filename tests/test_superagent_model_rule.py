@@ -21,6 +21,55 @@ from test_superagent_eval_store import AUTO, OBSERVE, Ledger, accept, ignore, un
 OFF = Policy(allowed_senders=frozenset({"alice"}), accept_mode="off", rules=AUTO.rules)
 
 
+class TestTheWordNullMeansNoRule(unittest.TestCase):
+    """Found on 2026-11-06 by re-running the 41 rows that had come back unavailable: all 27 answers were the
+    STRING "null" (the batch template shows `"<rule name>" or null`, and the model sometimes quotes the
+    second half too). It meant 'no rule'; read as an unknown name it was recorded as unavailable and counted
+    against the model. The move is only ever toward 'do nothing', so it cannot open a ticket."""
+
+    def test_the_string_null_is_the_same_as_no_rule_in_every_mode(self):
+        for word in ("null", "NULL", " Null" + chr(10)):          # chr(10): a newline after the word
+            for policy in (AUTO, OBSERVE, OFF):
+                with self.subTest(word=word, mode=policy.accept_mode):
+                    d = authorize(word, "chat", Strength.INFERRED, policy).decision
+                    same = authorize(None, "chat", Strength.INFERRED, policy).decision
+                    self.assertEqual((d.verdict, d.would_accept, d.model_rule, d.reason),
+                                     (same.verdict, same.would_accept, same.model_rule, same.reason))
+                    self.assertEqual((d.verdict, d.model_rule), (Verdict.IGNORE, ""))
+
+    def test_other_words_are_still_unknown_names(self):
+        """Only the one word the evidence shows is mapped; 'none', 'n/a' and the like stay unavailable, so
+        nothing else the model might write is quietly treated as an answer."""
+        for word in ("none", "n/a", "nul", "no-rule", ""):
+            with self.subTest(word=word):
+                self.assertEqual(authorize(word, "x", Strength.INFERRED, AUTO).decision.verdict, Verdict.UNAVAILABLE)
+
+    def test_a_rule_that_is_really_named_null_still_works(self):
+        """Rule names may be any of a-z, 0-9 and '-', so 'null' is a legal name; mapping it away would make
+        that rule unusable."""
+        pol = Policy(allowed_senders=frozenset({"alice"}), accept_mode="auto", rules=(Rule("null", "weird name"),))
+        d = authorize("null", "x", Strength.INFERRED, pol).decision
+        self.assertEqual((d.verdict, d.model_rule), (Verdict.ACCEPT, "null"))
+
+    def test_a_second_look_that_says_null_is_a_disagreement_not_a_failure(self):
+        """It is the model changing its mind, not an answer nobody could use: the candidate is ignored with
+        the disagreement on record, and the unavailable count is not inflated."""
+        from superagent.gate import confirm
+        d = confirm("export-bug", "one", "null", "two", AUTO).decision
+        self.assertEqual((d.verdict, d.model_rule), (Verdict.IGNORE, ""))
+        self.assertIn("second look differs", d.reason)
+
+
+class TestTheWordNullInTheLedger(Ledger):
+    def test_it_is_recorded_as_done_with_no_rule_and_opens_nothing(self):
+        """End to end through the store, which is the only place an answer becomes a decision."""
+        tid = self.candidate("a")
+        rep = self.finish(self.batch([tid]), {tid: ("null", "no")})
+        self.assertEqual((rep["done"], rep["unavailable"], rep["accepted"]), ([tid], [], []))
+        self.assertEqual(self.decisions()[tid]["model_rule"], "")
+        self.assertEqual(self.s.tickets(), [])
+
+
 class TestAuthorizeKeepsWhatTheModelSaid(unittest.TestCase):
     def test_no_rule_is_an_empty_string_not_none(self):
         """None means 'nobody answered'; '' means 'the model answered: no rule'. A measurement that
