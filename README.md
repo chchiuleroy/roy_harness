@@ -124,7 +124,7 @@ inbox/*.json ─► 准入（確定性）─► Ticket：一個目錄＋一個 s
 
 - **只經三條線碰 harness**：子行程 `harness_vllm.py --jsonl`、每張 Ticket 目錄裡的 hook 設定、自己組的受控環境。`src/harness/` 不 import 它；刪掉 `src/superagent/`，harness 與其測試的結果逐項不變（有測試驗證）。
 - **權限不放大**：Executor 固定 `safe` 模式，寫檔與指令都要人答 `y`（`python -X utf8 -m superagent --home <資料夾> answer <ask_id> y|n`，永不送會變成永久授權的 `a`）；外部文字永遠先包框；hook 把 `read_file`／`write_file`／`edit_file` 限在 Ticket 目錄，並否決 `agent`／`skill`／MCP 等工具（shell 指令不限路徑，靠人答 `y` 把關）。
-- **准入判斷用的模型只在「推斷候選」時出現**（`--assessor model`，預設關；預設 `observe` 只記「本來會接受」，不開工單），且它沒有工具、只回一個 JSON，後果由程式碼決定。這和「做事的模型」是兩回事：每張工單的 harness 子行程本來就會呼叫你設定的模型。
+- **准入判斷用的模型只在「推斷候選」時出現**（`--assessor model`，預設關；預設 `observe` 只記「本來會接受」，不開工單；模型第一次說符合規則時，還要由全新的 session 再獨立判斷一次、兩次同規則才算，見 `docs/superagent.md`），且它沒有工具、只回一個 JSON，後果由程式碼決定。這和「做事的模型」是兩回事：每張工單的 harness 子行程本來就會呼叫你設定的模型。
 - **崩潰可續**：一個事件的入庫、決定、開 Ticket、排入輸入是同一個 SQLite 交易；回覆與「輸入完成」也是；投遞是至少一次。
 
 ```bash
@@ -164,7 +164,7 @@ SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模
 SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 superagent 後結果不變」檢查
 ```
 
-2026-11-05 在作者機器上跑離線套件：**968 項 OK、略過 27 項**，約 673 秒，單次執行。略過的是需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。移除檢查（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）在 2026-11-05 重寫後跑過一次，通過，約 790 秒。live 測試上一次完整跑是 2026-11-03（785 項 OK、略過 26 項、約 870 秒），之後沒有重跑。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
+2026-11-06 在作者機器上跑離線套件：**972 項通過、略過 27 項**，約 639 秒，單次執行（前一次 2026-11-05 是 968 項、約 673 秒）。略過的是需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。移除檢查（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）在 2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒。live 測試上一次完整跑是 2026-11-03（785 項 OK、略過 26 項、約 870 秒），之後沒有重跑。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
 ## 四、已知限制
 

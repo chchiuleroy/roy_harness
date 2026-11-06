@@ -43,6 +43,7 @@ DIFFERENCES = (
     "Batches are formed from chunks of the corpus, not from arrival times; with order_check the order inside a chunk is reversed.",
     "Every pass runs in a fresh temporary home and store.",
     "The accept mode is fixed to observe, so no ticket is opened; only the model's classification is measured.",
+    "With confirm on (the default, as in a live run) a rule the model names is asked about a second time in a fresh session and counts only if both answers name the same rule; `meta.confirm` says which way this run went.",
     "The model, endpoint and sampling settings are the ones given to this run and may differ from a live run.",
     "The labels were written by a person; they are not the decisions a live run recorded.",
 )
@@ -67,6 +68,7 @@ class ReplayConfig:
     executor_factory: object = None    # label -> executor; tests inject a private harness tree
     harness_path: str = None
     progress: object = None            # callable(str): one-line status; the CLI prints it to stderr
+    confirm: bool = True               # a named rule must be named again by a second, fresh look (as live)
 
     def validate(self):
         def whole(v, lo, hi, name):
@@ -95,14 +97,19 @@ def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def outcome_of(decision, rule_names):
-    """A recorded decision -> NULL, UNAVAILABLE or a rule name, and why when it is UNAVAILABLE."""
+def outcome_of(decision, rule_names, confirm=False):
+    """A recorded decision -> NULL, UNAVAILABLE or a rule name, and why when it is UNAVAILABLE.
+    With `confirm`, a rule the second look did not repeat is recorded on the decision (it keeps what
+    the model said last) but was not taken: it counts as NULL, and only `would_accept` (observe) or an
+    accept says the rule stood."""
     if decision["verdict"] == "unavailable":
         return UNAVAILABLE, ("unknown_rule" if decision["reason"] == "unknown rule" else "no_usable_answer")
     mr = decision["model_rule"]
     if mr == "":
         return NULL, None
     if mr in rule_names:
+        if confirm and not (decision["would_accept"] or decision["verdict"] == "accept"):
+            return NULL, None
         return mr, None
     return UNAVAILABLE, "no_model_answer"
 
@@ -132,7 +139,8 @@ class _Pass:
         base = os.path.join(self.tmp.name, f"h{gen}")
         self.inbox = os.path.join(base, "inbox")
         os.makedirs(self.inbox)
-        policy = Policy(allowed_senders=self.senders, accept_mode="observe", rules=tuple(c.rules))
+        policy = Policy(allowed_senders=self.senders, accept_mode="observe", rules=tuple(c.rules),
+                        confirm_inferred=c.confirm)
         self.store = Store(os.path.join(base, "home")).open()
         main = ms.MainSession(ex.ExecutorConfig(c.provider, c.base_url, c.model, backoff=c.backoff), policy,
                               os.path.join(base, "home"), self._factory(), reset_every=1)
@@ -157,7 +165,7 @@ class _Pass:
             self.tmp.cleanup()
 
     def run_chunk(self, rows):
-        """-> {row id: (outcome, why or None, failure kind or None)}"""
+        """-> {row id: (outcome, why or None, failure kind or None, first look's rule or None)}"""
         want = {}
         for row in rows:
             self.n += 1
@@ -182,22 +190,33 @@ class _Pass:
                 failure = "timeout"
                 break
             time.sleep(0.2)
+        waiting = self._first_rules(want, got)          # read before a failed chunk's store is thrown away
         out = {}
         for rid in want:
             if rid in got:
-                oc, why = outcome_of(got[rid], self.names)
-                out[rid] = (oc, why, None)
-            else:
-                out[rid] = (UNAVAILABLE, failure, failure)
+                oc, why = outcome_of(got[rid], self.names, self.cfg.confirm)
+                out[rid] = (oc, why, None, got[rid]["first_rule"])
+            else:                                       # no decision yet: it may still be waiting for its second look
+                out[rid] = (UNAVAILABLE, failure, failure, waiting.get(rid))
         if failure:                                   # whatever was in flight must not leak into the next chunk
             self._stop()
             self._start()
         return out
 
+    def _first_rules(self, want, decided):
+        """{row id: the rule its first look named} for rows without a decision yet (a chunk that ran out of time
+        while a second look was due): without it the confirmation count would leave them out."""
+        rows = self.store._q(
+            "SELECT t.ext_id AS ext_id, e.first_rule AS first_rule FROM eval_item e "
+            "JOIN trigger t ON t.id = e.trigger_id WHERE e.first_rule IS NOT NULL")
+        return {r["ext_id"]: r["first_rule"] for r in rows if r["ext_id"] in want and r["ext_id"] not in decided}
+
     def _decided(self, want):
         rows = self.store._q(
-            "SELECT t.ext_id AS ext_id, d.verdict AS verdict, d.model_rule AS model_rule, d.reason AS reason "
-            "FROM decision d JOIN trigger t ON t.id = d.trigger_id")
+            "SELECT t.ext_id AS ext_id, d.verdict AS verdict, d.model_rule AS model_rule, d.reason AS reason, "
+            "d.would_accept AS would_accept, e.first_rule AS first_rule "
+            "FROM decision d JOIN trigger t ON t.id = d.trigger_id "
+            "LEFT JOIN eval_item e ON e.trigger_id = d.trigger_id")
         return {r["ext_id"]: r for r in rows if r["ext_id"] in want}
 
 
@@ -207,23 +226,24 @@ def _say(cfg, text):
 
 
 def _run_pass(cfg, rows, reverse, label=""):
-    """One full pass over the corpus. -> ({row id: outcome}, {row id: why}, {row id: failure}, {row id: chunk size})"""
-    outcomes, whys, failures, sizes = {}, {}, {}, {}
+    """One full pass over the corpus.
+    -> ({row id: outcome}, {row id: why}, {row id: failure}, {row id: chunk size}, {row id: first look's rule})"""
+    outcomes, whys, failures, sizes, firsts = {}, {}, {}, {}, {}
     p = _Pass(cfg, rows)
     try:
         chunks = list(corpus_mod.chunks(rows, cfg.batch_max))
         for k, chunk in enumerate(chunks, 1):
             _say(cfg, f"{label}: batch {k}/{len(chunks)}")
             ordered = list(reversed(chunk)) if reverse else chunk
-            for rid, (oc, why, fail) in p.run_chunk(ordered).items():
-                outcomes[rid], sizes[rid] = oc, len(chunk)
+            for rid, (oc, why, fail, first) in p.run_chunk(ordered).items():
+                outcomes[rid], sizes[rid], firsts[rid] = oc, len(chunk), first
                 if why:
                     whys[rid] = why
                 if fail:
                     failures[rid] = fail
     finally:
         p.close()
-    return outcomes, whys, failures, sizes
+    return outcomes, whys, failures, sizes, firsts
 
 
 def _headline(block):
@@ -248,7 +268,7 @@ def _meta(cfg, corpus, harness_path):
         "sampling": "no temperature or top_p is set by this tool: the endpoint default applies",
         "card_cap": cfg.card_cap, "batch_max": cfg.batch_max, "eval_max_attempts": EVAL_MAX_ATTEMPTS,
         "corpus_sha256": corpus.sha256, "corpus_rows": len(corpus.rows),
-        "repeats": cfg.repeats, "order_check": cfg.order_check, "confidence": cfg.confidence,
+        "repeats": cfg.repeats, "order_check": cfg.order_check, "confirm": cfg.confirm, "confidence": cfg.confidence,
         "half_width": cfg.half_width, "hash_ids": cfg.hash_ids,
         "python": sys.version.split()[0], "platform": platform.platform(),
         "utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -278,7 +298,7 @@ def replay(corpus, cfg):
         key = forward[0][0][rows[i].id]
         dist[key] = dist.get(key, 0) + 1
     failures = {"timeout": 0, "cannot_start": 0, "unknown_rule": 0, "no_usable_answer": 0, "no_model_answer": 0}
-    for _, whys, fails, _ in forward[:1]:
+    for _, whys, _fails, _sizes, _firsts in forward[:1]:
         for rid, w in whys.items():
             failures[w] = failures.get(w, 0) + 1
     warnings = list(corpus.warnings)
@@ -298,6 +318,14 @@ def replay(corpus, cfg):
     def rid(r):
         return corpus_mod.hashed_id(r.id) if cfg.hash_ids else r.id
 
+    confirmation = None
+    if cfg.confirm:                   # of the rows whose first look named a rule (first repeat): what the second look did
+        asked = [r.id for r in rows if forward[0][4][r.id]]
+        kept = sum(1 for i in asked if forward[0][0][i] == forward[0][4][i])
+        gone = sum(1 for i in asked if forward[0][0][i] == UNAVAILABLE)
+        confirmation = {"asked": len(asked), "confirmed": kept, "unavailable": gone,
+                        "disagreed": len(asked) - kept - gone}
+
     return {
         "schema": SCHEMA,
         "meta": _meta(cfg, corpus, cfg.harness_path or ex.HARNESS_PATH),
@@ -312,9 +340,11 @@ def replay(corpus, cfg):
         "order_sensitivity": order,
         "uncertain_rows": {"count": len(uncertain_idx), "share": share, "outcomes": dist},
         "failures": failures,
+        "confirmation": confirmation,
         "warnings": warnings,
         "differences": list(DIFFERENCES),
         "rows": [{"id": rid(r), "label": r.label, "uncertain": r.uncertain, "truncated_chars": r.truncated_chars,
+                  "first": forward[0][4][r.id],
                   "outcomes": [f[0][r.id] for f in forward],
                   "reversed": None if reversed_pass is None else reversed_pass[0][r.id]} for r in rows],
     }

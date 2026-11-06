@@ -42,6 +42,10 @@ class Policy:
     bot_senders: FrozenSet[str] = frozenset()
     accept_mode: Literal["off", "observe", "auto"] = "observe"     # observe is the default
     rules: Tuple[Rule, ...] = ()
+    # A model answer that names a rule is asked about a second time, in a fresh session, and the
+    # candidate is taken only if both answers name the same rule. Applies to `auto` and to `observe`
+    # (whose `would_accept` is a preview of what `auto` would do); `off` never reaches the model.
+    confirm_inferred: bool = True
 
 
 def admit(t: Trigger, p: Policy, has_live_ticket_on_thread: bool = False) -> Strength:
@@ -118,6 +122,11 @@ def authorize(model_rule, reason, strength, policy) -> Authorized:
         # What the model wrote is kept for the audit only, cleaned first and cut after.
         said = sanitize.clean_line(model_rule)[:UNKNOWN_RULE_MAX]
         return Authorized(Decision(Verdict.UNAVAILABLE, strength, "unknown rule", model_rule=said))
+    return _by_mode(model_rule, why, strength, policy)
+
+
+def _by_mode(model_rule, why, strength, policy) -> Authorized:
+    """A rule the policy knows, turned into a decision by the accept mode. `why` is already clean."""
     if policy.accept_mode == "auto":
         return Authorized(Decision(Verdict.ACCEPT, strength, f"rule {model_rule}: {why}", model_rule=model_rule),
                           (model_rule,))
@@ -125,3 +134,30 @@ def authorize(model_rule, reason, strength, policy) -> Authorized:
         return Authorized(Decision(Verdict.IGNORE, strength, f"observe: would accept (rule {model_rule}): {why}",
                                    would_accept=True, model_rule=model_rule))
     return Authorized(Decision(Verdict.IGNORE, strength, "accept mode is off", model_rule=model_rule))
+
+
+def needs_confirmation(first: Authorized, policy: Policy) -> bool:
+    """True when the first answer named a rule the policy knows and a second look is due."""
+    d = first.decision
+    return (policy.confirm_inferred and policy.accept_mode in ("auto", "observe")
+            and d.verdict is not Verdict.UNAVAILABLE and bool(d.model_rule))
+
+
+def confirm(first_rule: str, first_why: str, second_rule, second_why, policy: Policy) -> Authorized:
+    """The decision once the second answer is in. Both answers must name the same rule; anything
+    else (no rule, another rule) is not taken. A name the policy does not know stays unavailable,
+    as it does on a first look (the second answer goes through `authorize` first). The second
+    answer's own rule is kept on the decision (the audit trail says what the model said last), and
+    both reasons are kept, cleaned and cut."""
+    second = authorize(second_rule, second_why, Strength.INFERRED, policy)
+    d = second.decision
+    if d.verdict is Verdict.UNAVAILABLE:
+        return second
+    clean = lambda t: sanitize.clean_line(t)[:100] if isinstance(t, str) else ""      # noqa: E731
+    if d.model_rule == first_rule:
+        return _by_mode(first_rule, f"confirmed twice (first: {clean(first_why)}; second: {clean(second_why)})",
+                        d.strength, policy)
+    said = d.model_rule or "no rule"
+    return Authorized(Decision(Verdict.IGNORE, d.strength,
+                               f"second look differs (first {first_rule}, second {said}): {clean(second_why)}",
+                               model_rule=d.model_rule))
