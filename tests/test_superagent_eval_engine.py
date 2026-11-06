@@ -49,12 +49,13 @@ class Rig(unittest.TestCase):
         self.llm.close()
         self._tmp.cleanup()
 
-    def make_engine(self, mode="auto", reset_every=1, **kw):
+    def make_engine(self, mode="auto", reset_every=1, confirm_inferred=True, **kw):
         for s in self.stores:
             s.close()
         store = Store(self.home).open()
         self.stores.append(store)
-        policy = Policy(allowed_senders=frozenset({"alice"}), accept_mode=mode, rules=kw.pop("rules", RULES))
+        policy = Policy(allowed_senders=frozenset({"alice"}), accept_mode=mode, rules=kw.pop("rules", RULES),
+                        confirm_inferred=confirm_inferred)
         main = ms.MainSession(self.cfg, policy, self.home, lambda label: ex.HarnessExecutor(self.cfg, self.harness),
                               reset_every=reset_every)
         kw.setdefault("batch_wait", 0.0)
@@ -93,8 +94,10 @@ class Rig(unittest.TestCase):
 class TestJudging(Rig):
     def test_auto_mode_opens_tickets_only_for_matches_and_records_why(self):
         """The end-to-end mechanics: candidates go to the model in one batch, the answer is applied in
-        one step, and only matches become tickets, each carrying the rule that allowed it."""
-        self.llm.script[:] = [{"text": answer((1, "export-bug"), (2, None), (3, "export-bug"))}]
+        one step, and only matches become tickets, each carrying the rule that allowed it. A match is
+        asked about a second time (a second batch that holds only the matches) before it opens anything."""
+        self.llm.script[:] = [{"text": answer((1, "export-bug"), (2, None), (3, "export-bug"))},
+                              {"text": answer((1, "export-bug"), (3, "export-bug"))}]
         self.drop("001.json", "the export fails every time")
         self.drop("002.json", "lunch?")
         self.drop("003.json", "my export file will not open")
@@ -107,7 +110,7 @@ class TestJudging(Rig):
             m = self.engine.store.mandate(t["id"])
             self.assertEqual((m["strength"], m["matched_rules"]), ("inferred", ["export-bug"]))
             self.assertEqual(len(self.engine.store.inputs(t["id"])), 1, "the first input was not queued")
-        self.assertEqual(len(self.llm.requests), 1, "three candidates should be one batch")
+        self.assertEqual(len(self.llm.requests), 2, "three candidates are one batch, the two matches a second one")
         self.assertEqual(self.engine.store.eval_counts()["done"], 3)
         for n in os.listdir(self.inbox_dir):
             self.assertFalse(n.endswith(".json"), "an event file was not settled")
@@ -115,7 +118,7 @@ class TestJudging(Rig):
     def test_observe_mode_records_would_accept_and_opens_nothing(self):
         """A proactive agent starts out watching: the match is on record, nothing starts."""
         self.make_engine(mode="observe")
-        self.llm.script[:] = [{"text": answer((1, "export-bug"), (2, None))}]
+        self.llm.script[:] = [{"text": answer((1, "export-bug"), (2, None))}, {"text": answer((1, "export-bug"))}]
         self.drop("001.json", "the export fails")
         self.drop("002.json", "hello")
         self.until(self.settled(2))
@@ -151,6 +154,7 @@ class TestJudging(Rig):
         self.assertEqual(len(self.llm.requests), 3)
 
     def test_a_reply_that_leaves_one_out_asks_again_only_about_that_one(self):
+        self.make_engine(confirm_inferred=False)         # about the retry of a first look, not the second look
         self.llm.script[:] = [{"text": answer((1, None))}, {"text": answer((2, "export-bug"))}]
         self.drop("001.json", "one")
         self.drop("002.json", "two the export fails")
@@ -163,6 +167,7 @@ class TestJudging(Rig):
 
 class TestRetriesAndLimits(Rig):
     def test_an_unreadable_reply_is_asked_again_and_the_good_one_is_applied_once(self):
+        self.make_engine(confirm_inferred=False)         # about the retry of a first look, not the second look
         self.llm.script[:] = [{"text": "I'm sorry, I can't help with that."}, {"text": answer((1, "export-bug"))}]
         self.drop("001.json", "the export fails")
         self.until(self.settled(1))
@@ -430,7 +435,7 @@ class TestCommandLine(Rig):
         self.fail(f"status never satisfied the condition: {last}")
 
     def test_run_judge_and_report(self):
-        self.llm.script[:] = [{"text": answer((1, "export-bug"))}]
+        self.llm.script[:] = [{"text": answer((1, "export-bug"))}, {"text": answer((1, "export-bug"))}]
         self.drop("001.json", "the export fails")
         self.start("--accept-mode", "auto")
         st = self.status_until(lambda s: s.get("eval", {}).get("done") == 1)

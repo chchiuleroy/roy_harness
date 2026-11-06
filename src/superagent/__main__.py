@@ -51,7 +51,8 @@ def build_engine(args, store):
     rules = parse_rules(args.rule)
     policy = Policy(allowed_senders=frozenset(filter(None, args.allow.split(","))),
                     bot_senders=frozenset(filter(None, args.bots.split(","))),
-                    accept_mode=args.accept_mode, rules=tuple(rules))
+                    accept_mode=args.accept_mode, rules=tuple(rules),
+                    confirm_inferred=not args.no_confirm_inferred)
     home = store.home
     inbox = FileInbox(args.inbox or os.path.join(home, "inbox"))
     sink = FileSink(args.outbox or os.path.join(home, "outbox"))
@@ -196,7 +197,8 @@ def cmd_eval(args):
             return 1
     cfg = rp.ReplayConfig(
         provider=args.provider, base_url=args.base_url, model=args.model, rules=tuple(rules),
-        repeats=args.repeats, order_check=args.order_check, batch_max=args.batch_max, card_cap=args.card_cap,
+        repeats=args.repeats, order_check=args.order_check, confirm=not args.no_confirm,
+        batch_max=args.batch_max, card_cap=args.card_cap,
         half_width=args.half_width, confidence=args.confidence, eval_timeout=args.eval_timeout,
         chunk_timeout=args.chunk_timeout, backoff=args.backoff, hash_ids=args.hash_ids,
         progress=None if args.quiet else (lambda text: print(f"[eval] {text}", file=sys.stderr, flush=True)))
@@ -292,6 +294,9 @@ def main(argv=None):
     r.add_argument("--allow", default="", help="comma-separated senders who may ask for work")
     r.add_argument("--bots", default="")
     r.add_argument("--accept-mode", choices=("off", "observe", "auto"), default="observe")
+    r.add_argument("--no-confirm-inferred", action="store_true",
+                   help="take the model's first answer as it is (default: a rule it names must be named again "
+                        "by a second look in a fresh session, in observe and auto)")
     r.add_argument("--provider", default=os.environ.get("HARNESS_PROVIDER", "vllm"))
     r.add_argument("--base-url", default=os.environ.get("HARNESS_BASE_URL", ""))
     r.add_argument("--model", default=os.environ.get("HARNESS_MODEL", ""))
@@ -332,6 +337,8 @@ def main(argv=None):
     e.add_argument("--model", default=os.environ.get("HARNESS_MODEL", ""))
     e.add_argument("--repeats", type=int, default=1)
     e.add_argument("--order-check", action="store_true", help="also replay each batch in reverse order")
+    e.add_argument("--no-confirm", action="store_true",
+                   help="measure the first answer only (default: a named rule must be named again, as a live run does)")
     e.add_argument("--hash-ids", action="store_true", help="replace row ids by a short hash in the report")
     e.add_argument("--batch-max", type=int, default=BATCH_MAX)
     e.add_argument("--card-cap", type=int, default=CARD_CAP)

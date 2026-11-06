@@ -137,7 +137,8 @@ class TestEvalCommand(Cli):
     def test_a_run_writes_a_report_that_says_what_it_is(self):
         self.llm.script = [{"text": json.dumps({"decisions": [
             {"trigger_id": 1, "rule": "a", "reason": "SECRET-REASON"},
-            {"trigger_id": 2, "rule": None, "reason": "SECRET-REASON"}]})}]
+            {"trigger_id": 2, "rule": None, "reason": "SECRET-REASON"}]})},
+            {"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "SECRET-REASON"}]})}]
         path = self.corpus([{"id": "r1", "text": "PRIVATE-WORDS about a", "label": "a"},
                             {"id": "r2", "text": "PRIVATE-WORDS about nothing", "label": None}])
         report_path = os.path.join(self.dir, "report.json")
@@ -205,7 +206,8 @@ class TestOperatingCommands(Cli):
 
     def test_eval_prints_progress_and_a_summary_and_quiet_turns_progress_off(self):
         self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
-                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})},
+            {"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
         path = self.corpus([{"id": "r1", "text": "about a", "label": "a"}, {"id": "r2", "text": "about nothing", "label": None}])
         rules = [x for r in RULES for x in ("--rule", r)]
         base = ["eval", "--corpus", path, *rules, "--base-url", self.llm.base_url, "--model", "fake-model", "--backoff", "0.01"]
@@ -216,12 +218,14 @@ class TestOperatingCommands(Cli):
         self.assertIn("召回 recall", out)
         self.assertIn("答錯或沒答案的計分列（第 1 次）：0", out)
         self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
-                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})},
+            {"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
         code, out, err = run(base + ["--out", report_path, "--quiet"])
         self.assertEqual((code, "[eval]" in err), (0, False))
         # without --out the JSON itself goes to stdout and no summary is mixed into it
         self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
-                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})},
+            {"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
         code, out, err = run(base + ["--quiet"])
         self.assertEqual(json.loads(out)["schema"], 1)
 
@@ -320,7 +324,8 @@ class TestOperatingFixes(Cli):
                 json.dump({"id": f"e{i}", "sender": "alice", "thread": f"t{i}", "text": text, "addressed": False}, f)
             os.utime(path, (time.time() - 10, time.time() - 10))
         self.llm.script = [{"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"},
-                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})}]
+                                                            {"trigger_id": 2, "rule": None, "reason": "r"}]})},
+            {"text": json.dumps({"decisions": [{"trigger_id": 1, "rule": "a", "reason": "r"}]})}]
         rules = [x for r in RULES for x in ("--rule", r)]
         done = subprocess.run(
             [sys.executable, "-X", "utf8", "-m", "superagent", "--home", self.home, "run", "--once", "--allow", "alice",
@@ -331,7 +336,8 @@ class TestOperatingFixes(Cli):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn("Traceback", done.stderr)
         code, out, err = run(["--home", self.home, "decisions", "--jsonl"])
-        self.assertEqual([json.loads(x)["model_rule"] for x in out.splitlines()], ["a", ""])
+        # the no-rule answer is decided at the first look, the match only after its second look: the list is in decision order
+        self.assertEqual([json.loads(x)["model_rule"] for x in out.splitlines()], ["", "a"])
         self.assertEqual([n for n in os.listdir(inbox) if n.endswith(".json")], [], "every event file was taken")
 
     def test_run_once_gives_up_when_the_model_session_cannot_start(self):

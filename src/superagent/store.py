@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 
-from . import gate
+from . import gate, sanitize
 from .model import AskState, Decision, InputState, Mandate, Strength, TicketState, Verdict
 
 if os.name == "nt":
@@ -84,7 +84,9 @@ CREATE TABLE IF NOT EXISTS eval_batch(
   session_generation INTEGER NOT NULL, sent_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS eval_item(
   trigger_id INTEGER PRIMARY KEY REFERENCES trigger(id), state TEXT NOT NULL,
-  batch_id INTEGER REFERENCES eval_batch(id), attempts INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL);
+  batch_id INTEGER REFERENCES eval_batch(id), attempts INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'first',   -- 'confirm': the first answer named a rule, a second look is due
+  first_rule TEXT, first_reason TEXT);   -- what the first look said (only while phase is 'confirm')
 """
 
 
@@ -197,6 +199,13 @@ class Store:
                 # NOT filled in for old rows: NULL there means "nobody recorded it", and writing ''
                 # would turn that into "the model said no rule applies"
                 db.execute("ALTER TABLE decision ADD COLUMN model_rule TEXT")
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(eval_item)")}
+        if "phase" not in cols:
+            with self.tx() as db:
+                # an older home has only first looks: whatever waits or is in flight there is one
+                db.execute("ALTER TABLE eval_item ADD COLUMN phase TEXT NOT NULL DEFAULT 'first'")
+                db.execute("ALTER TABLE eval_item ADD COLUMN first_rule TEXT")
+                db.execute("ALTER TABLE eval_item ADD COLUMN first_reason TEXT")
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(ticket)")}
         if "last_activity" not in cols:
             with self.tx() as db:
@@ -552,7 +561,7 @@ class Store:
     def peek_eval_items(self, max_items):
         """The oldest pending candidates, with their message. Changes nothing."""
         return self._q(
-            "SELECT e.trigger_id, e.attempts, e.ts, t.source, t.thread, t.sender, t.text "
+            "SELECT e.trigger_id, e.attempts, e.ts, e.phase, t.source, t.thread, t.sender, t.text "
             "FROM eval_item e JOIN trigger t ON t.id = e.trigger_id WHERE e.state='pending' "
             "ORDER BY e.trigger_id LIMIT ?", (max(1, int(max_items)),))   # LIMIT 0 takes none, a negative one takes all
 
@@ -603,8 +612,9 @@ class Store:
         shutdown, which is nobody's fault) it just goes back in line."""
         attempts = item["attempts"] + (1 if count else 0)
         if count and attempts >= EVAL_MAX_ATTEMPTS:
+            of = f" (confirmation of {item['first_rule']})" if item["phase"] == "confirm" else ""
             self.record_decision(tid, Decision(Verdict.UNAVAILABLE, Strength.INFERRED,
-                                               f"no usable answer after {attempts} tries"))
+                                               f"no usable answer after {attempts} tries{of}"))
             db.execute("UPDATE eval_item SET state='unavailable', attempts=? WHERE trigger_id=?", (attempts, tid))
             return "unavailable"
         db.execute("UPDATE eval_item SET state='pending', batch_id=NULL, attempts=? WHERE trigger_id=?",
@@ -620,7 +630,7 @@ class Store:
         changes nothing) unless the batch is still in flight, every trigger belongs to it and is still
         waiting, and none has a decision yet.
         -> {"accepted": [ticket ids], "done": [...], "unavailable": [...], "pending": [...]}"""
-        report = {"accepted": [], "done": [], "unavailable": [], "pending": []}
+        report = {"accepted": [], "done": [], "unavailable": [], "pending": [], "confirming": []}
         results = {}
         for tid, answer in answers.items():
             if not (isinstance(answer, tuple) and len(answer) == 2
@@ -639,6 +649,17 @@ class Store:
                 if self._q("SELECT 1 FROM decision WHERE trigger_id=?", (tid,)):
                     raise StaleBatch(f"trigger {tid} already has a decision")
             for tid, auth in results.items():
+                it = items[tid]
+                if it["phase"] == "first" and gate.needs_confirmation(auth, policy):
+                    # The first look named a rule. No decision and no ticket yet: the candidate waits
+                    # for a second look, which gets a full set of tries of its own.
+                    db.execute("UPDATE eval_item SET phase='confirm', state='pending', batch_id=NULL, attempts=0, "
+                               "first_rule=?, first_reason=? WHERE trigger_id=?",
+                               (auth.decision.model_rule, sanitize.clean_line(answers[tid][1])[:gate.RULE_MAX], tid))
+                    report["confirming"].append(tid)
+                    continue
+                if it["phase"] == "confirm":
+                    auth = gate.confirm(it["first_rule"], it["first_reason"] or "", answers[tid][0], answers[tid][1], policy)
                 d, trig, ticket_id = auth.decision, self.get_trigger(tid), None
                 if d.verdict is Verdict.ACCEPT:
                     ticket_id, _ = self.new_ticket(trig["source"], trig["thread"], d.strength, paths_fn,

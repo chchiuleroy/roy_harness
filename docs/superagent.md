@@ -70,13 +70,14 @@ python -X utf8 -m superagent --home C:/Users/roy/superagent_home run \
 - **模型只能回答「這則符合哪一條規則，或都不符合」**（一個 JSON 物件）。它**沒有任何工具**（hook 否決每一個，連 `todo_write` 都不給）。它的回答本身不改變任何東西：`gate.authorize` 與 store 決定後果。
 - **誰不經過模型**：明確請求（白名單的人對 agent 說話）、同一討論串的追問透傳、沒被准入的人——全部仍然是程式碼。
 - **`authorize` 是唯一出口**：規則名必須在設定的規則裡（否則記為 `unavailable`，模型寫的字不保留）；只有 `--accept-mode auto` 才會把符合變成 Ticket（`strength=inferred`、`matched_rules` 寫進不可變的 Mandate）；`observe` 只記 `would_accept`。模型寫的 `reason` 只當稽核文字（截到 300 字元），不是授權依據。store 的套用函式收的是模型原話 `(規則名或 None, reason)`，**由它自己呼叫 `gate.authorize`**；呼叫端交不進現成的決定（交了就 `TypeError`）。
+- **第二眼（預設開，`--no-confirm-inferred` 關）**：模型第一次說某則符合規則 R 時，**不開工單也不寫 decision**；同一則進「確認批次」，由**全新的 session**（引擎會自己丟掉舊的，即使你把 `--main-reset-batches` 調大）再獨立判斷一次，批次文字只有訊息與規則清單，**不含第一次的答案**。兩次說**同一個**規則才算：`auto` 開工單、`observe` 記 `would_accept`（`observe` 是 `auto` 的預演，所以也要兩次）。第二次說沒有規則、說另一個規則：記為忽略，decision 的 `model_rule` 留第二次所說，reason 寫「second look differs」；第二次的規則名不在清單：`unavailable`；第二次沒得到可用答案：沿用上面的 3 次上限（從 0 重算），用盡記 `unavailable`，reason 註明是哪個規則的確認。已進入確認階段的候選，即使之後關掉這個開關，仍會完成第二眼（不直接採信第一次、也不重問第一次）。代價：第一次命中的候選多一次模型呼叫、工單晚一個批次。限度：兩次是同一個模型、同樣的取樣設定，不是獨立專家；兩次犯相關的錯時，這道門擋不住。
 - **一次一批、非阻塞**：候選累積到 `--batch-min` 或等到 `--batch-wait` 秒就成一批（上限 `--batch-max`，預設 8，範圍 1–100）；一批最多 `--eval-timeout` 秒（預設 180），逾時就停掉該 session、把候選放回佇列。**逾時先於讀答案**：過了期限才到的答案（即使已在佇列裡）不會被套用。設定值不合理（`--batch-max 0`／負數、`--batch-min` 大於 `--batch-max`、非正的逾時等）一律啟動即拒絕。同一個候選 3 次沒有得到可用答案（回覆讀不懂、漏掉它、逾時），記為 `unavailable`。
 - **回覆怎麼讀**：只認「最後一個工具呼叫**之後**」模型寫的文字，要求其中**恰好一個** JSON 物件，嚴格驗證（沒問到的 id 丟掉、缺的 id 不猜、重複取第一個）。回覆裡有兩個以上 JSON 物件（例如「答案＋更正」）時整則拒絕、該批重試，因為無從判斷哪個才是模型的意思；寫壞的半成品或散文裡的大括號不算 JSON 物件，會被略過；但**包在一個從未閉合的 `{` 裡面**的合法物件不採信（模型當時在引用或打草稿，內容可能是複誦），整則重試。超過 `MAX_REPLY`（65,536 個字元，非位元組）的回覆整則拒絕，因為超出的部分從不被讀。回覆裡有 64 個以上不閉合的 `{` 時，解析器放棄並**整則拒絕**（不是只讀到放棄處為止）：無上限的重試曾讓 65,536 個大括號卡住引擎執行緒四分鐘，而「放棄後接受前面的答案」會讓人用大量括號遮住後面的更正。到達 50 輪上限而沒有最終回覆的，視為失敗，不會把較早輪留下的 JSON 當答案。
 - **預設每一批都換新 session**（`--main-reset-batches 1`）：候選之間彼此獨立，所以不需要跨批脈絡；代價是一次污染最多影響一批（≤ `--batch-max` 則）。調大這個數字等於接受跨批累積（含壓縮摘要）的風險。
 - **崩潰與重啟**：候選與「等模型」的標記和訊息是同一個交易；批次先 commit 成 `sent` 再送出；重啟時所有 `sent` 批放回佇列，**不算一次嘗試**（重啟不是候選的錯）；同一個答案不會被套用兩次（批次狀態檢查＋每個 trigger 最多一個終局 decision 的唯一索引）。重啟或規則改變時沒有 Policy 版本化：等待中的候選在**套用當下**依**當時**的規則與 accept mode 處理。
 - 模型 session 也記在行程清單裡，`down --mode stop/purge` 會一併停掉；`status` 顯示 `eval` 佇列。
 
-**這個設計的已知風險**：`authorize` 只能確認規則名有效與模式，**驗證不了語意是否真的符合**。被注入而說服了模型的最壞情形，是「那一批」裡的多則候選在 `auto` 下被開成 Ticket（每張仍受 Mandate／`safe`／hook 限制）。所以預設是 `observe`，並且每批換新 session。
+**這個設計的已知風險**：`authorize` 只能確認規則名有效與模式，**驗證不了語意是否真的符合**。被注入而說服了模型的最壞情形，是「那一批」裡的多則候選在 `auto` 下被開成 Ticket（每張仍受 Mandate／`safe`／hook 限制）。所以預設是 `observe`，並且每批換新 session；`auto` 與 `observe` 還要兩次判斷一致（見上面的「第二眼」），單次被說服不夠。
 
 C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERAGENT_LIVE=1` 才跑；結果與條件寫在它產生的報告檔。
 
@@ -103,8 +104,9 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 
 **`decision.model_rule` 三態**：`NULL` ＝ 沒有模型答案（舊資料、規則式決定、試滿次數放棄的候選）；`''` ＝ 模型答「都不符合」；規則名 ＝ 模型選的規則（不在設定裡的名字先去控制字元再截 64 字元，決定記為 `unavailable`）。舊 home 開啟時補欄位、**不回填**——回填 `''` 會把「沒記錄」變成「模型說沒有」。
 
-**`eval`**——`python -X utf8 -m superagent eval --corpus 語料.jsonl --rule NAME=說明 ... --base-url ... --model ... [--repeats N] [--order-check] [--hash-ids] [--out 報告.json]`。語料每行一個 JSON：`id`、`text`、`label`（規則名或 `null`）、選填 `uncertain`／`sender`／`thread`／`note`；有任何問題會**一次列出全部**再拒絕（標籤不在規則裡、超過卡片上限而沒加 `--allow-truncated`、同一討論串多列而沒加 `--allow-shared-threads` 等）。
+**`eval`**——`python -X utf8 -m superagent eval --corpus 語料.jsonl --rule NAME=說明 ... --base-url ... --model ... [--repeats N] [--order-check] [--no-confirm] [--hash-ids] [--out 報告.json]`。語料每行一個 JSON：`id`、`text`、`label`（規則名或 `null`）、選填 `uncertain`／`sender`／`thread`／`note`；有任何問題會**一次列出全部**再拒絕（標籤不在規則裡、超過卡片上限而沒加 `--allow-truncated`、同一討論串多列而沒加 `--allow-shared-threads` 等）。
 
+- **含第二眼（預設，和線上一致）**：命名了規則的列會再問一次，兩次同規則才算「模型說有規則」；兩次不一致的列在指標裡算沒有規則。報告多兩個欄位：每列的 `first`（第一次所說的規則，沒進確認則 `null`）與 `confirmation`（`asked`／`confirmed`／`disagreed`／`unavailable`，以第一個 repeat 為準），`meta.confirm` 標明這次有沒有確認。`--no-confirm` 只量第一次的答案（舊的量法）。`--repeats` 仍只是穩定度，不是投票。
 - **走真的引擎**：臨時資料夾裡跑真的 `Engine`＋`MainSession`（`accept_mode=observe`、`max_running=0`），一個 chunk（≤ `--batch-max` 列）一次丟進收件匣就恰好是一批。報告的 `differences` 列出和實際運行仍不同的地方（收件匣是暫存檔案、批次由語料切塊而非到達時間、每趟全新 store、標籤是人寫的）。
 - **統計定義**（先定好，結果出來才不會挑）：分析單位是被標註的**列**；主要數字只看**第一個 repeat**，後面的 repeat 只用來看穩定度，不併進 n；沒得到可用答案（`unavailable`）的列**留在分母**（intention-to-classify），所以放棄作答會讓召回下降而不是讓精確度變好；區間用 Wilson（不用 Wald）；另附只算有答案列的 `diagnostic`。`uncertain` 與被截斷的列照常重播但不計分，超過 10% 會警告。
 - **`conclusion` 不下判決**：只說在目標半寬（`--half-width`，預設 0.10）下每個指標「精確度達到／未達到／無資料」，給 `rows_needed`（假設各列獨立、比例不變）；另一句固定寫「尚未設定驗收門檻，本報告不說模型夠不夠好」。
@@ -119,7 +121,7 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 4. **量測**：`python -X utf8 -m superagent eval --corpus corpus_labelled.jsonl --rule ... --base-url ... --model ... --out report.json --errors`。標註檔裡有被截斷的列（頁面上有橘字提示）要加 `--allow-truncated`（照常重放但不計分）；有多列同一個 `thread`（真實匯出可能發生）要加 `--allow-shared-threads`（區間會偏窄，報告會警告）。沒加時 `eval` 會**一次列出全部問題**再拒絕，不會跑一半。stderr 會印進度（`[eval] pass 1/3: batch 4/17`，`--quiet` 關掉）；stdout 印可讀的摘要（主要指標、逐規則、穩定度、順序敏感度、失敗、警告、報告的結論原文，加上答錯的列和訊息開頭——**訊息開頭只印在終端，不寫進 report.json**）。
 5. **之後再看**：`python -X utf8 -m superagent report report.json [--errors --corpus corpus_labelled.jsonl]`。
 
-跑一次要多久：每批一次模型呼叫；列數 ÷ `--batch-max` 就是一趟的批數，再乘上趟數（`--repeats`、加 `--order-check` 多一趟）。
+跑一次要多久：每批一次模型呼叫；列數 ÷ `--batch-max` 就是一趟的批數，再乘上趟數（`--repeats`、加 `--order-check` 多一趟）；含第二眼時，第一次命中的列另外還要多批（每趟額外約「命中列數 ÷ `--batch-max`」批）。
 
 **限制（誠實）**：目前**沒有**真實部署的收件匣或人工標註的真實語料，所以第一份有意義的準確度數字要等你提供標註語料；在那之前 `eval` 只有用合成語料做過「工具測試」（見該次報告，註明不是準確度證據）。`rows_needed` 與區間都假設各列獨立；同一討論串多列、或語料不代表實際流量時，區間會偏樂觀。模型取樣設定用端點預設，不同端點的結果不可直接比較。
 

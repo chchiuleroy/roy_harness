@@ -191,6 +191,10 @@ class Engine:
             return
         if len(items) < self.batch_min and self.clock() - items[0]["ts"] < self.batch_wait:
             return
+        if any(i["phase"] == "confirm" for i in items) and self.main.batches_in_generation > 0:
+            # A second look must not share a session with the first one (a session kept for several
+            # batches has seen the first answer): drop it, so the next one is a new generation.
+            self.main.stop()
         if not self.main.ensure_running():
             self.note("main_cannot_start", why=self.main.last_error)
             self.main_blocked = self.main.last_error or "unknown reason"

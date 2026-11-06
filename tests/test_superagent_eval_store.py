@@ -13,8 +13,11 @@ from superagent.gate import Policy, Rule
 from superagent.model import Authorized, Decision, Strength, TicketState, Trigger, Verdict
 from superagent.store import EVAL_MAX_ATTEMPTS, StaleBatch, Store
 
-AUTO = Policy(allowed_senders=frozenset({"alice"}), accept_mode="auto", rules=(Rule("export-bug", "export fails"),))
-OBSERVE = Policy(allowed_senders=frozenset({"alice"}), accept_mode="observe", rules=AUTO.rules)
+# These two test the ledger's single-look mechanics (one answer in, one decision out), so they turn the
+# second look off; the second look has its own tests in test_superagent_confirm.py.
+AUTO = Policy(allowed_senders=frozenset({"alice"}), accept_mode="auto", rules=(Rule("export-bug", "export fails"),),
+              confirm_inferred=False)
+OBSERVE = Policy(allowed_senders=frozenset({"alice"}), accept_mode="observe", rules=AUTO.rules, confirm_inferred=False)
 
 
 def trig(ext, thread="t", text="maybe a request"):

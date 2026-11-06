@@ -76,7 +76,8 @@ class ReplayCase(unittest.TestCase):
     def cfg(self, **kw):
         base = dict(provider="vllm", base_url=self.llm.base_url, model="fake-model", rules=RULES, backoff=0.01,
                     executor_factory=lambda label: ex.HarnessExecutor(self.xcfg, self.harness),
-                    harness_path=self.harness, chunk_timeout=120.0, eval_timeout=60.0)
+                    harness_path=self.harness, chunk_timeout=120.0, eval_timeout=60.0,
+                    confirm=False)       # these tests are about the first look (batches, order, repeats); the second look is in test_superagent_confirm.py
         base.update(kw)
         return rp.ReplayConfig(**base)
 
@@ -255,11 +256,11 @@ class TestFailures(ReplayCase):
 
 class TestTheReportKeepsNothingItShouldNot(ReplayCase):
     TOP = {"schema", "meta", "corpus", "primary", "diagnostic", "conclusion", "per_repeat", "stability",
-           "order_sensitivity", "uncertain_rows", "failures", "warnings", "differences", "rows"}
+           "order_sensitivity", "uncertain_rows", "failures", "confirmation", "warnings", "differences", "rows"}
     META = {"model", "provider", "rules", "template_fingerprint", "harness_sha256", "sampling", "card_cap",
-            "batch_max", "eval_max_attempts", "corpus_sha256", "corpus_rows", "repeats", "order_check",
+            "batch_max", "eval_max_attempts", "corpus_sha256", "corpus_rows", "repeats", "order_check", "confirm",
             "confidence", "half_width", "hash_ids", "python", "platform", "utc"}
-    ROW = {"id", "label", "uncertain", "truncated_chars", "outcomes", "reversed"}
+    ROW = {"id", "label", "uncertain", "truncated_chars", "first", "outcomes", "reversed"}
 
     def report(self, **kw):
         self.script(lambda text, n: "a")
