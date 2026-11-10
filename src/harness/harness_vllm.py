@@ -1170,10 +1170,10 @@ def _judge(system, subject):
         reply = call_llm([{"role": "user", "content": f"User request:\n{req}\n\n{subject}"}],
                          None, system, max_tokens=200, temperature=0, **kw)
         text = reply["choices"][0]["message"].get("content") or ""
-        found = re.search(r"\{.*\}", text, re.S)
-        if found is None:
+        start, end = text.find("{"), text.rfind("}")     # first "{" to last "}"; the regex \{.*\} is O(n^2) on many "{"
+        if start < 0 or end < start:
             return "ASK", "classifier reply had no JSON object"
-        obj = json.loads(found.group(0))
+        obj = json.loads(text[start:end + 1])
     except Exception as e:
         return "ASK", f"classifier unavailable ({e!r})"
     v = obj.get("verdict")
