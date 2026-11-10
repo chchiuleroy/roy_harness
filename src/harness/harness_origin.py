@@ -13,14 +13,20 @@ flagged. Nothing here imports the harness.
 import re
 from collections import deque
 
-_URL = re.compile(r"[a-z][a-z0-9+.-]*://(?:[^/\s@]*@)?([a-z0-9._-]+)", re.I)
-_AT_HOST = re.compile(r"[\w.+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+)", re.I)        # mail, ssh, git@host:path
+# Every pattern below must start at a rare literal ("://", "@") or at a token boundary. A pattern
+# that may start at ANY letter and then scans a long run (`[a-z0-9+.-]*://`, `[\w.+-]+@`) costs
+# O(n^2) on one long word: measured 13.9 s for 30,000 "x" characters, and tool output is attacker
+# text. (The scheme is not matched at all: whatever precedes "://" is not part of the host.)
+# The host is a bracketed IPv6 literal or a run of word characters (Unicode letters included, so an
+# internationalised domain name is seen too; both were missed before).
+_URL = re.compile(r"(?<=[a-z0-9+.-])://(?:[^/\s@]*@)?(\[[0-9a-f:.]+\]|[\w.-]+)", re.I)
+_AT_HOST = re.compile(r"(?<=[\w.+-])@([a-z0-9-]+(?:\.[a-z0-9-]+)+)", re.I)    # mail, ssh, git@host:path
 _IPV4 = re.compile(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3})(?![\w-]|\.\w)")
 TLDS = ("com", "net", "org", "io", "dev", "ai", "app", "co", "info", "biz", "xyz", "top", "site",
         "online", "cloud", "me", "us", "uk", "de", "fr", "jp", "cn", "ru", "tw", "in", "example")
 # A bare domain must not be the front of a longer dotted name: `foo.test.js` is a file.
 _BARE = re.compile(r"(?<![\w@./:-])((?:[a-z0-9-]+\.)+(?:" + "|".join(TLDS) + r"))(?![\w-]|\.\w)", re.I)
-LOOPBACK = ("localhost", "0.0.0.0")
+LOOPBACK = ("localhost", "0.0.0.0", "[::1]")
 MAX_HOSTS = 5000                          # a long session must not grow this without bound
 MAX_RECENT, RECENT_CLIP = 8, 160
 
@@ -32,7 +38,8 @@ def hosts_in(text):
     found = set()
     for rx in (_URL, _AT_HOST, _IPV4, _BARE):
         found.update(m.group(1).lower().strip(".") for m in rx.finditer(text))
-    return {h for h in found if h and h not in LOOPBACK and not h.startswith("127.")}
+    return {h for h in found if h and any(c.isalnum() for c in h)
+            and h not in LOOPBACK and not h.startswith("127.")}
 
 
 class Origin:
