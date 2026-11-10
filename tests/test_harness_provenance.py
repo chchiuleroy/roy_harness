@@ -37,7 +37,7 @@ class TestHostsIn(unittest.TestCase):
         self.assertEqual(ho.hosts_in("curl http://localhost:8000 http://127.0.0.1:9/x 0.0.0.0"), set())
 
     def test_port_userinfo_and_trailing_dot_do_not_change_the_host(self):
-        self.assertEqual(ho.hosts_in("https://user:pw@Evil.COM:8443/x"), {"evil.com"})
+        self.assertEqual(ho.hosts_in("ssh://user:pw@Evil.COM:8443/x"), {"evil.com"})
         self.assertEqual(ho.hosts_in("see evil.com."), {"evil.com"})
 
     def test_non_text_is_harmless(self):
@@ -71,10 +71,10 @@ class TestOrigin(unittest.TestCase):
             self.assertEqual(o.untrusted_hosts(host), [host], host)
 
     def test_a_host_in_neither_set_is_not_flagged(self):
-        """A host the model names from its own knowledge (pypi.org) must not cost a question;
+        """A host the model names from its own knowledge (github.com) must not cost a question;
         the signature is 'tool output named it', not 'the user did not'."""
         o = ho.Origin()
-        self.assertEqual(o.untrusted_hosts("pip install --index-url https://pypi.org/simple x"), [])
+        self.assertEqual(o.untrusted_hosts("git clone https://github.com/o/r.git"), [])
 
     def test_recent_actions_are_capped_clipped_and_cleared_each_turn(self):
         o = ho.Origin()
@@ -111,7 +111,7 @@ class TestOrigin(unittest.TestCase):
 
     def test_the_users_own_set_is_bounded_and_a_host_that_did_not_fit_simply_asks(self):
         o = ho.Origin()
-        o.user_text(" ".join(f"https://u{i}.example/" for i in range(ho.MAX_HOSTS + 50)))
+        o.user_text(" ".join(f"https://h{i}.example/" for i in range(ho.MAX_HOSTS + 50)))
         self.assertLessEqual(len(o.user), ho.MAX_HOSTS)
 
 

@@ -165,7 +165,7 @@ SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模
 SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 superagent 後結果不變」檢查
 ```
 
-2026-11-06 在作者機器上跑離線套件：**977 項通過、略過 27 項**，約 632 秒，單次執行（前一次 2026-11-05 是 968 項、約 673 秒）。略過的是需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。移除檢查（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）在 2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒。live 測試上一次完整跑是 2026-11-03（785 項 OK、略過 26 項、約 870 秒），之後沒有重跑。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
+2026-11-10 在作者機器上跑離線套件：**1026 項通過、略過 27 項（共 1053 項）**，約 605 秒，單次執行（前一次 2026-11-06 是 977 項通過、略過 27 項、約 632 秒；多出的 49 項是 PR #27 的 `tests/test_harness_provenance.py`）。略過的是需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。移除檢查（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）在 2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒。live 測試上一次完整跑是 2026-11-03（785 項 OK、略過 26 項、約 870 秒），之後沒有重跑。superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
 ## 四、已知限制
 
@@ -191,8 +191,8 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 ## 檔案配置
 
 ```
-src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）、harness_hooks.py、harness_mcp.py、
-               harness_skills.py、harness_gui.py ＋ .html ＋ _md.js（GUI）
+src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）、harness_origin.py（主機來源追蹤）、harness_hooks.py、
+               harness_mcp.py、harness_skills.py、harness_gui.py ＋ .html ＋ _md.js（GUI）
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）

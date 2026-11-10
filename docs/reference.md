@@ -133,6 +133,7 @@ roy_harness/
 ├─ .gitignore                  含 .harness.env（個人端點）
 ├─ src/harness/harness_vllm.py
 ├─ src/harness/harness_net.py   URL 政策、不跟隨重新導向
+├─ src/harness/harness_origin.py 主機來源追蹤（使用者講的 vs 工具輸出）、本回合動作
 ├─ src/harness/harness_hooks.py Hook 載入與執行
 ├─ src/harness/harness_mcp.py   MCP 客戶端（stdio、Streamable HTTP、兩代協定）
 ├─ src/harness/harness_skills.py Skill：選單、skill 工具、保護
@@ -140,6 +141,7 @@ roy_harness/
 ├─ src/harness/harness_gui.html GUI 前端
 ├─ src/harness/harness_gui_md.js markdown → 資料樹（純函式，Node 測試；不產生 HTML）
 ├─ tests/test_harness_vllm.py
+├─ tests/test_harness_provenance.py 來源追蹤、先前動作、寫檔分類器、分類器模型（含 main() 子行程端對端）
 ├─ tests/test_harness_gui.py        GUI 與 --jsonl 測試（含存取控制、核准綁 id、停止續跑）
 ├─ tests/test_harness_gui_md.py     markdown 解析與頁面原始碼檢查（需要 Node，沒有就略過）
 ├─ tests/test_harness_vision.py     view_image 測試（檔頭判斷、參照不存位元組、只送最近幾張、端到端）

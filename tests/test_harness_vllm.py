@@ -264,7 +264,8 @@ class TestLocalConfig(Base):
             with open(os.path.join(root, rel), encoding="utf-8") as f:
                 text = f.read()
             for host in re.findall(r"https?://([A-Za-z0-9.-]+)", text):
-                if host.lower() not in allowed:
+                # `.example` is reserved (RFC 2606) and can never resolve: no real endpoint to leak
+                if host.lower() not in allowed and not host.lower().endswith(".example"):
                     bad.append((rel, host))
         self.assertEqual(bad, [])
 
