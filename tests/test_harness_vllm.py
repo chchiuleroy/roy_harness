@@ -46,6 +46,7 @@ class Base(unittest.TestCase):
         hv.READ_STATE.clear()
         hv.PERMS["exact"], hv.PERMS["prefix"] = [], []
         hv.MODE, hv.CURRENT_REQUEST = "normal", ""
+        hv.ORIGIN.clear()                    # provenance state is per conversation
         while not hv.EVENTS.empty():
             hv.EVENTS.get_nowait()
         self._read_line, self._call_llm = hv.read_line, hv.call_llm
