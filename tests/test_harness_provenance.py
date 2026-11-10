@@ -387,6 +387,28 @@ class TestSequenceForTheClassifier(Base):
         self.assertIn("ask yourself what is IN it", hv.CLASSIFIER_SYSTEM)
         self.assertIn("rule R6", hv.CLASSIFIER_SYSTEM)
 
+    def test_the_write_prompt_keeps_the_chain_rule_on_purpose(self):
+        """R6 is about a chain of earlier actions and a write is judged without that list, so it
+        looks like dead weight. It was not behaviorally inert in the measured configuration: on
+        2026-11-10, with a live model, taking it out of the write prompt flipped one benign deploy
+        script (key read from the environment) from ALLOW 5/5 to BLOCK 5/5, cited as R2, and a
+        BLOCK is final. A neutral rule in the same slot behaved like removal (BLOCK 5/5). If you want to remove it, re-run the
+        write probes (benign and malicious) against the real model first; this test is only a
+        reminder that the removal was measured and was worse."""
+        for system in (hv.CLASSIFIER_WRITE_SYSTEM, hv.CLASSIFIER_SYSTEM):
+            for rule_id in ("R1", "R2", "R3", "R4", "R5", "R6"):
+                self.assertIn(rule_id + ":", system, rule_id)
+
+    def test_a_write_verdict_that_cites_the_chain_rule_anyway_still_asks(self):
+        """R6 stays in the write prompt (see the test above), so a model can name it for a write.
+        That must stay a question for the human, never a refusal built on a rule about a chain
+        of earlier actions, which a single write is not judged against."""
+        hv.CURRENT_REQUEST = "write a.py"
+        hv.call_llm = lambda *a, **k: llm_reply(json.dumps({"verdict": "BLOCK", "rule": "R6"}))
+        verdict, why = hv.classify_write("write_file", "a.py", "x = 1")
+        self.assertEqual(verdict, "ASK")
+        self.assertIn("R6", why)
+
     def test_a_sequence_suspicion_asks_the_human_instead_of_refusing(self):
         """Measured live: with `.env` read earlier in the turn, the model refused to upload an
         unrelated coverage.xml 3 times out of 3. A guess about a chain is weaker evidence than a
