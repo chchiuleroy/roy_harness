@@ -54,7 +54,7 @@ python -X utf8 -m superagent --home C:/Users/roy/superagent_home down --mode pur
 | 移除程式 | 刪掉 `src/superagent/`（與 `tests/test_superagent_*.py`） | harness 與其測試完全不變；資料資料夾原地保留 |
 | 完全清除 | `down --mode purge` | 先停機，再刪整個 `SUPERAGENT_HOME`；資料庫壞掉也能用（改以命令列掃描找行程：命令列須**同時**含 home、`--jsonl`、`harness_vllm`，只是開著 home 內檔案的編輯器或終端不會被誤殺） |
 
-驗證「移除程式」：`SUPERAGENT_REMOVAL=1 python -X utf8 -m unittest tests.test_superagent_cli -v`（跑整套測試一次，再在刪掉 `src/superagent/` 與 `tests/test_superagent_*.py` 的副本上跑一次，兩邊 harness 測試逐項結果必須相同；兩邊都只跑離線測試）。
+驗證「移除程式」：`SUPERAGENT_REMOVAL=1 python -X utf8 -m unittest discover -s tests -p test_superagent_cli.py -v`（要用 `discover`：以 `tests.test_superagent_cli` 模組名載入時 `tests/` 不在路徑上，會 `ModuleNotFoundError: superagent_support`，約 1 秒就失敗、根本沒跑到檢查；整個約 15 分鐘）（跑整套測試一次，再在刪掉 `src/superagent/` 與 `tests/test_superagent_*.py` 的副本上跑一次，兩邊 harness 測試逐項結果必須相同；兩邊都只跑離線測試）。
 
 ## Slice 2：模型 Main（`--assessor model`）
 
