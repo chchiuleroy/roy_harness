@@ -6,6 +6,7 @@ import json
 import os
 import unittest
 
+import superagent_support as sup  # noqa: F401  (puts src/ on the path)
 from superagent import summary
 from superagent import replay as rp
 from superagent.measure import NULL

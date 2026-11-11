@@ -169,7 +169,7 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 
 - **略過的 27 項**：需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。
 - **移除檢查**（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）：2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒。
-- **live 測試**：上一次完整跑是 2026-11-03（785 項 OK、略過 26 項、約 870 秒），之後沒有重跑。
+- **live 測試**：2026-11-11（作者機器，真實 vLLM，單次）以 `HARNESS_LIVE=1` 逐檔跑完全部 36 個測試檔：**共 1060 項，1049 項通過、略過 11 項、0 失敗**，累計約 930 秒；另以 `SUPERAGENT_LIVE=1` 跑 `test_superagent_live.py` 的 2 項（真模型判斷、整個工單迴圈），OK、約 68 秒。是逐檔跑、不是整套一次 `discover`，所以「累計秒數」是各檔相加。上一次是 2026-11-03（785 項 OK、略過 26 項、約 870 秒）。逐檔跑時 `test_superagent_summary.py` 單獨跑曾 ImportError（漏 `import superagent_support`），已補。`SUPERAGENT_REMOVAL=1` 本次沒重跑。
 - superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。每項測試的 docstring 寫的是「為什麼這個行為重要」。
 - 實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
