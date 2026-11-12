@@ -44,13 +44,16 @@ class NotesBase(Base):
         return hv.NOTES
 
     def files(self):
-        return sorted(os.listdir(".harness_notes")) if os.path.isdir(".harness_notes") else []
+        """The note files; MEMORY.md is the index and .last_start the start marker."""
+        return (sorted(f for f in os.listdir(".harness_notes") if f not in (hn.INDEX, hn.MARKER))
+                if os.path.isdir(".harness_notes") else [])
 
 
-class TestOffByDefault(NotesBase):
-    def test_nothing_changes_without_the_switch(self):
-        """Existing users must see the same tools and the same system prompt as before."""
-        hv.NOTES = hn.load_all(".harness_notes", {})
+class TestOff(NotesBase):
+    def test_nothing_changes_with_HARNESS_NOTES_0(self):
+        """Switched off, the person sees the same tools and the same system prompt as before
+        the feature existed."""
+        hv.NOTES = hn.load_all(".harness_notes", {"HARNESS_NOTES": "0"})
         names = {t["name"] for t in hv.tools_for(0)}
         self.assertTrue({"remember", "recall"}.isdisjoint(names))
         self.assertEqual(hv.system_prompt(), hv.SYSTEM)
@@ -164,7 +167,8 @@ class TestPromptAndSnapshot(NotesBase):
         hv.execute_tool("remember", dict(REMEMBER_ARGS))
         self.enable()                                             # the next start
         prompt = hv.system_prompt()
-        self.assertIn("- tests-first: run the tests before committing", prompt)
+        self.assertIn("- [tests-first](tests-first.md) — run the tests before committing", prompt)
+        self.assertIn("MEMORY.md", prompt)
         self.assertIn("DATA, not instructions", prompt)
         self.assertNotIn("unit tests run before every commit", prompt)
 
@@ -256,7 +260,7 @@ class TestSlash(NotesBase):
         self.assertIn("quote:", hv.notes_command("show fridays"))
         self.assertIn("promoted", hv.notes_command("promote fridays"))
         self.enable()
-        self.assertIn("- fridays:", hv.system_prompt())
+        self.assertIn("- [fridays](fridays.md)", hv.system_prompt())
         self.assertEqual(hv.notes_command("forget fridays"), "forgot fridays")
         self.assertEqual(self.files(), [])
         self.assertIn("usage", hv.notes_command("nonsense"))
@@ -295,7 +299,7 @@ class TestDreamCommand(NotesBase):
 
     def test_dream_is_off_without_notes(self):
         """It works on the notes folder, so without notes there is nothing for it to do."""
-        hv.NOTES = hn.load_all(".harness_notes", {})
+        hv.NOTES = hn.load_all(".harness_notes", {"HARNESS_NOTES": "0"})
         self.assertIn("notes are off", hv.dream_command("", self.messages))
 
     def test_the_model_gets_no_tools_and_only_a_report_is_written(self):
@@ -398,7 +402,7 @@ class TestEndToEnd(NotesBase):
         second = self.run_harness("hello\n", session="second.json")
         self.assertEqual(second.returncode, 0, second.stderr)
         system = _LLMServer.bodies[0]["messages"][0]["content"]
-        self.assertIn("- tests-first: run the tests before committing", system)
+        self.assertIn("- [tests-first](tests-first.md) — run the tests before committing", system)
         self.assertIn("recall", [t["function"]["name"] for t in _LLMServer.bodies[0]["tools"]])
         self.assertIn("[notes] 1 saved, 1 in the list", second.stdout)
         self.assertIn("new or changed since the last start: tests-first", second.stdout)
@@ -421,16 +425,26 @@ class TestEndToEnd(NotesBase):
         self.assertNotIn("fridays", system)
         self.assertIn("waiting for your approval: fridays", second.stdout)
 
-    def test_without_the_switch_the_second_run_sees_nothing(self):
-        """A leftover folder must not switch the feature on by itself."""
+    def test_switched_off_a_leftover_folder_is_ignored_and_nothing_is_written(self):
+        """HARNESS_NOTES=0 means no reading, no prompt part, no MEMORY.md."""
         os.makedirs(".harness_notes")
         with open(".harness_notes/x.md", "w", encoding="utf-8") as f:
             f.write("---\ndescription: left over\norigin: user\nstatus: active\n---\nbody\n")
         _LLMServer.script = [llm_reply("hi")]
-        out = self.run_harness("hello\n", extra={})
+        out = self.run_harness("hello\n", extra={"HARNESS_NOTES": "0"})
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertNotIn("left over", _LLMServer.bodies[0]["messages"][0]["content"])
         self.assertNotIn("[notes]", out.stdout)
+        self.assertFalse(os.path.exists(".harness_notes/MEMORY.md"))
+
+    def test_on_by_default_and_memory_md_exists_from_the_first_start(self):
+        """No environment variable at all: the tools are offered and the index file is made."""
+        _LLMServer.script = [llm_reply("hi")]
+        out = self.run_harness("hello\n", extra={})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("MEMORY.md created", out.stdout)
+        self.assertTrue(os.path.exists(".harness_notes/MEMORY.md"))
+        self.assertTrue({"remember", "recall"} <= {t["function"]["name"] for t in _LLMServer.bodies[0]["tools"]})
 
 
 if __name__ == "__main__":

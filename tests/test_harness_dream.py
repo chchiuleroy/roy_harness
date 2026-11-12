@@ -63,7 +63,8 @@ class Base(unittest.TestCase):
         self.assertIn("saved", self.reg.save(name, args["description"], args["body"], quote, seen))
 
     def listing(self):
-        return sorted(os.listdir(self.root)) if os.path.isdir(self.root) else []
+        """The note files; MEMORY.md is the index."""
+        return sorted(f for f in os.listdir(self.root) if f != hn.INDEX) if os.path.isdir(self.root) else []
 
     def digests(self):
         out = {}

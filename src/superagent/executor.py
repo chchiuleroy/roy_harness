@@ -67,6 +67,8 @@ def build_env(cfg, parent=None):
         "HARNESS_MODE": "safe",                 # fixed: a ticket never runs in normal or auto
         "HARNESS_STREAM": "0",
         "HARNESS_VISION": "0",
+        "HARNESS_NOTES": "0",                   # fixed: notes are on by default, but a ticket works on outside
+                                                # text with nobody watching and must not leave notes behind
         "HARNESS_COMPACT_TOKENS": str(cfg.compact_tokens),
         "HARNESS_KEEP_RECENT": str(cfg.keep_recent),
         "HARNESS_BACKOFF": str(cfg.backoff),

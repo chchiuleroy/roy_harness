@@ -67,7 +67,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 |---|---|
 | 串流與重試 | SSE 組裝（含被切碎的 tool call）；503／429（尊重 `Retry-After`）／斷線／被截斷會重試；回報首字延遲 `ttft` |
 | 壓縮與記憶 | 輸入超過 `HARNESS_COMPACT_TOKENS`（預設 96,000）就把舊訊息換成摘要；你打過的字會由程式附在摘要後（有長度上限）；`AGENT.md` 放系統提示，受寫入保護 |
-| 筆記與做夢 | 預設關（`HARNESS_NOTES=1`）：模型用 `remember` 存跨 session 的筆記，**以資料、不是指令載入**，要附你原話的引文才會自動載入；`/dream` 回頭整理，只提案、引文由程式驗證 → [docs/notes-and-dream.md](docs/notes-and-dream.md) |
+| 筆記與做夢 | **預設開**（`HARNESS_NOTES=0` 關閉）：模型用 `remember` 存跨 session 的筆記，**以資料、不是指令載入**，要附你原話的引文才會自動載入；`.harness_notes/MEMORY.md` 是這些筆記的目錄（程式產生，和你寫的 `AGENT.md` 不同）；`/dream` 回頭整理，只提案、引文由程式驗證 → [docs/notes-and-dream.md](docs/notes-and-dream.md) |
 | 工具 | `read_file write_file edit_file run_command task_output task_stop todo_write ask_user schedule_wakeup monitor agent`，加上條件式的 `view_image`、`skill`、`remember`／`recall` 與 MCP 工具 |
 | 子 agent | 巢狀（深度 2）、同一回覆的多個 `agent` 呼叫並行 |
 | 背景任務 | 任務結束、鬧鐘、監控條件成立會**自己啟動新回合**；`/tasks`、`/stop` |
@@ -98,7 +98,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | `HARNESS_VISION` | vllm 為 `1`，其他 `0` | 是否提供 `view_image` |
 | `HARNESS_DEBUG` | 無 | 設任意值就把每次請求存到 `debug/`（圖片 base64 會遮掉） |
 | `HARNESS_SANDBOX` | 無 | JSON 陣列，作為指令前綴（**未實測**） |
-| `HARNESS_NOTES`、`HARNESS_NOTES_DIR`、`HARNESS_NOTES_AUTOLOAD`、`HARNESS_DREAM_MODEL` | 無／`.harness_notes`／`user`／無 | 筆記與做夢（見 [docs/notes-and-dream.md](docs/notes-and-dream.md)）；`AUTOLOAD=none` 讓所有筆記都要你批准 |
+| `HARNESS_NOTES`、`HARNESS_NOTES_DIR`、`HARNESS_NOTES_AUTOLOAD`、`HARNESS_DREAM_MODEL` | 開（`0` 關）／`.harness_notes`／`user`／無 | 筆記與做夢（見 [docs/notes-and-dream.md](docs/notes-and-dream.md)）；`AUTOLOAD=none` 讓所有筆記都要你批准 |
 | `HARNESS_CLASSIFIER_MODEL` | 無（用主模型） | 讓 `auto` 分類器改問另一個模型；同一個伺服器與金鑰，所以那個模型要由同一個端點供應。**只做了離線測試，沒有對第二個真實模型跑過** |
 
 完整清單與統計欄位（`/stats`）見 [docs/reference.md](docs/reference.md)。

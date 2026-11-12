@@ -30,6 +30,17 @@ class TestAnswer(unittest.TestCase):
         self.assertTrue(all(o["type"] == "answer" for o in sent))
 
 
+class TestChildEnvironment(unittest.TestCase):
+    def test_a_ticket_never_gets_the_notes_feature(self):
+        """Notes are on by default in the harness, but a ticket works on outside text with nobody
+        watching: it must not be able to save notes, whatever the parent's environment or a
+        `.harness.env` says."""
+        cfg = ex.ExecutorConfig("vllm", "http://example.com/v1", "m")
+        for parent in ({}, {"HARNESS_NOTES": "1"}):
+            self.assertEqual(ex.build_env(cfg, parent=parent)["HARNESS_NOTES"], "0", parent)
+        self.assertIn("HARNESS_NOTES", ex.pinned_keys())       # a .harness.env cannot set it either
+
+
 class TestEventNumbers(unittest.TestCase):
     """The sequence numbers that tell an answer's consequences from events that came before it."""
 
