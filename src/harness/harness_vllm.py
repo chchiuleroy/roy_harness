@@ -628,7 +628,7 @@ def content_text(content):
 
 MCP = harness_mcp.EMPTY            # connected by main(); MCP tools go to the main agent only
 SKILLS = harness_skills.EMPTY      # loaded by main(); the skill tool is for the main agent only
-NOTES = harness_notes.EMPTY        # loaded by main() when HARNESS_NOTES=1; remember/recall are for the main agent only
+NOTES = harness_notes.EMPTY        # loaded by main() unless HARNESS_NOTES=0; remember/recall are for the main agent only
 
 def tools_for(depth):
     eyes = [IMAGE_TOOL] if VISION else []
@@ -1982,7 +1982,7 @@ def notes_command(arg):
     """/notes, /notes show NAME, /notes promote NAME, /notes forget NAME. Only the person gets
     these: a pending note reaches the prompt through /notes promote and nothing else."""
     if not NOTES.enabled:
-        return "notes are off (HARNESS_NOTES=1 turns them on)"
+        return "notes are off (HARNESS_NOTES=0 is set)"
     sub, _, name = arg.strip().partition(" ")
     name = name.strip()
     if sub == "show":
@@ -2010,7 +2010,7 @@ def dream_command(arg, messages):
     notes folder only, from the proposals held in memory (a file the model could have written
     is never the thing that gets applied)."""
     if not NOTES.enabled:
-        return "notes are off (HARNESS_NOTES=1 turns them on)"
+        return "notes are off (HARNESS_NOTES=0 is set)"
     words = arg.split()
     if words[:1] == ["apply"]:
         if _DREAM[0] is None:
@@ -2140,8 +2140,9 @@ def main():
         print(f"  [skills] {len(SKILLS.skills)} loaded")
     for warning in SKILLS.warnings:
         print(f"  [skills] warning: {warning}")
-    NOTES = harness_notes.load_all()                        # HARNESS_NOTES=1; a snapshot, like AGENT.md
-    for line in harness_notes.start_report(NOTES):
+    NOTES = harness_notes.load_all()                        # on unless HARNESS_NOTES=0; a snapshot, like AGENT.md
+    index_line = NOTES.sync_index()                          # MEMORY.md is made from the notes, here
+    for line in ([f"[notes] {index_line}"] if index_line else []) + harness_notes.start_report(NOTES):
         print(f"  {line}")
     if NOTES.enabled:
         NOTES.mark_started()
