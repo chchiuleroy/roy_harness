@@ -45,6 +45,8 @@ import urllib.request
 import harness_hooks               # user hooks (same folder)
 import harness_mcp                 # MCP client: tools from other processes
 import harness_skills              # skills: instructions on demand
+import harness_notes               # notes: what the model remembers (data, never instructions)
+import harness_dream               # /dream: proposals to remember, fix or drop (verified quotes)
 import harness_net                 # no-redirect opener + URL policy (same folder)
 import harness_origin              # where a host came from: user's words or tool output
 
@@ -125,6 +127,7 @@ except ValueError as _e:
 # server and key as everything else: a second model has to be served there, and the harness
 # never sends this key to a different URL.
 CLASSIFIER_MODEL = os.environ.get("HARNESS_CLASSIFIER_MODEL", "").strip() or None
+DREAM_MODEL = os.environ.get("HARNESS_DREAM_MODEL", "").strip() or None      # /dream; default: the model in use
 MAX_ROUNDS = 50
 MAX_DEPTH = 2                      # ch 7: main=0, child=1, grandchild=2 (no deeper)
 MAX_RESULT_CHARS = 30_000          # ch 6: truncate tool results at the source
@@ -329,6 +332,7 @@ def system_prompt():
     compaction summarises old messages away and /clear drops them, a resumed session never
     re-reads them, but this is rebuilt for every request."""
     return (SYSTEM + (MEMORY_NOTE + MEMORY if MEMORY else "")
+            + harness_notes.prompt_part(NOTES)          # a snapshot taken at start-up, "" when empty
             + (MCP_NOTE if not MCP.is_empty() else "")
             + (SKILLS_NOTE + SKILLS.menu() if not SKILLS.is_empty() else ""))
 SUB_SYSTEM = (
@@ -624,12 +628,14 @@ def content_text(content):
 
 MCP = harness_mcp.EMPTY            # connected by main(); MCP tools go to the main agent only
 SKILLS = harness_skills.EMPTY      # loaded by main(); the skill tool is for the main agent only
+NOTES = harness_notes.EMPTY        # loaded by main() when HARNESS_NOTES=1; remember/recall are for the main agent only
 
 def tools_for(depth):
     eyes = [IMAGE_TOOL] if VISION else []
     if depth == 0:
         return (BASE_TOOLS + eyes + [AGENT_TOOL] + MCP.tools()
-                + ([] if SKILLS.is_empty() else [harness_skills.SKILL_TOOL]))
+                + ([] if SKILLS.is_empty() else [harness_skills.SKILL_TOOL])
+                + ([harness_notes.REMEMBER_TOOL, harness_notes.RECALL_TOOL] if NOTES.enabled else []))
     tools = [t for t in BASE_TOOLS if t["name"] not in SUB_EXCLUDED] + eyes
     return tools + [AGENT_TOOL] if depth < MAX_DEPTH else tools
 
@@ -1069,6 +1075,7 @@ PROTECTED = (".env", ".ssh", "id_rsa", ".aws/credentials",
              ".harness_permissions", ".harness_backup", ".harness.hooks", ".harness.mcp")
 STATE_FILES = (".harness_permissions", ".harness_backup", ".harness.env",
                ".harness.hooks", ".harness.mcp")
+DREAM_DIR = harness_dream.DIR      # guarded only while notes are on (see gate): with the switch off nothing changes
 
 def memory_protected(path):
     """AGENT.md is loaded as the user's standing instructions (system prompt) at every start,
@@ -1093,7 +1100,24 @@ MODES = ("safe", "normal", "auto")
 MODE = os.environ.get("HARNESS_MODE", "normal")
 CURRENT_REQUEST = ""               # last human message (what the classifier grounds on)
 PERMS = {"exact": [], "prefix": []}
-ORIGIN = harness_origin.Origin()   # hosts by origin (user's words / tool output) + this turn's actions
+SEEN = harness_notes.Seen()        # the text itself, for the quote that `remember` must bring
+
+class _TrackedOrigin(harness_origin.Origin):
+    """ORIGIN, plus the text for the notes' quote check. One feed point: every place that tells
+    ORIGIN what the user typed or what a tool returned feeds SEEN too, so none of them changes."""
+    def clear(self):
+        SEEN.clear()
+        super().clear()
+
+    def user_text(self, text):
+        SEEN.user_text(text)
+        super().user_text(text)
+
+    def tool_text(self, text):
+        SEEN.tool_text(text)
+        super().tool_text(text)
+
+ORIGIN = _TrackedOrigin()          # hosts by origin (user's words / tool output) + this turn's actions
 
 def perms_path():
     return os.path.join(root(), ".harness_permissions.json")
@@ -1256,20 +1280,33 @@ def gate(name, args):
     """Reflexes + modes + grants + classifier + human. Returns error str or None."""
     path = args.get("path", "")
     if MCP.owns(name):                                  # a stranger's tool: ask, even in auto
-        if MCP.trust_of(name) != "always" and ask_human(
+        # A server the person set to trust=always still asks when its arguments name the notes or
+        # dream folder: such a tool could write there without going through `remember`. Best
+        # effort, like the shell check: the arguments are searched for the folder's name.
+        said = json.dumps(args, ensure_ascii=False).lower().replace('"', "")
+        touches_notes = NOTES.enabled and (harness_notes.mentions_protected(said, NOTES)
+                                           or harness_hooks.mentions_any(said, {DREAM_DIR}))
+        if (MCP.trust_of(name) != "always" or touches_notes) and ask_human(
                 f"MCP {MCP.server_of(name)}.{MCP.tool_of(name)}"
                 f"({json.dumps(args, ensure_ascii=False)[:200]})", always=False) == "n":
             return "DENIED by user. Ask them how to proceed, or adapt."
         return None
+    if name == "remember" and MODE == "safe" and ask_human(      # it writes what a later session will read
+            f"remember: {args.get('name')} - {str(args.get('description'))[:120]}", always=False) == "n":
+        return "DENIED by user. Ask them how to proceed, or adapt."
     if name in ("write_file", "edit_file"):
         if any(p in path.replace("\\", "/").lower() for p in PROTECTED):
             return f"BLOCKED: {path} is a protected path."
+        if NOTES.enabled and harness_dream.is_protected(path):
+            return f"BLOCKED: {path} is a protected path (the /dream reports are for the person)."
         if sys.platform == "win32" and ":" in os.path.splitdrive(path)[1]:
             return f"BLOCKED: {path}: NTFS alternate data streams are not allowed."
         if (harness_hooks.is_protected(path, HOOKS) or harness_mcp.is_protected(path, MCP)
-                or harness_skills.is_protected(path, SKILLS) or memory_protected(path)):
+                or harness_skills.is_protected(path, SKILLS) or memory_protected(path)
+                or harness_notes.is_protected(path, NOTES)):
             return (f"BLOCKED: {path} is a protected path (hook or MCP config, a script "
-                    f"they run, a skills folder, or the project memory {MEMORY_FILE}).")
+                    f"they run, a skills folder, the notes folder, or the project memory "
+                    f"{MEMORY_FILE}).")
         if not inside_root(path):                       # layer 4: confinement
             return f"BLOCKED: writes are confined to the project root {root()}."
         if name == "edit_file":
@@ -1289,9 +1326,11 @@ def gate(name, args):
         cmd = args.get("command", "")
         low = cmd.lower().replace("^", "").replace('"', "")     # cmd drops ^ and quotes
         if (any(s in low for s in STATE_FILES)          # best effort: a shell can
+                or (NOTES.enabled and harness_hooks.mentions_any(low, {DREAM_DIR}))
                 or harness_hooks.mentions_protected_name(low, HOOKS)
                 or harness_mcp.mentions_protected_name(low, MCP)
                 or harness_skills.mentions_protected(low, SKILLS)
+                or harness_notes.mentions_protected(low, NOTES)
                 or harness_hooks.mentions_any(low, {MEMORY_FILE.lower()})):
             return ("BLOCKED: harness state files (permissions, backups, "   # still
                     "local env) are off limits to commands.")                # obfuscate
@@ -1484,6 +1523,15 @@ def _execute_tool(name, args, depth=0):
                 return tool_error("ERROR: skills are not available to subagents", depth)
             text = SKILLS.load(args.get("name"))
             return tool_error(text, depth) if text.startswith("ERROR") else text   # the skill module words its own errors
+        if name in ("remember", "recall") and NOTES.enabled:  # notes: written by the model, read back as data
+            if depth > 0:
+                return tool_error("ERROR: notes are not available to subagents", depth)
+            if name == "remember":
+                text = NOTES.save(args.get("name"), args.get("description"), args.get("body"),
+                                  args.get("quote"), SEEN, ORIGIN)
+            else:
+                text = NOTES.read(args.get("name"))
+            return tool_error(text, depth) if text.startswith("ERROR") else text   # harness_notes words its own errors
         if MCP.owns(name):                                  # ch 11: the dispatch table over the network
             if depth > 0:
                 return tool_error("ERROR: MCP tools are not available to subagents", depth)
@@ -1828,7 +1876,8 @@ def run_subagent(task, depth=1):
 
 # ----------------------------------------- ch 1 + 6: sessions and memory
 HELP = ("/help  /quit  /clear  /compact  /mode [safe|normal|auto]  /tasks  "
-        "/stop <id>  /undo  /perms  /cache  /stats  /hooks  /mcp  /skills  /skill <name>")
+        "/stop <id>  /undo  /perms  /cache  /stats  /hooks  /mcp  /skills  /skill <name>  "
+        "/notes [show|promote|forget NAME]  /dream [session.json ...]  /dream apply p1 p2")
 
 SESSION_FILE = None                # set by main(); None = no checkpoints (tests, one-shot use)
 _CHECKPOINT_WARNED = [False]
@@ -1929,6 +1978,73 @@ def run_slash(line, messages):
     checkpoint(messages)
     return messages
 
+def notes_command(arg):
+    """/notes, /notes show NAME, /notes promote NAME, /notes forget NAME. Only the person gets
+    these: a pending note reaches the prompt through /notes promote and nothing else."""
+    if not NOTES.enabled:
+        return "notes are off (HARNESS_NOTES=1 turns them on)"
+    sub, _, name = arg.strip().partition(" ")
+    name = name.strip()
+    if sub == "show":
+        return NOTES.show(name)
+    if sub == "promote":
+        return NOTES.promote(name)
+    if sub == "forget":
+        return NOTES.forget(name)
+    if sub:
+        return "usage: /notes [show NAME | promote NAME | forget NAME]"
+    return "\n".join(NOTES.describe()) or "no notes saved yet"
+
+_DREAM = [None]                    # the last /dream result in this process: what `apply` works from
+
+def _dream_model(system, user):
+    """The model call harness_dream is given: no tools, JSON out, like the compaction call."""
+    kw = {"model": DREAM_MODEL} if DREAM_MODEL else {}
+    reply = call_llm([{"role": "user", "content": user}], None, system, max_tokens=4096,
+                     temperature=0, **kw)
+    return reply["choices"][0]["message"].get("content") or ""
+
+def dream_command(arg, messages):
+    """/dream [session.json ...] reads this session (and any files named) and proposes changes
+    to the notes; it writes only a report. /dream apply p1 p2 applies the ones named, to the
+    notes folder only, from the proposals held in memory (a file the model could have written
+    is never the thing that gets applied)."""
+    if not NOTES.enabled:
+        return "notes are off (HARNESS_NOTES=1 turns them on)"
+    words = arg.split()
+    if words[:1] == ["apply"]:
+        if _DREAM[0] is None:
+            return "nothing to apply: run /dream first"
+        if len(words) < 2:
+            return "usage: /dream apply p1 p2 ..."
+        return "\n".join(harness_dream.apply(_DREAM[0], words[1:], NOTES))
+    sources = [harness_dream.Source("S1", messages, "(this session)")]
+    for n, path in enumerate(words, 2):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            return f"cannot read {path}: {e}"
+        if not isinstance(data, list):
+            return f"{path} is not a session file (a JSON list of messages)"
+        sources.append(harness_dream.Source(f"S{n}", data, path))
+    result = harness_dream.propose(sources, NOTES, MEMORY, _dream_model)
+    if result.error:
+        _DREAM[0] = None
+        return f"dream failed: {result.error}"
+    _DREAM[0] = result
+    report = harness_dream.write_report(result)
+    lines = [f"dream: {len(result.proposals)} proposal(s) kept, {len(result.dropped)} dropped "
+             f"(failed verification; reasons are in the report)"] + [f"  {n}" for n in result.notes]
+    for p in result.proposals:
+        weak = "" if p["origin"] == "user" else "  [no quote from your words: would be pending]"
+        lines.append(f"  {p['id']} {p['op']} {', '.join(p['targets']) or p['name']}: "
+                     f"{p['description'] or p['body'][:60]}{weak}")
+    lines.append(f"report: {report}" if report else "report: could not be written")
+    if result.proposals:
+        lines.append("nothing has been applied; /dream apply p1 p2 applies the ones you name")
+    return "\n".join(lines)
+
 def slash(cmd, messages):
     """Returns (handled, new_messages_or_None)."""
     global MODE
@@ -1965,6 +2081,10 @@ def slash(cmd, messages):
         print("\n".join(MCP.describe()) or "no MCP servers (.harness.mcp.json)")
     elif word == "/skills":
         print("\n".join(SKILLS.describe()) or "no skills (./skills or HARNESS_SKILLS_DIRS)")
+    elif word == "/notes":                                  # the person's view of what the model saved
+        print(notes_command(arg))
+    elif word == "/dream":                                  # proposals only; `apply` touches the notes folder
+        print(dream_command(arg, messages))
     elif word == "/skill":                                  # the user hands a skill to the model
         text = SKILLS.load(arg.strip())
         if text.startswith("ERROR"):
@@ -1977,7 +2097,7 @@ def slash(cmd, messages):
     return True, None
 
 def main():
-    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS, MEMORY
+    global CURRENT_REQUEST, HOOKS, SESSION_ID, MCP, SKILLS, MEMORY, NOTES
     argv = [a for a in sys.argv[1:] if a != "--jsonl"]
     if len(argv) != len(sys.argv) - 1:
         enter_jsonl()                                       # harness_gui: events on stdout, commands on stdin
@@ -2020,6 +2140,11 @@ def main():
         print(f"  [skills] {len(SKILLS.skills)} loaded")
     for warning in SKILLS.warnings:
         print(f"  [skills] warning: {warning}")
+    NOTES = harness_notes.load_all()                        # HARNESS_NOTES=1; a snapshot, like AGENT.md
+    for line in harness_notes.start_report(NOTES):
+        print(f"  {line}")
+    if NOTES.enabled:
+        NOTES.mark_started()
     fire_session_start()
 
     start_reader()

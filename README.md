@@ -67,7 +67,8 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 |---|---|
 | 串流與重試 | SSE 組裝（含被切碎的 tool call）；503／429（尊重 `Retry-After`）／斷線／被截斷會重試；回報首字延遲 `ttft` |
 | 壓縮與記憶 | 輸入超過 `HARNESS_COMPACT_TOKENS`（預設 96,000）就把舊訊息換成摘要；你打過的字會由程式附在摘要後（有長度上限）；`AGENT.md` 放系統提示，受寫入保護 |
-| 工具 | `read_file write_file edit_file run_command task_output task_stop todo_write ask_user schedule_wakeup monitor agent`，加上條件式的 `view_image`、`skill` 與 MCP 工具 |
+| 筆記與做夢 | 預設關（`HARNESS_NOTES=1`）：模型用 `remember` 存跨 session 的筆記，**以資料、不是指令載入**，要附你原話的引文才會自動載入；`/dream` 回頭整理，只提案、引文由程式驗證 → [docs/notes-and-dream.md](docs/notes-and-dream.md) |
+| 工具 | `read_file write_file edit_file run_command task_output task_stop todo_write ask_user schedule_wakeup monitor agent`，加上條件式的 `view_image`、`skill`、`remember`／`recall` 與 MCP 工具 |
 | 子 agent | 巢狀（深度 2）、同一回覆的多個 `agent` 呼叫並行 |
 | 背景任務 | 任務結束、鬧鐘、監控條件成立會**自己啟動新回合**；`/tasks`、`/stop` |
 | 崩潰恢復 | 先寫再執行；重開時沒有結果的呼叫補 `INTERRUPTED`，**絕不自動重跑** |
@@ -75,7 +76,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | 圖片、GUI | `view_image` 與網頁 GUI（含貼圖／上傳）→ [docs/images-and-gui.md](docs/images-and-gui.md) |
 | 評測 | [`bench/`](bench/README.md)：12 個題型、確定性評分器、自我改進迴圈 |
 
-斜線指令：`/help /quit /clear /compact /mode [safe|normal|auto] /tasks /stop <id> /undo /perms /cache /stats /skills /skill <名稱> /mcp /hooks`（`/skill` 手動把某個 skill 交給模型，見 docs）。
+斜線指令：`/help /quit /clear /compact /mode [safe|normal|auto] /tasks /stop <id> /undo /perms /cache /stats /skills /skill <名稱> /mcp /hooks /notes /dream`（`/skill` 手動把某個 skill 交給模型；`/notes`、`/dream` 見 docs）。
 
 ### 安全分層
 
@@ -97,6 +98,7 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | `HARNESS_VISION` | vllm 為 `1`，其他 `0` | 是否提供 `view_image` |
 | `HARNESS_DEBUG` | 無 | 設任意值就把每次請求存到 `debug/`（圖片 base64 會遮掉） |
 | `HARNESS_SANDBOX` | 無 | JSON 陣列，作為指令前綴（**未實測**） |
+| `HARNESS_NOTES`、`HARNESS_NOTES_DIR`、`HARNESS_NOTES_AUTOLOAD`、`HARNESS_DREAM_MODEL` | 無／`.harness_notes`／`user`／無 | 筆記與做夢（見 [docs/notes-and-dream.md](docs/notes-and-dream.md)）；`AUTOLOAD=none` 讓所有筆記都要你批准 |
 | `HARNESS_CLASSIFIER_MODEL` | 無（用主模型） | 讓 `auto` 分類器改問另一個模型；同一個伺服器與金鑰，所以那個模型要由同一個端點供應。**只做了離線測試，沒有對第二個真實模型跑過** |
 
 完整清單與統計欄位（`/stats`）見 [docs/reference.md](docs/reference.md)。
@@ -178,7 +180,8 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 **harness**
 
 - **沒有 OS 級 sandbox**：shell 指令仍可讀寫專案外的檔案；寫入限制與環境清理是行程內的強制。
-- 保護 `AGENT.md`、hook／MCP 設定、skills 資料夾，對 shell 只是字串比對，**可被刻意混淆**（例如用變數分段組檔名）。
+- 保護 `AGENT.md`、hook／MCP 設定、skills 與筆記資料夾，對 shell 只是字串比對，**可被刻意混淆**（例如用變數分段組檔名）。
+- **筆記有殘留風險**：模型可以附一句真的使用者引文、把壞內容放進本文；引文證明想法從哪來，不證明本文忠實。補強（長度上限、主機檢查、資料橫幅、啟動時列出新增項目）擋不住說服力強的文字；能寫該資料夾的 MCP 工具與你自己的 hook 不經過 `remember`（MCP 預設每次問你）。真模型只手動跑過 2 次（單一模型），沒量過模型主動存筆記的頻率與 `/dream` 的準確度。見 [docs/notes-and-dream.md](docs/notes-and-dream.md)。
 - `auto` 分類器的「引用驗證」只確認引文是請求的子字串，不理解否定語境；誤判率只量過一種任務、3 次。
 - **`auto` 分類器新增的三項檢查（來源追蹤、先前動作、寫檔內容）證據很薄**：來源追蹤只看主機、不看路徑，拆字串／環境變數／編碼可繞過，也會讓工具輸出裡出現過的名稱（如 `socket.io`）之後被提到時多問一次人；鏈偵測只量過 9 個我自己寫的案例；`edit_file` 的分類器看不到檔案其餘部分；`HARNESS_CLASSIFIER_MODEL` 沒有對第二個真實模型驗證。完整清單見 [docs/reference.md](docs/reference.md) 的〈已知限制〉。
 - 除了 `vllm`，其他 provider 只做了離線測試；模型回應與 `/cache` 的回應沒有大小上限。
@@ -196,7 +199,8 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 
 ```
 src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）、harness_origin.py（主機來源追蹤）、harness_hooks.py、
-               harness_mcp.py、harness_skills.py、harness_gui.py ＋ .html ＋ _md.js（GUI）
+               harness_mcp.py、harness_skills.py、harness_notes.py（筆記）、harness_dream.py（/dream）、
+               harness_gui.py ＋ .html ＋ _md.js（GUI）
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
