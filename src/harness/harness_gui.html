@@ -530,7 +530,7 @@ function renderRight() {
   }
   p.append(el("h3", "", "指令"));
   const cmds = el("div", "cmds");
-  for (const c of ["/skills", "/mcp", "/hooks", "/perms", "/stats", "/tasks", "/undo", "/compact", "/clear"]) {
+  for (const c of ["/skills", "/notes", "/dream", "/mcp", "/hooks", "/perms", "/stats", "/tasks", "/undo", "/compact", "/clear"]) {
     const b = el("button", "", c); b.disabled = !v.alive;
     b.onclick = () => { if (c === "/clear" && !confirm("清掉這個 session 的對話？")) return; api("POST", `/api/sessions/${v.id}/send`, {text: c}); };
     cmds.append(b);

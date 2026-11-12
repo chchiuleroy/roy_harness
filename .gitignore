@@ -16,3 +16,7 @@ __pycache__/
 
 # benchmark runs (traces, large)
 bench_runs/
+
+# personal notes and dream reports (per project, not for the repo)
+.harness_notes/
+.harness_dream/
