@@ -464,6 +464,16 @@ class IndexTests(Base):
         self.assertEqual(reg.menu(), before)
         self.assertIn("second", self.index())
 
+    def test_two_runs_saving_different_notes_both_stay_in_the_index(self):
+        """Each run loads its notes once. If MEMORY.md were rewritten from that old picture,
+        the run that saved last would erase the other run's entry."""
+        run_a, run_b = hn.load_all(self.dir, ON), hn.load_all(self.dir, ON)
+        self.save(reg=run_a, name="from-a", description="saved by run a")
+        self.save(reg=run_b, name="from-b", description="saved by run b")
+        text = self.index()
+        self.assertIn("[from-a](from-a.md)", text)
+        self.assertIn("[from-b](from-b.md)", text)
+
     def test_a_hand_edited_index_is_discarded_and_rebuilt(self):
         """The index is read into the system prompt. If a file edited by anything else were
         believed, it would be a way around the quote and origin checks."""

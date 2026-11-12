@@ -340,6 +340,8 @@ class Registry:
         """After a note was saved, promoted or forgotten: bring MEMORY.md up to date with the
         notes as they are now (the prompt's menu stays the start-up snapshot). -> '' or a
         sentence for the tool result."""
+        if os.path.isdir(self.root) and not _is_link(self.root):
+            self.notes, _ = _read_folder(self.root, self.root_real)    # the disk is the truth
         entries, _ = self._entries()
         what, why = self._write_index(entries)
         return f" ({INDEX} could not be updated: {why})" if what == "failed" else ""
@@ -517,44 +519,53 @@ def load_all(root=None, env=None):
         if _is_link(root):
             reg.warnings.append("the notes folder is a link; no note was loaded from it")
             return reg
-        scanned = 0
-        for fname in sorted(os.listdir(root)):
-            if not fname.endswith(".md") or fname.lower() == INDEX.lower():
-                continue
-            name, path = fname[:-3], os.path.join(root, fname)
-            if not os.path.isfile(path):
-                continue
-            scanned += 1
-            if scanned > MAX_SCAN:
-                reg.warnings.append(f"stopped scanning after {MAX_SCAN} files")
-                break
-            if not NAME_RE.match(name) or name in RESERVED:
-                reg.warnings.append(f"skipped {fname!r}: not a valid note name")
-                continue
-            real = harness_hooks.canonical(path)
-            if not _inside(real, [reg.root_real]):
-                reg.warnings.append(f"skipped {fname}: it is a link that leaves the notes folder")
-                continue
-            if len(reg.notes) >= MAX_NOTES:
-                reg.warnings.append(f"stopped at the limit of {MAX_NOTES} notes")
-                break
-            text, why = _read_text(real)
-            if text is None:
-                reg.warnings.append(f"skipped {fname}: {why}")
-                continue
-            meta = harness_skills.parse_frontmatter(text)[0]
-            desc = _norm(harness_mcp.clean_text(meta.get("description", ""), 10 ** 6))[:MAX_DESC]
-            if not desc:
-                reg.warnings.append(f"skipped {fname}: no description")
-                continue
-            origin = meta.get("origin", "")
-            status = meta.get("status", "")
-            reg.notes[name] = Note(
-                name, desc, origin if origin in ORIGINS else "tool",
-                status if status in STATUSES else "pending",
-                meta.get("created", ""), meta.get("updated", ""), meta.get("quote", ""), path)
+        reg.notes, found = _read_folder(root, reg.root_real)
+        reg.warnings += found
     reg._build_menu()
     return reg
+
+
+def _read_folder(root, root_real):
+    """-> ({name: Note} for the .md files in the folder, warnings). MEMORY.md is skipped: it is
+    the index, not a note. Used at start-up and again before MEMORY.md is rewritten, so the
+    index follows what is on disk (another run may have saved a note since this one started)."""
+    notes, warnings, scanned = {}, [], 0
+    for fname in sorted(os.listdir(root)):
+        if not fname.endswith(".md") or fname.lower() == INDEX.lower():
+            continue
+        name, path = fname[:-3], os.path.join(root, fname)
+        if not os.path.isfile(path):
+            continue
+        scanned += 1
+        if scanned > MAX_SCAN:
+            warnings.append(f"stopped scanning after {MAX_SCAN} files")
+            break
+        if not NAME_RE.match(name) or name in RESERVED:
+            warnings.append(f"skipped {fname!r}: not a valid note name")
+            continue
+        real = harness_hooks.canonical(path)
+        if not _inside(real, [root_real]):
+            warnings.append(f"skipped {fname}: it is a link that leaves the notes folder")
+            continue
+        if len(notes) >= MAX_NOTES:
+            warnings.append(f"stopped at the limit of {MAX_NOTES} notes")
+            break
+        text, why = _read_text(real)
+        if text is None:
+            warnings.append(f"skipped {fname}: {why}")
+            continue
+        meta = harness_skills.parse_frontmatter(text)[0]
+        desc = _norm(harness_mcp.clean_text(meta.get("description", ""), 10 ** 6))[:MAX_DESC]
+        if not desc:
+            warnings.append(f"skipped {fname}: no description")
+            continue
+        origin = meta.get("origin", "")
+        status = meta.get("status", "")
+        notes[name] = Note(
+            name, desc, origin if origin in ORIGINS else "tool",
+            status if status in STATUSES else "pending",
+            meta.get("created", ""), meta.get("updated", ""), meta.get("quote", ""), path)
+    return notes, warnings
 
 
 def start_report(reg):
