@@ -82,7 +82,9 @@ def run_trial(family, seed, rep, cand, out):
                 elif os.path.isfile(src):
                     shutil.copy(src, os.path.join(work, name))
         env = dict(os.environ, HARNESS_EOF_GRACE="3", PYTHONUNBUFFERED="1",
-                   PYTHONIOENCODING="utf-8")
+                   PYTHONIOENCODING="utf-8",
+                   HARNESS_NOTES="0")      # notes are on by default; a trial must run the same harness as before
+                                           # (no extra tools or prompt, no .harness_notes in the work folder)
         stdout_path = os.path.join(tdir, "stdout.txt")
         timed_out = False
         with open(stdout_path, "wb") as so:
