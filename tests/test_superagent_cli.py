@@ -271,8 +271,76 @@ class TestCommandLine(Rig):
         self.assertIn("in use", r.stderr)
 
 
+class SpyConnection:
+    """Forwards everything to a real sqlite3 connection; `before(sql)` runs just before each `execute`."""
+
+    def __init__(self, conn, before):
+        object.__setattr__(self, "_c", conn)
+        object.__setattr__(self, "_before", before)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._c, name, value)
+
+    def execute(self, sql, *args):
+        self._before(sql)
+        return self._c.execute(sql, *args)
+
+
 class TestStatusSnapshot(unittest.TestCase):
     """`status` reads several tables while the orchestrator keeps writing."""
+
+    def fake_home(self, with_eval=True):
+        """A state.sqlite holding only the tables and columns `cmd_status` selects (not the real schema)."""
+        import sqlite3
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        db = sqlite3.connect(os.path.join(home, "state.sqlite"))
+        db.executescript(
+            "CREATE TABLE ticket(id INTEGER, state TEXT, thread TEXT, note TEXT, run_gen INTEGER);"
+            "CREATE TABLE ask(ask_id INTEGER, ticket_id INTEGER, what TEXT, state TEXT);"
+            "CREATE TABLE outbox(status TEXT);")
+        if with_eval:
+            db.executescript("CREATE TABLE eval_item(state TEXT); INSERT INTO eval_item VALUES('sent');")
+        db.commit()
+        db.close()
+        return home
+
+    def run_status(self, home, connect=None):
+        """Run `cmd_status` in this process, with `sqlite3.connect` optionally replaced. -> (return code, stdout)"""
+        import argparse
+        import contextlib
+        import io
+        import sqlite3
+        from unittest import mock
+        from superagent import __main__ as cli_main
+        out = io.StringIO()
+        with mock.patch("sqlite3.connect", connect or sqlite3.connect), contextlib.redirect_stdout(out):
+            rc = cli_main.cmd_status(argparse.Namespace(home=home))
+        return rc, out.getvalue()
+
+    def test_status_of_a_home_made_before_the_model_session(self):
+        """Homes made before the model session have no eval table. `status` must still work and simply leave
+        `eval` out: that is the one error it is allowed to absorb. (This path had no test before.)"""
+        rc, text = self.run_status(self.fake_home(with_eval=False))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("eval", json.loads(text))
+
+    def test_status_does_not_hide_other_database_errors(self):
+        """Only 'no such table: eval_item' means 'old home'. A busy or I/O error on that same query must
+        surface: swallowing it printed a healthy-looking status with `eval` silently missing."""
+        import sqlite3
+        real_connect = sqlite3.connect
+
+        def before(sql):
+            if "FROM eval_item" in sql:
+                raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(sqlite3.OperationalError) as ctx:
+            self.run_status(self.fake_home(), lambda *a, **k: SpyConnection(real_connect(*a, **k), before))
+        self.assertIn("locked", str(ctx.exception))
 
     def test_status_is_one_consistent_snapshot(self):
         """The orchestrator opens a ticket and marks the message 'done' in ONE transaction, so `status`
@@ -280,26 +348,11 @@ class TestStatusSnapshot(unittest.TestCase):
         with no transaction around them: a commit between the two reads gave `tickets: []` next to
         `eval.done: 1`. (Seen once on a slow CI runner; fast machines almost never hit the gap.)
         This test commits that write exactly between the two reads, so it does not depend on timing."""
-        import argparse
         import contextlib
-        import io
         import sqlite3
-        from unittest import mock
-        from superagent import __main__ as cli_main
 
-        home = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, home, True)
+        home = self.fake_home()
         path = os.path.join(home, "state.sqlite")
-        setup = sqlite3.connect(path)
-        setup.executescript(                          # only the columns cmd_status selects
-            "CREATE TABLE ticket(id INTEGER, state TEXT, thread TEXT, note TEXT, run_gen INTEGER);"
-            "CREATE TABLE ask(ask_id INTEGER, ticket_id INTEGER, what TEXT, state TEXT);"
-            "CREATE TABLE outbox(status TEXT);"
-            "CREATE TABLE eval_item(state TEXT);"
-            "INSERT INTO eval_item VALUES('sent');")
-        setup.commit()
-        setup.close()
-
         real_connect = sqlite3.connect
         fired = []
         writer = {"stage": None, "error": None}       # what the injected write did, so the test can check WHY
@@ -321,28 +374,15 @@ class TestStatusSnapshot(unittest.TestCase):
             finally:
                 w.close()
 
-        class Spy:
-            def __init__(self, conn):
-                object.__setattr__(self, "_c", conn)
+        def before(sql):
+            if "FROM ask" in sql and not fired:       # the first table is fully read, the next one is not
+                fired.append(True)
+                concurrent_commit()
 
-            def __getattr__(self, name):
-                return getattr(self._c, name)
-
-            def __setattr__(self, name, value):
-                setattr(self._c, name, value)
-
-            def execute(self, sql, *args):
-                if "FROM ask" in sql and not fired:   # the first table is fully read, the next one is not
-                    fired.append(True)
-                    concurrent_commit()
-                return self._c.execute(sql, *args)
-
-        out = io.StringIO()
-        with mock.patch("sqlite3.connect", lambda *a, **k: Spy(real_connect(*a, **k))), \
-                contextlib.redirect_stdout(out):
-            self.assertEqual(cli_main.cmd_status(argparse.Namespace(home=home)), 0)
+        rc, text = self.run_status(home, lambda *a, **k: SpyConnection(real_connect(*a, **k), before))
+        self.assertEqual(rc, 0)
         self.assertTrue(fired, "the write was never injected between the reads, so this test proved nothing")
-        st = json.loads(out.getvalue())
+        st = json.loads(text)
         self.assertEqual(bool(st["tickets"]), st.get("eval", {}).get("done", 0) == 1,
                          f"status mixed two moments in time: {st}")
         # Both "both old" and "both new" look consistent, so also pin WHY the output is consistent: the injected

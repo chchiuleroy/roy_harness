@@ -162,8 +162,9 @@ def cmd_status(args):
         }
         try:                               # homes made before the model session have no such table
             out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            if "no such table: eval_item" not in str(e):   # only the old-home case; a busy or I/O error must show
+                raise
         db.execute("COMMIT")
     finally:
         db.close()                         # also on an error: it rolls back an unfinished read transaction and
