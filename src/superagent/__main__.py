@@ -149,11 +149,11 @@ def cmd_status(args):
         print("no state yet")
         return 1
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5, isolation_level=None)
-    db.row_factory = sqlite3.Row
-    running = lifecycle.running(args.home)  # a file-lock probe (can wait ~2 s): keep it out of the read transaction
-    db.execute("BEGIN")                    # one snapshot: the orchestrator opens a ticket and marks the message
-    try:                                   # done in one transaction, so separate reads could show only half
-        out = {
+    try:
+        db.row_factory = sqlite3.Row
+        running = lifecycle.running(args.home)  # a file-lock probe (can wait ~2 s): keep it out of the read transaction
+        db.execute("BEGIN")                # one snapshot: the orchestrator opens a ticket and marks the message
+        out = {                            # done in one transaction, so separate reads could show only half
             "tickets": [dict(r) for r in db.execute("SELECT id, state, thread, note, run_gen FROM ticket")],
             "open_asks": [dict(r) for r in db.execute(
                 "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
@@ -164,9 +164,10 @@ def cmd_status(args):
             out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
         except sqlite3.OperationalError:
             pass
+        db.execute("COMMIT")
     finally:
-        db.execute("COMMIT")               # release the read lock so the orchestrator is never held up
-        db.close()
+        db.close()                         # also on an error: it rolls back an unfinished read transaction and
+                                           # frees the read lock, and never hides the original error behind a COMMIT
     print(json.dumps(out, indent=1, ensure_ascii=False))
     return 0
 

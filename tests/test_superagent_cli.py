@@ -302,15 +302,20 @@ class TestStatusSnapshot(unittest.TestCase):
 
         real_connect = sqlite3.connect
         fired = []
+        writer = {"stage": None, "error": None}       # what the injected write did, so the test can check WHY
 
         def concurrent_commit():
             w = real_connect(path, timeout=0.2)
             try:
-                w.execute("BEGIN IMMEDIATE")
-                w.execute("INSERT INTO ticket VALUES(1, 'running', 't', '', 0)")
-                w.execute("UPDATE eval_item SET state='done'")
-                w.execute("COMMIT")
-            except sqlite3.OperationalError:          # locked: status is holding its snapshot, so the write waits
+                for writer["stage"], sql in (
+                        ("BEGIN", "BEGIN IMMEDIATE"),
+                        ("INSERT", "INSERT INTO ticket VALUES(1, 'running', 't', '', 0)"),
+                        ("UPDATE", "UPDATE eval_item SET state='done'"),
+                        ("COMMIT", "COMMIT")):
+                    w.execute(sql)
+                writer["stage"] = "committed"
+            except sqlite3.OperationalError as e:     # status holds its snapshot, so the write cannot finish
+                writer["error"] = str(e)
                 with contextlib.suppress(sqlite3.OperationalError):
                     w.execute("ROLLBACK")
             finally:
@@ -340,6 +345,10 @@ class TestStatusSnapshot(unittest.TestCase):
         st = json.loads(out.getvalue())
         self.assertEqual(bool(st["tickets"]), st.get("eval", {}).get("done", 0) == 1,
                          f"status mixed two moments in time: {st}")
+        # Both "both old" and "both new" look consistent, so also pin WHY the output is consistent: the injected
+        # write was held back at COMMIT by status's read lock, not lost to some earlier, unrelated error.
+        self.assertEqual((writer["stage"], "locked" in (writer["error"] or "")), ("COMMIT", True),
+                         f"the write must be held back at COMMIT by status's read lock: {writer}")
 
 
 @unittest.skipUnless(os.environ.get("SUPERAGENT_REMOVAL") == "1",
