@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一個 PR 又推新 commit 時，取消還在跑的舊 run，省分鐘數
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    # README 寫明只在 Windows 11 測過，所以用 Windows runner；
+    # 公開 repo 的標準 GitHub-hosted runner 不扣額度。
+    runs-on: windows-latest
+    # 作者機器整套離線約 656 秒；給 CI 留餘裕，也避免卡死燒時間
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # 零第三方依賴，不需要 pip install；離線測試，不打真實伺服器（不設 HARNESS_LIVE）
+      - name: Offline test suite
+        run: python -X utf8 -m unittest discover -s tests
