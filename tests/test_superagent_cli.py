@@ -271,6 +271,126 @@ class TestCommandLine(Rig):
         self.assertIn("in use", r.stderr)
 
 
+class SpyConnection:
+    """Forwards everything to a real sqlite3 connection; `before(sql)` runs just before each `execute`."""
+
+    def __init__(self, conn, before):
+        object.__setattr__(self, "_c", conn)
+        object.__setattr__(self, "_before", before)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._c, name, value)
+
+    def execute(self, sql, *args):
+        self._before(sql)
+        return self._c.execute(sql, *args)
+
+
+class TestStatusSnapshot(unittest.TestCase):
+    """`status` reads several tables while the orchestrator keeps writing."""
+
+    def fake_home(self, with_eval=True):
+        """A state.sqlite holding only the tables and columns `cmd_status` selects (not the real schema)."""
+        import sqlite3
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        db = sqlite3.connect(os.path.join(home, "state.sqlite"))
+        db.executescript(
+            "CREATE TABLE ticket(id INTEGER, state TEXT, thread TEXT, note TEXT, run_gen INTEGER);"
+            "CREATE TABLE ask(ask_id INTEGER, ticket_id INTEGER, what TEXT, state TEXT);"
+            "CREATE TABLE outbox(status TEXT);")
+        if with_eval:
+            db.executescript("CREATE TABLE eval_item(state TEXT); INSERT INTO eval_item VALUES('sent');")
+        db.commit()
+        db.close()
+        return home
+
+    def run_status(self, home, connect=None):
+        """Run `cmd_status` in this process, with `sqlite3.connect` optionally replaced. -> (return code, stdout)"""
+        import argparse
+        import contextlib
+        import io
+        import sqlite3
+        from unittest import mock
+        from superagent import __main__ as cli_main
+        out = io.StringIO()
+        with mock.patch("sqlite3.connect", connect or sqlite3.connect), contextlib.redirect_stdout(out):
+            rc = cli_main.cmd_status(argparse.Namespace(home=home))
+        return rc, out.getvalue()
+
+    def test_status_of_a_home_made_before_the_model_session(self):
+        """Homes made before the model session have no eval table. `status` must still work and simply leave
+        `eval` out: that is the one error it is allowed to absorb. (This path had no test before.)"""
+        rc, text = self.run_status(self.fake_home(with_eval=False))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("eval", json.loads(text))
+
+    def test_status_does_not_hide_other_database_errors(self):
+        """Only 'no such table: eval_item' means 'old home'. A busy or I/O error on that same query must
+        surface: swallowing it printed a healthy-looking status with `eval` silently missing."""
+        import sqlite3
+        real_connect = sqlite3.connect
+
+        def before(sql):
+            if "FROM eval_item" in sql:
+                raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(sqlite3.OperationalError) as ctx:
+            self.run_status(self.fake_home(), lambda *a, **k: SpyConnection(real_connect(*a, **k), before))
+        self.assertIn("locked", str(ctx.exception))
+
+    def test_status_is_one_consistent_snapshot(self):
+        """The orchestrator opens a ticket and marks the message 'done' in ONE transaction, so `status`
+        must never show 'done' without the ticket. It used to read the ticket table, then the eval table,
+        with no transaction around them: a commit between the two reads gave `tickets: []` next to
+        `eval.done: 1`. (Seen once on a slow CI runner; fast machines almost never hit the gap.)
+        This test commits that write exactly between the two reads, so it does not depend on timing."""
+        import contextlib
+        import sqlite3
+
+        home = self.fake_home()
+        path = os.path.join(home, "state.sqlite")
+        real_connect = sqlite3.connect
+        fired = []
+        writer = {"stage": None, "error": None}       # what the injected write did, so the test can check WHY
+
+        def concurrent_commit():
+            w = real_connect(path, timeout=0.2)
+            try:
+                for writer["stage"], sql in (
+                        ("BEGIN", "BEGIN IMMEDIATE"),
+                        ("INSERT", "INSERT INTO ticket VALUES(1, 'running', 't', '', 0)"),
+                        ("UPDATE", "UPDATE eval_item SET state='done'"),
+                        ("COMMIT", "COMMIT")):
+                    w.execute(sql)
+                writer["stage"] = "committed"
+            except sqlite3.OperationalError as e:     # status holds its snapshot, so the write cannot finish
+                writer["error"] = str(e)
+                with contextlib.suppress(sqlite3.OperationalError):
+                    w.execute("ROLLBACK")
+            finally:
+                w.close()
+
+        def before(sql):
+            if "FROM ask" in sql and not fired:       # the first table is fully read, the next one is not
+                fired.append(True)
+                concurrent_commit()
+
+        rc, text = self.run_status(home, lambda *a, **k: SpyConnection(real_connect(*a, **k), before))
+        self.assertEqual(rc, 0)
+        self.assertTrue(fired, "the write was never injected between the reads, so this test proved nothing")
+        st = json.loads(text)
+        self.assertEqual(bool(st["tickets"]), st.get("eval", {}).get("done", 0) == 1,
+                         f"status mixed two moments in time: {st}")
+        # Both "both old" and "both new" look consistent, so also pin WHY the output is consistent: the injected
+        # write was held back at COMMIT by status's read lock, not lost to some earlier, unrelated error.
+        self.assertEqual((writer["stage"], "locked" in (writer["error"] or "")), ("COMMIT", True),
+                         f"the write must be held back at COMMIT by status's read lock: {writer}")
+
+
 @unittest.skipUnless(os.environ.get("SUPERAGENT_REMOVAL") == "1",
                      "slow: set SUPERAGENT_REMOVAL=1 to run the removal check")
 class TestRemovable(unittest.TestCase):

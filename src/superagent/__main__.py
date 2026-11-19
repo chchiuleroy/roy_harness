@@ -148,19 +148,27 @@ def cmd_status(args):
     if not os.path.exists(path):
         print("no state yet")
         return 1
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
-    db.row_factory = sqlite3.Row
-    out = {
-        "tickets": [dict(r) for r in db.execute("SELECT id, state, thread, note, run_gen FROM ticket")],
-        "open_asks": [dict(r) for r in db.execute(
-            "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
-        "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
-        "running": lifecycle.running(args.home),
-    }
-    try:                                   # homes made before the model session have no such table
-        out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
-    except sqlite3.OperationalError:
-        pass
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5, isolation_level=None)
+    try:
+        db.row_factory = sqlite3.Row
+        running = lifecycle.running(args.home)  # a file-lock probe (can wait ~2 s): keep it out of the read transaction
+        db.execute("BEGIN")                # one snapshot: the orchestrator opens a ticket and marks the message
+        out = {                            # done in one transaction, so separate reads could show only half
+            "tickets": [dict(r) for r in db.execute("SELECT id, state, thread, note, run_gen FROM ticket")],
+            "open_asks": [dict(r) for r in db.execute(
+                "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
+            "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
+            "running": running,
+        }
+        try:                               # homes made before the model session have no such table
+            out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
+        except sqlite3.OperationalError as e:
+            if "no such table: eval_item" not in str(e):   # only the old-home case; a busy or I/O error must show
+                raise
+        db.execute("COMMIT")
+    finally:
+        db.close()                         # also on an error: it rolls back an unfinished read transaction and
+                                           # frees the read lock, and never hides the original error behind a COMMIT
     print(json.dumps(out, indent=1, ensure_ascii=False))
     return 0
 
