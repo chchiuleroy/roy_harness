@@ -150,6 +150,7 @@ def cmd_status(args):
         return 1
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5, isolation_level=None)
     db.row_factory = sqlite3.Row
+    running = lifecycle.running(args.home)  # a file-lock probe (can wait ~2 s): keep it out of the read transaction
     db.execute("BEGIN")                    # one snapshot: the orchestrator opens a ticket and marks the message
     try:                                   # done in one transaction, so separate reads could show only half
         out = {
@@ -157,7 +158,7 @@ def cmd_status(args):
             "open_asks": [dict(r) for r in db.execute(
                 "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
             "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
-            "running": lifecycle.running(args.home),
+            "running": running,
         }
         try:                               # homes made before the model session have no such table
             out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
