@@ -148,19 +148,24 @@ def cmd_status(args):
     if not os.path.exists(path):
         print("no state yet")
         return 1
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5, isolation_level=None)
     db.row_factory = sqlite3.Row
-    out = {
-        "tickets": [dict(r) for r in db.execute("SELECT id, state, thread, note, run_gen FROM ticket")],
-        "open_asks": [dict(r) for r in db.execute(
-            "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
-        "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
-        "running": lifecycle.running(args.home),
-    }
-    try:                                   # homes made before the model session have no such table
-        out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
-    except sqlite3.OperationalError:
-        pass
+    db.execute("BEGIN")                    # one snapshot: the orchestrator opens a ticket and marks the message
+    try:                                   # done in one transaction, so separate reads could show only half
+        out = {
+            "tickets": [dict(r) for r in db.execute("SELECT id, state, thread, note, run_gen FROM ticket")],
+            "open_asks": [dict(r) for r in db.execute(
+                "SELECT ask_id, ticket_id, what FROM ask WHERE state='open'")],
+            "outbox": {r[0]: r[1] for r in db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")},
+            "running": lifecycle.running(args.home),
+        }
+        try:                               # homes made before the model session have no such table
+            out["eval"] = {r[0]: r[1] for r in db.execute("SELECT state, COUNT(*) FROM eval_item GROUP BY state")}
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        db.execute("COMMIT")               # release the read lock so the orchestrator is never held up
+        db.close()
     print(json.dumps(out, indent=1, ensure_ascii=False))
     return 0
 

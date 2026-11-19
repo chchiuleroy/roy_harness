@@ -271,6 +271,77 @@ class TestCommandLine(Rig):
         self.assertIn("in use", r.stderr)
 
 
+class TestStatusSnapshot(unittest.TestCase):
+    """`status` reads several tables while the orchestrator keeps writing."""
+
+    def test_status_is_one_consistent_snapshot(self):
+        """The orchestrator opens a ticket and marks the message 'done' in ONE transaction, so `status`
+        must never show 'done' without the ticket. It used to read the ticket table, then the eval table,
+        with no transaction around them: a commit between the two reads gave `tickets: []` next to
+        `eval.done: 1`. (Seen once on a slow CI runner; fast machines almost never hit the gap.)
+        This test commits that write exactly between the two reads, so it does not depend on timing."""
+        import argparse
+        import contextlib
+        import io
+        import sqlite3
+        from unittest import mock
+        from superagent import __main__ as cli_main
+
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        path = os.path.join(home, "state.sqlite")
+        setup = sqlite3.connect(path)
+        setup.executescript(                          # only the columns cmd_status selects
+            "CREATE TABLE ticket(id INTEGER, state TEXT, thread TEXT, note TEXT, run_gen INTEGER);"
+            "CREATE TABLE ask(ask_id INTEGER, ticket_id INTEGER, what TEXT, state TEXT);"
+            "CREATE TABLE outbox(status TEXT);"
+            "CREATE TABLE eval_item(state TEXT);"
+            "INSERT INTO eval_item VALUES('sent');")
+        setup.commit()
+        setup.close()
+
+        real_connect = sqlite3.connect
+        fired = []
+
+        def concurrent_commit():
+            w = real_connect(path, timeout=0.2)
+            try:
+                w.execute("BEGIN IMMEDIATE")
+                w.execute("INSERT INTO ticket VALUES(1, 'running', 't', '', 0)")
+                w.execute("UPDATE eval_item SET state='done'")
+                w.execute("COMMIT")
+            except sqlite3.OperationalError:          # locked: status is holding its snapshot, so the write waits
+                with contextlib.suppress(sqlite3.OperationalError):
+                    w.execute("ROLLBACK")
+            finally:
+                w.close()
+
+        class Spy:
+            def __init__(self, conn):
+                object.__setattr__(self, "_c", conn)
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def __setattr__(self, name, value):
+                setattr(self._c, name, value)
+
+            def execute(self, sql, *args):
+                if "FROM ask" in sql and not fired:   # the first table is fully read, the next one is not
+                    fired.append(True)
+                    concurrent_commit()
+                return self._c.execute(sql, *args)
+
+        out = io.StringIO()
+        with mock.patch("sqlite3.connect", lambda *a, **k: Spy(real_connect(*a, **k))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli_main.cmd_status(argparse.Namespace(home=home)), 0)
+        self.assertTrue(fired, "the write was never injected between the reads, so this test proved nothing")
+        st = json.loads(out.getvalue())
+        self.assertEqual(bool(st["tickets"]), st.get("eval", {}).get("done", 0) == 1,
+                         f"status mixed two moments in time: {st}")
+
+
 @unittest.skipUnless(os.environ.get("SUPERAGENT_REMOVAL") == "1",
                      "slow: set SUPERAGENT_REMOVAL=1 to run the removal check")
 class TestRemovable(unittest.TestCase):
