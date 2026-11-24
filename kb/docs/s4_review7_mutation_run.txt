@@ -1,0 +1,12 @@
+[1/11] s4_pipeline_hidden_text_not_recognised: killed
+[2/11] s4_pipeline_hidden_id_given_to_two_units: killed
+[3/11] s4_pipeline_hidden_id_not_used_up: killed
+[4/11] s4_pipeline_hidden_text_of_other_sources: killed
+[5/11] s4_pipeline_hidden_level_b_ignored: killed
+[6/11] s4_upgrade_held_back_not_counted: killed
+[7/11] s4_ask_ticket_removed_once: killed
+[8/11] s4_ask_ticket_left_without_a_word: killed
+[9/11] s4_ask_ticket_never_checked: killed
+[10/11] s4_runner_taskkill_unbounded: killed
+[11/11] s4_runner_taskkill_hang_not_handled: killed
+killed 11, survived 0, could not apply 0

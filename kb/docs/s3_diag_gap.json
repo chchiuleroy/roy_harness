@@ -1,0 +1,886 @@
+{
+ "n": 30,
+ "L2@5": 18,
+ "failures": 12,
+ "top1_above_gold_kind_counts": {
+  "same_file_far": 4,
+  "adjacent": 4,
+  "other_file": 4
+ },
+ "failures_with_a_page_above_sharing_half_of_gold_text": [],
+ "gold_rank_distribution_of_failures": [
+  6,
+  6,
+  7,
+  9,
+  12,
+  16,
+  38,
+  42,
+  72,
+  80,
+  86,
+  119
+ ],
+ "per_task": [
+  {
+   "id": "PDF-P01",
+   "category": "paraphrase",
+   "gold_rank": 2,
+   "gold_score": 0.5142,
+   "gold_chars": 3440,
+   "above": [
+    {
+     "page": [
+      "arxiv_2605.18656_dp_federated_learning.pdf",
+      24
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.045,
+     "score": 0.5934
+    }
+   ]
+  },
+  {
+   "id": "PDF-P04",
+   "category": "paraphrase",
+   "gold_rank": 119,
+   "gold_score": 0.4833,
+   "gold_chars": 3136,
+   "above": [
+    {
+     "page": [
+      "arxiv_2607.22366_pdkde_spatial_intensity.pdf",
+      14
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.075,
+     "score": 0.5809
+    },
+    {
+     "page": [
+      "arxiv_2610.37611_agentic_distributional_regression.pdf",
+      28
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.013,
+     "score": 0.576
+    },
+    {
+     "page": [
+      "arxiv_2607.22366_pdkde_spatial_intensity.pdf",
+      13
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.019,
+     "score": 0.5722
+    },
+    {
+     "page": [
+      "arxiv_2610.37611_agentic_distributional_regression.pdf",
+      30
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.02,
+     "score": 0.567
+    },
+    {
+     "page": [
+      "arxiv_2607.22366_pdkde_spatial_intensity.pdf",
+      11
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.036,
+     "score": 0.5645
+    }
+   ]
+  },
+  {
+   "id": "PDF-P05",
+   "category": "partial_memory",
+   "gold_rank": 12,
+   "gold_score": 0.5588,
+   "gold_chars": 1600,
+   "above": [
+    {
+     "page": [
+      "anthropic_2026_ai_orchestrated_cyber_espionage.pdf",
+      11
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.115,
+     "score": 0.6121
+    },
+    {
+     "page": [
+      "nist_2026_ai_agent_identity_authorization.pdf",
+      4
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.024,
+     "score": 0.597
+    },
+    {
+     "page": [
+      "nist_2026_ai_agent_identity_authorization.pdf",
+      7
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.029,
+     "score": 0.5835
+    },
+    {
+     "page": [
+      "arxiv_2608.10218_mindviruses.pdf",
+      6
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.02,
+     "score": 0.5763
+    },
+    {
+     "page": [
+      "arxiv_2608.10218_mindviruses.pdf",
+      48
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.015,
+     "score": 0.5746
+    }
+   ]
+  },
+  {
+   "id": "PDF-P06",
+   "category": "exact_term",
+   "gold_rank": 1,
+   "gold_score": 0.5288,
+   "gold_chars": 3796,
+   "above": []
+  },
+  {
+   "id": "PDF-P07",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.6374,
+   "gold_chars": 2871,
+   "above": []
+  },
+  {
+   "id": "PDF-P10",
+   "category": "exact_term",
+   "gold_rank": 1,
+   "gold_score": 0.5728,
+   "gold_chars": 2375,
+   "above": []
+  },
+  {
+   "id": "PDF-P11",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.6911,
+   "gold_chars": 1311,
+   "above": []
+  },
+  {
+   "id": "PDF-P12",
+   "category": "partial_memory",
+   "gold_rank": 6,
+   "gold_score": 0.4722,
+   "gold_chars": 2983,
+   "above": [
+    {
+     "page": [
+      "arxiv_2310.08710_waymax.pdf",
+      2
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.098,
+     "score": 0.5305
+    },
+    {
+     "page": [
+      "arxiv_2306.12241_scenarionet.pdf",
+      23
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.003,
+     "score": 0.5166
+    },
+    {
+     "page": [
+      "arxiv_2306.12241_scenarionet.pdf",
+      6
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.04,
+     "score": 0.4982
+    },
+    {
+     "page": [
+      "arxiv_2310.08710_waymax.pdf",
+      5
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.051,
+     "score": 0.4881
+    },
+    {
+     "page": [
+      "arxiv_2306.12241_scenarionet.pdf",
+      15
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.007,
+     "score": 0.4879
+    }
+   ]
+  },
+  {
+   "id": "PDF-P13",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.7339,
+   "gold_chars": 1984,
+   "above": []
+  },
+  {
+   "id": "PDF-P14",
+   "category": "paraphrase",
+   "gold_rank": 16,
+   "gold_score": 0.4711,
+   "gold_chars": 2788,
+   "above": [
+    {
+     "page": [
+      "arxiv_2304.03442_generative_agents.pdf",
+      16
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.048,
+     "score": 0.5232
+    },
+    {
+     "page": [
+      "arxiv_2304.03442_generative_agents.pdf",
+      12
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.073,
+     "score": 0.5212
+    },
+    {
+     "page": [
+      "arxiv_2608.10218_mindviruses.pdf",
+      48
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.007,
+     "score": 0.5034
+    },
+    {
+     "page": [
+      "arxiv_2304.03442_generative_agents.pdf",
+      7
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.058,
+     "score": 0.5003
+    },
+    {
+     "page": [
+      "arxiv_2304.03442_generative_agents.pdf",
+      5
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.066,
+     "score": 0.5001
+    }
+   ]
+  },
+  {
+   "id": "PDF-P16",
+   "category": "paraphrase",
+   "gold_rank": 1,
+   "gold_score": 0.5446,
+   "gold_chars": 2247,
+   "above": []
+  },
+  {
+   "id": "PDF-P19",
+   "category": "paraphrase",
+   "gold_rank": 72,
+   "gold_score": 0.4905,
+   "gold_chars": 3604,
+   "above": [
+    {
+     "page": [
+      "arxiv_2512.08296_scaling_agent_systems.pdf",
+      25
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.178,
+     "score": 0.5673
+    },
+    {
+     "page": [
+      "arxiv_2609.38267_hawkes_branching_ratio_minimax.pdf",
+      11
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.001,
+     "score": 0.5658
+    },
+    {
+     "page": [
+      "arxiv_2606.12097_weibull_sde_wind_power.pdf",
+      23
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.029,
+     "score": 0.5657
+    },
+    {
+     "page": [
+      "arxiv_2606.16080_semiparametric_aft_joint_model.pdf",
+      20
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.027,
+     "score": 0.558
+    },
+    {
+     "page": [
+      "arxiv_2609.14380_nonparametric_changepoint_hd.pdf",
+      280
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.021,
+     "score": 0.5382
+    }
+   ]
+  },
+  {
+   "id": "PDF-P20",
+   "category": "partial_memory",
+   "gold_rank": 1,
+   "gold_score": 0.606,
+   "gold_chars": 2903,
+   "above": []
+  },
+  {
+   "id": "PDF-P21",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.7465,
+   "gold_chars": 4413,
+   "above": []
+  },
+  {
+   "id": "PDF-P23",
+   "category": "exact_term",
+   "gold_rank": 2,
+   "gold_score": 0.7374,
+   "gold_chars": 4220,
+   "above": [
+    {
+     "page": [
+      "arxiv_2306.17563_prp_pairwise_ranking_prompting.pdf",
+      3
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.103,
+     "score": 0.762
+    }
+   ]
+  },
+  {
+   "id": "PDF-P24",
+   "category": "paraphrase",
+   "gold_rank": 4,
+   "gold_score": 0.5429,
+   "gold_chars": 4238,
+   "above": [
+    {
+     "page": [
+      "arxiv_2606.16224_bayesian_hierarchical_meta_analysis.pdf",
+      6
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.06,
+     "score": 0.6092
+    },
+    {
+     "page": [
+      "arxiv_2606.16224_bayesian_hierarchical_meta_analysis.pdf",
+      7
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.036,
+     "score": 0.5699
+    },
+    {
+     "page": [
+      "arxiv_2606.16224_bayesian_hierarchical_meta_analysis.pdf",
+      5
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.043,
+     "score": 0.5479
+    }
+   ]
+  },
+  {
+   "id": "PDF-P27",
+   "category": "paraphrase",
+   "gold_rank": 9,
+   "gold_score": 0.5419,
+   "gold_chars": 1173,
+   "above": [
+    {
+     "page": [
+      "arxiv_2209.02976_yolov6.pdf",
+      6
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.089,
+     "score": 0.5902
+    },
+    {
+     "page": [
+      "arxiv_2609.14380_nonparametric_changepoint_hd.pdf",
+      280
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.012,
+     "score": 0.572
+    },
+    {
+     "page": [
+      "arxiv_2608.16864_noncrossing_deep_quantile_survival.pdf",
+      14
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.016,
+     "score": 0.5676
+    },
+    {
+     "page": [
+      "arxiv_2608.16573_bessel_debiased_pseudo_marginal_mcmc.pdf",
+      18
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.02,
+     "score": 0.5661
+    },
+    {
+     "page": [
+      "arxiv_2609.35815_stats_over_llm_judges.pdf",
+      37
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.003,
+     "score": 0.5637
+    }
+   ]
+  },
+  {
+   "id": "PDF-P28",
+   "category": "exact_term",
+   "gold_rank": 1,
+   "gold_score": 0.7889,
+   "gold_chars": 1475,
+   "above": []
+  },
+  {
+   "id": "PDF-P29",
+   "category": "partial_memory",
+   "gold_rank": 86,
+   "gold_score": 0.4968,
+   "gold_chars": 3535,
+   "above": [
+    {
+     "page": [
+      "arxiv_2212.10509_ircot_interleaving_retrieval_cot.pdf",
+      14
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.037,
+     "score": 0.6221
+    },
+    {
+     "page": [
+      "lee_2026_meta_harness.pdf",
+      16
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.011,
+     "score": 0.5977
+    },
+    {
+     "page": [
+      "arxiv_2605.09998_continual_harness.pdf",
+      17
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.015,
+     "score": 0.5713
+    },
+    {
+     "page": [
+      "zheng_2023_mt_bench.pdf",
+      25
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.013,
+     "score": 0.5699
+    },
+    {
+     "page": [
+      "kean_2025_abstract_formal_reasoning_network.pdf",
+      13
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.015,
+     "score": 0.5681
+    }
+   ]
+  },
+  {
+   "id": "PDF-P30",
+   "category": "mixed_zh_en",
+   "gold_rank": 42,
+   "gold_score": 0.6148,
+   "gold_chars": 3997,
+   "above": [
+    {
+     "page": [
+      "arxiv_2512.16883_adasearch.pdf",
+      1
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.071,
+     "score": 0.7642
+    },
+    {
+     "page": [
+      "arxiv_2606.19348_deepseek_v4.pdf",
+      42
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.025,
+     "score": 0.7309
+    },
+    {
+     "page": [
+      "arxiv_2503.09516_search_r1.pdf",
+      10
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.054,
+     "score": 0.7152
+    },
+    {
+     "page": [
+      "arxiv_2503.09516_search_r1.pdf",
+      1
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.116,
+     "score": 0.712
+    },
+    {
+     "page": [
+      "arxiv_2503.09516_search_r1.pdf",
+      2
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.113,
+     "score": 0.6959
+    }
+   ]
+  },
+  {
+   "id": "PDF-P32",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.6858,
+   "gold_chars": 2239,
+   "above": []
+  },
+  {
+   "id": "PDF-P33",
+   "category": "paraphrase",
+   "gold_rank": 1,
+   "gold_score": 0.6915,
+   "gold_chars": 4989,
+   "above": []
+  },
+  {
+   "id": "PDF-P34",
+   "category": "partial_memory",
+   "gold_rank": 80,
+   "gold_score": 0.4153,
+   "gold_chars": 3550,
+   "above": [
+    {
+     "page": [
+      "arxiv_2404.07972_osworld.pdf",
+      49
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.001,
+     "score": 0.5058
+    },
+    {
+     "page": [
+      "arxiv_2606.19348_deepseek_v4.pdf",
+      32
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.01,
+     "score": 0.5056
+    },
+    {
+     "page": [
+      "kimi_2026_k3.pdf",
+      46
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.012,
+     "score": 0.4984
+    },
+    {
+     "page": [
+      "kimi_2026_k2_5.pdf",
+      27
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.022,
+     "score": 0.4936
+    },
+    {
+     "page": [
+      "kimi_2026_k2_5.pdf",
+      25
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.035,
+     "score": 0.4924
+    }
+   ]
+  },
+  {
+   "id": "PDF-P35",
+   "category": "exact_term",
+   "gold_rank": 1,
+   "gold_score": 0.7015,
+   "gold_chars": 2842,
+   "above": []
+  },
+  {
+   "id": "PDF-P36",
+   "category": "mixed_zh_en",
+   "gold_rank": 3,
+   "gold_score": 0.6208,
+   "gold_chars": 1614,
+   "above": [
+    {
+     "page": [
+      "arxiv_2603.23420_bilevel_autoresearch.pdf",
+      2
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.025,
+     "score": 0.6382
+    },
+    {
+     "page": [
+      "arxiv_2603.23420_bilevel_autoresearch.pdf",
+      5
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.04,
+     "score": 0.6231
+    }
+   ]
+  },
+  {
+   "id": "PDF-P37",
+   "category": "partial_memory",
+   "gold_rank": 38,
+   "gold_score": 0.5516,
+   "gold_chars": 2659,
+   "above": [
+    {
+     "page": [
+      "arxiv_2610.06805_hjepa_hierarchical_world_models.pdf",
+      18
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.004,
+     "score": 0.6389
+    },
+    {
+     "page": [
+      "arxiv_2610.18861_hybridagents.pdf",
+      16
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.03,
+     "score": 0.6353
+    },
+    {
+     "page": [
+      "arxiv_2610.06805_hjepa_hierarchical_world_models.pdf",
+      12
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.004,
+     "score": 0.6066
+    },
+    {
+     "page": [
+      "arxiv_2610.06805_hjepa_hierarchical_world_models.pdf",
+      39
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.01,
+     "score": 0.5988
+    },
+    {
+     "page": [
+      "arxiv_2604.25917_recursivemas.pdf",
+      24
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.125,
+     "score": 0.5978
+    }
+   ]
+  },
+  {
+   "id": "PDF-P38",
+   "category": "paraphrase",
+   "gold_rank": 6,
+   "gold_score": 0.5224,
+   "gold_chars": 3588,
+   "above": [
+    {
+     "page": [
+      "openai_2026_navier_stokes.pdf",
+      130
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.067,
+     "score": 0.6026
+    },
+    {
+     "page": [
+      "openai_2026_navier_stokes.pdf",
+      14
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.047,
+     "score": 0.5484
+    },
+    {
+     "page": [
+      "openai_2026_navier_stokes.pdf",
+      135
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.081,
+     "score": 0.5407
+    },
+    {
+     "page": [
+      "openai_2026_navier_stokes.pdf",
+      73
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.052,
+     "score": 0.5334
+    },
+    {
+     "page": [
+      "openai_2026_navier_stokes.pdf",
+      106
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.025,
+     "score": 0.5269
+    }
+   ]
+  },
+  {
+   "id": "PDF-P41",
+   "category": "mixed_zh_en",
+   "gold_rank": 7,
+   "gold_score": 0.6303,
+   "gold_chars": 4362,
+   "above": [
+    {
+     "page": [
+      "arxiv_2310.11511_self_rag.pdf",
+      9
+     ],
+     "kind": "adjacent",
+     "gold_text_shared": 0.101,
+     "score": 0.6822
+    },
+    {
+     "page": [
+      "arxiv_2310.11511_self_rag.pdf",
+      2
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.095,
+     "score": 0.6806
+    },
+    {
+     "page": [
+      "arxiv_2312.10997_rag_survey_gao.pdf",
+      12
+     ],
+     "kind": "other_file",
+     "gold_text_shared": 0.042,
+     "score": 0.6694
+    },
+    {
+     "page": [
+      "arxiv_2310.11511_self_rag.pdf",
+      6
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.06,
+     "score": 0.6666
+    },
+    {
+     "page": [
+      "arxiv_2310.11511_self_rag.pdf",
+      1
+     ],
+     "kind": "same_file_far",
+     "gold_text_shared": 0.078,
+     "score": 0.6487
+    }
+   ]
+  },
+  {
+   "id": "PDF-P46",
+   "category": "paraphrase",
+   "gold_rank": 1,
+   "gold_score": 0.5778,
+   "gold_chars": 3274,
+   "above": []
+  },
+  {
+   "id": "PDF-P48",
+   "category": "mixed_zh_en",
+   "gold_rank": 1,
+   "gold_score": 0.6857,
+   "gold_chars": 4727,
+   "above": []
+  }
+ ]
+}

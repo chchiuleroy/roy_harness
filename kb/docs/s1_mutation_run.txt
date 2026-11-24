@@ -1,0 +1,6 @@
+killed 193, survived 1, could not apply 3
+  SURVIVED: inventory_class_renamed
+  ERROR: inbox_no_rename_detection old text occurs 0 times in inbox.py
+  ERROR: inbox_change_during_read_ignored old text occurs 0 times in inbox.py
+  ERROR: commit_recovery_never_completes old text occurs 0 times in commit.py
+done

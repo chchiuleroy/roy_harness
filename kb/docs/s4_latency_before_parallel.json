@@ -1,0 +1,21 @@
+{
+ "home": "midterm home (882 wiki pages + 222 PDFs)",
+ "n_queries": 100,
+ "mode": "hybrid",
+ "cached_original_check": true,
+ "source_view": {
+  "median": 123.9,
+  "p95": 177.1,
+  "max": 219.2
+ },
+ "chunk_view_40": {
+  "median": 150.4,
+  "p95": 299.0,
+  "max": 354.0
+ },
+ "query_embedding_alone": {
+  "median": 26.3,
+  "p95": 49.0
+ },
+ "mean_source_view": 128.2
+}

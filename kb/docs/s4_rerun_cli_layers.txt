@@ -1,0 +1,20 @@
+[1/19] layers_allow_upward_import: killed
+[2/19] layers_siblings_allowed: killed
+[3/19] cli_doctor_always_zero: killed
+[4/19] cli_search_without_commit_exits_zero: killed
+[5/19] cli_skips_recovery: killed
+[6/19] cli_private_urls_always_allowed: killed
+[7/19] s2_links_shows_a_level_b_source: killed
+[8/19] s2_hidden_level_b_is_shown: killed
+[9/19] s2_hidden_unit_text_is_shown: killed
+[10/19] s2_level_a_unit_is_hidden_from_the_owner: killed
+[11/19] s2_patch_replay_skipped_by_the_command: killed
+[12/19] s3_cli_no_vectors_flag_ignored: killed
+[13/19] s3_cli_search_without_backend_still_tries: killed
+[14/19] s3_cli_semantic_without_backend_not_refused: killed
+[15/19] s3_cli_open_of_a_bad_file_succeeds: killed
+[16/19] s3_cli_open_always_launches: killed
+[17/19] s3_cli_embed_limit_ignored: killed
+[18/19] s3_cli_pdf_not_registered: killed
+[19/19] s3_cli_hit_line_without_page: killed
+killed 19, survived 0, could not apply 0

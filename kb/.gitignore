@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+# S-1 working data (large, regenerable): embeddings, OCR output, caches, server logs
+s1/results/pdf_vecs/
+s1/results/pdf_pages.pkl
+s1/results/pdf_chunks.json
+s1/results/ocr_win_book_all.json
+s1/server*.log
+s1/tasks/*_private.json
+
+# private conversation history of the saved sessions (the context summary is kept)
+.recall/history.md
+# logs of long runs (noise); the ledgers and result files stay
+docs/*.log
+
+# Not published with the repository (2026-11-24): the S-1 evaluation data is made from the author's private wiki
+# (page ids and real queries), OCR text of screenshots and scanned book pages. The scripts and reports in s1/ stay.
+s1/a0/
+s1/results/
+s1/tasks/

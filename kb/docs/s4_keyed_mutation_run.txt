@@ -1,0 +1,16 @@
+[1/15] s4_keys_missing_key_falls_back_to_a_plain_hash: killed
+[2/15] s4_keys_text_hash_is_plain: killed
+[3/15] s4_keys_statement_value_is_plain: killed
+[4/15] s4_keys_the_key_is_not_in_the_hash: killed
+[5/15] s4_keys_check_value_shows_the_key: killed
+[6/15] s4_keys_key_length_unchecked: killed
+[7/15] s4_keys_text_and_value_share_a_domain: killed
+[8/15] s4_keys_another_key_accepted: killed
+[9/15] s4_keys_missing_key_accepted: killed
+[10/15] s4_keys_an_existing_key_is_replaced: killed
+[11/15] s4_keys_a_short_key_file_accepted: killed
+[12/15] s4_db_refused_connection_left_open: killed
+[13/15] s4_db_old_folder_with_sources_upgraded: killed
+[14/15] s4_pipeline_conversion_hash_is_plain: killed
+[15/15] s4_commit_chunk_memo_signature_is_plain: killed
+killed 15, survived 0, could not apply 0

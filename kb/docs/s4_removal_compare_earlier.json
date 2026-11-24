@@ -1,0 +1,13 @@
+{
+ "tests": 1176,
+ "outcomes_without_kb": {
+  "ok": 1149,
+  "skipped": 27
+ },
+ "seconds": [
+  932,
+  857
+ ],
+ "identical": true,
+ "differences": []
+}

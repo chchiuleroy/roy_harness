@@ -1,10 +1,11 @@
 # roy_harness
 
-一個核心、兩個可選的疊加層，放在同一個 repo：
+一個核心，加上可選的 superagent、kb 與一層 GUI 面板轉接，放在同一個 repo：
 
 - **harness（核心）**：一個給本機模型用的 coding agent 外殼。把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復、跨 session 的筆記與整理，以及一個網頁 GUI。
 - **superagent（疊加層）**：讓外部事件自己開工單，交給獨立的 harness 子行程去做，把結果送回來。**它依賴 harness**（每張工單就是一個 harness 子行程），但 harness 不認得它：刪掉 `src/superagent/`，harness 與其測試的結果逐項不變，有測試驗證。
-- **GUI 疊加層面板（`src/gui_layers/`）**：把 superagent 與 **kb（個人知識庫）**接成網頁 GUI 設定頁裡的開關與面板。同樣，harness 不認得它。**kb 不在這個 repo**：repo 根目錄下的 `kb/`（面板找的是 `kb/src`）只存在作者本機、沒有推上來；沒有它時 kb 面板顯示「未安裝」，其他功能不受影響。
+- **kb（個人知識庫，`kb/`）**：可選。文字與 PDF 從收件、轉換、切塊到搜尋（詞彙／向量／混合）；每個對知識的改動都是要你核准的提案；`kb ask` 先由程式檢索，再交給一個沒有任何工具的 harness 子行程回答，引文由程式逐字核對、答案旁列出它拿到的段落。**自己的 `README`、`docs/`、`tests/`，不 import harness**（只把它當子行程啟動），harness 也不認得它。做到 S4：圖片、音訊、影片與圖形介面還沒做。詳見 [kb/README.md](kb/README.md)。
+- **GUI 面板轉接（`src/gui_layers/`）**：把 superagent 與 kb 接成網頁 GUI 設定頁裡的開關與面板。同樣，harness 不認得它。kb 沒有預設資料夾，要先自己建好（`kb init`）再到設定頁填路徑；沒有 `kb/src`（例如你刪掉了 kb）時 kb 面板顯示「未安裝」，其他功能不受影響。
 
 > 這是教學／實驗用的程式，不是產品。harness 的 `shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。測試用的 Python 是 3.13（CI 與作者機器），其他版本沒驗證。
 
@@ -16,6 +17,7 @@
 | 用網頁操作（多 session、貼圖、核准卡片、複製／保存／刪除 session） | `python src/harness/harness_gui.py` | 〈網頁 GUI〉 |
 | 同一個網頁，**再載入**superagent／kb 兩個疊加層（設定頁出現它們的開關卡片與面板；用上一列的指令啟動時設定頁還在，但沒有任何層可開） | `python src/gui_layers/launcher.py` | 〈網頁 GUI〉 |
 | 讓外部事件自動開工單並回覆 | 在 `src/` 下 `python -X utf8 -m superagent …` | 〈疊加層：superagent〉 |
+| 建立個人知識庫、搜尋與提問 | 在 repo 根目錄 `PYTHONPATH=kb/src python -X utf8 -m kb --home <資料夾> init`（之後 `add`／`commit`／`search`／`ask`） | [kb/README.md](kb/README.md) |
 | 知道哪些東西驗證過、哪些沒有 | | 〈測試與驗證〉、〈已知限制〉 |
 | 了解記憶（`AGENT.md`、`MEMORY.md`、筆記） | | 〈記憶〉、[docs/notes-and-dream.md](docs/notes-and-dream.md) |
 
@@ -46,6 +48,7 @@
 | 圖片與網頁 GUI | `view_image`；多 session 分頁、核准卡片、背景任務面板、貼圖／上傳；session 的複製／保存／刪除；設定頁與疊加層面板 | 〈網頁 GUI〉、[docs/images-and-gui.md](docs/images-and-gui.md) |
 | 評測 | [`bench/`](bench/README.md)：12 個題型、確定性評分器、自我改進迴圈 | |
 | 事件編排 | superagent：事件 → 工單 → 做事 → 回覆 | [docs/superagent.md](docs/superagent.md) |
+| 知識庫 | kb：收件、轉換、切塊、搜尋、提案與核准、`kb ask` | [kb/README.md](kb/README.md) |
 
 斜線指令：`/help /quit /clear /compact /mode [safe|normal|auto] /tasks /stop <id> /undo /perms /cache /stats /skills /skill <名稱> /mcp /hooks /notes /dream`（`/skill` 手動把某個 skill 交給模型；`/notes`、`/dream` 見〈記憶〉）。
 
@@ -53,6 +56,7 @@
 
 | PR | 日期 | 內容 |
 |---|---|---|
+| #43 | 2026-11-24 | **kb 併入本 repo**（`kb/`，之前是只在本機的獨立 git repo）；`kb/s1/` 裡由私人 wiki 與掃描頁面產生的評測資料（`a0/`、`results/`、`tasks/`）不公開，腳本與報告留著 |
 | #39–#41 | 2026-11-19～24 | **CI**（GitHub Actions、Windows）與 main 分支保護；修 `superagent status` 的讀取競態；GUI **設定頁**（疊加層滑動開關）、superagent／kb 面板（`src/gui_layers/`）、**session 複製／保存／刪除**；修「續跑」鈕會撤銷停止的缺陷與一個偶發失敗的筆記測試 |
 | #35–#38 | 2026-11-12 | **筆記與 `/dream`**：`remember`／`recall`、`.harness_notes/MEMORY.md` 目錄、`/notes`、`/dream`；**預設開啟**（`HARNESS_NOTES=0` 關閉）；superagent 工單與 bench 固定關閉；README 重構與審查修正 |
 | #27–#34 | 2026-11-10～11 | `auto` 分類器補**來源追蹤**、同一回合的先前動作（R6）、寫檔內容檢查；修掉我自己引入的 `hosts_in()` ReDoS（30,000 字元的長單字 13.9 秒 → 3.6 毫秒）；IPv6 與 Unicode 網域；文件與測試校正 |
@@ -150,7 +154,7 @@ python src/gui_layers/launcher.py     # 同一個 GUI，另外載入疊加層（
 - **核心功能**（兩種啟動方式都有）：多個 session 分頁與續跑、核准卡片、背景任務面板、模式切換，可以貼上或拖進圖片。每個 session 是一個子行程 `harness_vllm.py --jsonl`。
 - **session 的複製、保存、刪除**（右側面板，或左側列表每一列滑過時的圖示）：複製＝同一段對話與圖片的新 session，**不會自動執行**；保存＝下載 `.md`（給人讀）或 `.json`（harness 的完整對話檔）；刪除＝先確認，再結束它的 harness 並**永久**刪掉對話、標題與貼過的圖片（沒有垃圾桶，不動專案資料夾）。
 - **設定頁**（左下角「⚙ 設定」）：每個疊加層一張卡片、一個滑動開關，加上它自己的幾個文字設定；記在 `~/.roy_harness_gui/settings.json`。**superagent 預設開、kb 預設關。** 關掉的層，伺服器對它的請求回 409，不只是把按鈕藏起來（已經開始的動作不會被中斷）。開著的層在左下角有入口。用 `harness_gui.py` 啟動時設定頁會寫明沒有載入任何疊加層。
-- **superagent 面板**：顯示工單、等你回答的問題、outbox；問題可按「允許一次」「拒絕」，工單可「停止」，被擱置的才能「續跑」。它**不會替你啟動 orchestrator**。**kb 面板**：搜尋、「問」（先檢索再問模型，模型沒有工具；會把檢索到的段落送到你填的模型端點）、看與放行被扣住的答案；沒有 `kb/src` 時顯示「未安裝」。
+- **superagent 面板**：顯示工單、等你回答的問題、outbox；問題可按「允許一次」「拒絕」，工單可「停止」，被擱置的才能「續跑」。它**不會替你啟動 orchestrator**。**kb 面板**：搜尋、「問」（先檢索再問模型，模型沒有工具；會把檢索到的段落送到你填的模型端點）、看與放行被扣住的答案；要先用 `kb init` 建好資料夾並在設定頁填路徑；沒有 `kb/src` 時顯示「未安裝」。
 - 只綁 `127.0.0.1`，每次啟動隨機 token、檢查 `Host`／`Origin`、CSP。**token 外洩等於交出執行權**，重啟伺服器才換新。架構、限制與測試過程見 [docs/images-and-gui.md](docs/images-and-gui.md)。
 
 `view_image(path)` 讓模型看圖：session 只存參照（不存位元組），組請求時才讀檔並驗 sha256，只送最近 3 張；從檔頭判斷格式，上限 5 MB、總像素數不超過 3840×2160（寬×高的乘積，不是各邊各自的上限）。預設只對 `vllm` 開；託管的第三方 provider 每張圖都會問你。
@@ -205,6 +209,7 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 | **手動瀏覽器（真實 Chrome＋Selenium，單次，腳本沒進 repo）** | 2026-11-24：GUI 設定頁與 session 複製／保存／刪除端到端 25 項檢查；superagent 面板對運作中的 orchestrator（**腳本化假模型**，不是真模型）13 項；kb 面板的「問」對真實模型端點（合成資料）13 項，兩個問題、一個模型、lexical 檢索，是存在性檢查，不是準確率 |
 | **沒驗證** | superagent 對真模型的端到端（新功能之後）；真正被擱置（parked）的工單上的「續跑」鈕（只有單元測試）；kb 搭配需要金鑰的 hosted provider（面板不支援）；POSIX；GUI 沒有放進 repo 的自動化瀏覽器測試 |
 
+- **kb 的測試**：在 `kb/` 下執行 `python run_tests.py`（標準函式庫 unittest）。2026-11-24（作者機器、單次、併入本 repo 之後）：**782 項、OK、略過 1 項、206 秒**。**CI 目前不跑它們**（CI 只跑根目錄的 `tests/`）。
 - **CI 的偶發失敗**：兩個都是時間相關的測試。筆記測試（機制已在作者機器重現：Windows 檔案時間戳可能比剛取的 `time.time()` 還早，零間隔下 600 次寫入有 444 次；**那次 CI 失敗是否就是這個機制，是推測**，沒有 runner 上的時序紀錄；PR #41 已改成明確設定修改時間）；`test_superagent_replay` 的一個 chunk 逾時測試（2 秒逾時，2026-11-24 在 #40 合併後的 main 失敗一次、之後一次綠，**尚未修**）。**單次綠燈不等於穩定。**
 - **略過的 27 項**：需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。
 - 每項測試的 docstring 寫的是「為什麼這個行為重要」；筆記與 `/dream`、GUI 這批新程式碼另做過突變驗證（把規則一個一個弄壞，測試要抓到；腳本沒進 repo）。
@@ -226,7 +231,7 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 
 - 同一個瀏覽器開 6 個以上「執行中」的 session 會用光連線；「停止」是強制結束、不能只中斷一輪。
 - session 的刪除是永久的（沒有垃圾桶）；疊加層的開關只管「之後的請求」，已經開始的動作（例如一個還沒回來的 `kb ask`）會跑完。
-- kb 不在這個 repo：kb 面板只有作者本機驗證過。
+- kb 面板的「問」只在作者機器對一個真實端點用合成資料驗證過一次；kb 自己的 S4 端到端也只有一個模型、四個問題（`kb/docs/S4_E2E.md`）。
 
 **superagent**
 
@@ -247,7 +252,7 @@ tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
 docs/          詳細文件：harness 的細節（從 README 拆出，原文未改）、notes-and-dream.md、superagent.md、驗證與審查紀錄
 .github/       CI（workflows/ci.yml）
-kb/（不在 repo） 個人知識庫，只在作者本機；GUI 的 kb 面板在它存在時才有內容
+kb/            個人知識庫（可選；自己的 pyproject、README、docs、tests；與 harness 互不 import）
 ```
 
 ## 出處與授權

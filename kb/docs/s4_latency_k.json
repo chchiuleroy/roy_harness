@@ -1,0 +1,31 @@
+{
+ "home": "midterm home (882 wiki pages + 222 PDFs)",
+ "n_queries": 100,
+ "mode": "hybrid",
+ "cached_original_check": true,
+ "source_view": {
+  "median": 70.1,
+  "p95": 98.0,
+  "max": 158.6
+ },
+ "chunk_view_40": {
+  "median": 104.1,
+  "p95": 253.9,
+  "max": 324.7
+ },
+ "chunk_view_6": {
+  "median": 59.6,
+  "p95": 69.9,
+  "max": 86.5
+ },
+ "chunk_view_10": {
+  "median": 61.8,
+  "p95": 76.7,
+  "max": 96.2
+ },
+ "query_embedding_alone": {
+  "median": 35.4,
+  "p95": 48.5
+ },
+ "mean_source_view": 72.5
+}

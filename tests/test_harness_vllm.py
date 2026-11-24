@@ -248,6 +248,7 @@ class TestLocalConfig(Base):
                    "proxy.example.com", "api.example.com", "evil.example", "policy.corp",
                    "llm.corp", "mcp.corp",
                    "private", "h",
+                   "models.example.com", "x",    # fake hosts in kb/tests (ask_runner endpoint policy)
                    "choosealicense.com",
                    "creativecommons.org"}
         root = os.path.abspath(os.path.join(HERE, ".."))

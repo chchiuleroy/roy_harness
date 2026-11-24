@@ -1,0 +1,95 @@
+{
+ "wiki": {
+  "seconds": {
+   "add": 6.03,
+   "convert": 22.42,
+   "relations": 0.95,
+   "commit": 10.77,
+   "commit_again_unchanged": 3.73
+  },
+  "files": 878,
+  "intake_outcomes": {
+   "new": 878
+  },
+  "conversion": {
+   "ok": 878,
+   "partial": 0,
+   "failed": 0
+  },
+  "relations": {
+   "resolved": 7223,
+   "ambiguous": 0,
+   "unresolved": 29,
+   "rejected": 0,
+   "restored": 0
+  },
+  "commit": {
+   "chunks": 12399,
+   "sources": 878,
+   "fts_bytes": 23187456,
+   "manifest_bytes": 6534799
+  },
+  "second_build": "unchanged",
+  "ghost_check_problems": [],
+  "scores": {
+   "real": {
+    "n_valid": 27,
+    "kb_lexical": 24,
+    "a0_bm25": 22,
+    "a0_vector": 25,
+    "a0_best_variant": 25,
+    "like_for_like_floor": 21,
+    "meets_like_for_like": true
+   },
+   "blind1": {
+    "n_valid": 40,
+    "kb_lexical": 36,
+    "a0_bm25": 37,
+    "a0_vector": 33,
+    "a0_best_variant": 39,
+    "like_for_like_floor": 36,
+    "meets_like_for_like": true
+   },
+   "blind2": {
+    "n_valid": 40,
+    "kb_lexical": 33,
+    "a0_bm25": 35,
+    "a0_vector": 32,
+    "a0_best_variant": 38,
+    "like_for_like_floor": 34,
+    "meets_like_for_like": false
+   }
+  },
+  "search_ms": {
+   "n": 107,
+   "median": 105.6,
+   "p95": 123.8,
+   "max": 174.4
+  }
+ },
+ "pilot": {
+  "seconds": {
+   "add_ref": 4.6,
+   "convert": 11.77,
+   "commit": 6.98
+  },
+  "intake_outcomes": {
+   "new": 642
+  },
+  "conversion": {
+   "ok": 342,
+   "partial": 1,
+   "failed": 299
+  },
+  "failed_reasons": {
+   "unsupported_type": 298,
+   "input larger than the converter limit": 1
+  },
+  "skips": [],
+  "commit": {
+   "chunks": 8614,
+   "sources": 642
+  },
+  "blobs_copied_bytes": 0
+ }
+}

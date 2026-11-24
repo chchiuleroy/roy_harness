@@ -1,0 +1,81 @@
+{
+ "real": {
+  "kb_only": [
+   {
+    "id": "Q1-3",
+    "category": "1_known_title_exact_keyword",
+    "query": "Random Fatigue Limit 模型",
+    "kb_hit": true,
+    "a0_bm25_hit": false,
+    "kb_rank": 1,
+    "a0_rank": null
+   },
+   {
+    "id": "Q5-3",
+    "category": "5_scattered_answer",
+    "query": "AI agent 治理平台這條路線是怎麼演進的",
+    "kb_hit": true,
+    "a0_bm25_hit": false,
+    "kb_rank": 1,
+    "a0_rank": null
+   },
+   {
+    "id": "Q5-8",
+    "category": "5_scattered_answer",
+    "query": "哪篇專案頁記載了小o 對它做過七輪唯讀 review",
+    "kb_hit": true,
+    "a0_bm25_hit": false,
+    "kb_rank": 1,
+    "a0_rank": null
+   }
+  ],
+  "a0_only": [
+   {
+    "id": "Q1-5",
+    "category": "1_known_title_exact_keyword",
+    "query": "Thompson Sampling",
+    "kb_hit": false,
+    "a0_bm25_hit": true,
+    "kb_rank": 6,
+    "a0_rank": 5
+   }
+  ]
+ },
+ "blind1": {
+  "kb_only": [],
+  "a0_only": [
+   {
+    "id": "D3",
+    "category": "D_partial_memory",
+    "query": "Meta 那個本機 agent 還沒實測",
+    "kb_hit": false,
+    "a0_bm25_hit": true,
+    "kb_rank": 7,
+    "a0_rank": 3
+   }
+  ]
+ },
+ "blind2": {
+  "kb_only": [],
+  "a0_only": [
+   {
+    "id": "A1",
+    "category": "A_exact_term",
+    "query": "PLT 距離怎麼算",
+    "kb_hit": false,
+    "a0_bm25_hit": true,
+    "kb_rank": 6,
+    "a0_rank": 2
+   },
+   {
+    "id": "C4",
+    "category": "C_mixed_zh_en",
+    "query": "I-DLM 的 ISD 為何能讓 DLM 追平 AR",
+    "kb_hit": false,
+    "a0_bm25_hit": true,
+    "kb_rank": 6,
+    "a0_rank": 5
+   }
+  ]
+ }
+}

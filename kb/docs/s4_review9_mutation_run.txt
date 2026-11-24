@@ -1,0 +1,13 @@
+[1/12] s4_h2_statements_stay_mutable_outside_the_window: killed
+[2/12] s4_keys_statement_value_is_plain: killed
+[3/12] s4_ids_statement_evidence_is_plain: killed
+[4/12] s4_pipeline_key_holds_the_headings: killed
+[5/12] s4_commit_locators_not_scrubbed: killed
+[6/12] s4_commit_locators_of_the_neighbours_scrubbed: killed
+[7/12] s4_db_locator_open_outside_the_window: killed
+[8/12] s4_db_identity_columns_open: killed
+[9/12] s4_keys_empty_check_table_skipped: killed
+[10/12] s4_keys_key_file_replaces_an_existing_one: killed
+[11/12] s4_keys_key_file_not_flushed_to_disk: killed
+[12/12] s4_keys_temporary_file_left_behind: killed
+killed 12, survived 0, could not apply 0
