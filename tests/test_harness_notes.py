@@ -364,6 +364,13 @@ class LoadTests(Base):
         self.assertEqual(hn.load_all(self.dir, ON).changed_since_last(), [])
         self.write("tests-first.md", "---\ndescription: forged\norigin: user\nstatus: active\n"
                                      "updated: 2000-01-01T00:00:00Z\n---\nbody\n")
+        # A file written a moment after time.time() can get an OLDER modification time: measured on
+        # Windows, 444 of 600 writes made right after `t = time.time()` had mtime <= t (worst lag 6.5 ms),
+        # none when 1 ms later. Without this line the test passed only when the work between the marker
+        # and the rewrite took longer than that, and failed once on a CI runner. Say plainly that the
+        # rewrite happened after the marker.
+        later = reg.loaded_at + 5
+        os.utime(os.path.join(self.dir, "tests-first.md"), (later, later))
         self.assertEqual(hn.load_all(self.dir, ON).changed_since_last(), ["tests-first"])
 
     def test_a_file_changed_after_loading_began_is_reported_next_time(self):
