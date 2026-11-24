@@ -29,6 +29,20 @@ class SuperagentLayer:
         pre = ["-m", "superagent", f"--home={home}"] + ([f"--wait={wait}"] if wait else [])
         return self.runner(pre + list(args), self.src, self.src, timeout)
 
+    @staticmethod
+    def _ticket_buttons(t):
+        """Only what makes sense for this ticket. The engine's `resume` opens ANY ticket again,
+        including one a person stopped ('it receives nothing more'), so offering it there would be a
+        button that undoes a stop (found by clicking it on a running orchestrator): resume is
+        offered only for a parked ticket, the one that carries a note."""
+        buttons = []
+        if t["state"] in ("open", "waiting"):
+            buttons.append({"label": "停止", "action": "stop", "args": {"ticket": t["id"]},
+                            "confirm": f"永久停止 Ticket {t['id']}？"})
+        if t.get("note") and t["state"] != "stopped":
+            buttons.append({"label": "續跑", "action": "resume", "args": {"ticket": t["id"]}})
+        return buttons
+
     def panel(self, values):
         home = values.get("home", "").strip()
         if not self.installed():
@@ -61,10 +75,7 @@ class SuperagentLayer:
         blocks.append({"type": "text", "text": f"Ticket：{len(tickets)}"})
         blocks.append({"type": "list", "items": [
             {"text": f"#{t['id']} {t['state']} · {t['thread']}" + (f" · {t['note']}" if t.get("note") else ""),
-             "buttons": [{"label": "停止", "action": "stop", "args": {"ticket": t["id"]},
-                          "confirm": f"永久停止 Ticket {t['id']}？"},
-                         {"label": "續跑", "action": "resume", "args": {"ticket": t["id"]}}]}
-            for t in tickets]})
+             "buttons": self._ticket_buttons(t)} for t in tickets]})
         counts = lambda d: "、".join(f"{k} {v}" for k, v in sorted((d or {}).items())) or "（無）"
         blocks.append({"type": "text", "text": f"outbox：{counts(st.get('outbox'))}"
                        + (f"　模型審核：{counts(st.get('eval'))}" if "eval" in st else "")})

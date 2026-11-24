@@ -97,9 +97,17 @@ python src/harness/harness_gui.py            # 印出帶 token 的網址並開�
 
 | 層 | 預設 | 面板做什麼（都只是呼叫它自己已有的命令列） |
 |---|---|---|
-| superagent | **開** | `status` 的內容（Ticket、等你回答的問題、outbox）；問題可按「允許一次」「拒絕」（只送 y／n，永不送永久授權的 a）；Ticket 可停止、續跑。**不替你啟動 orchestrator**：它沒在跑時按鈕要等約 8 秒才回報無回應 |
+| superagent | **開** | `status` 的內容（Ticket、等你回答的問題、outbox）；問題可按「允許一次」「拒絕」（只送 y／n，永不送永久授權的 a）；Ticket 可停止（只給 open／waiting 的）；「續跑」只給被 park 的（帶 note 的）Ticket，因為引擎的 `resume` 會把任何 Ticket 重開、包括人永久停止的。**不替你啟動 orchestrator**：它沒在跑時按鈕要等約 8 秒才回報無回應 |
 | personal kb | 關 | `kb status`、搜尋（只查 kb）、「問」（`kb ask`：先檢索，模型沒有工具；填了模型端點與名稱才出現）、最近的答案與「看」；被扣住（held）的答案可在確認看過來源後「放行」 |
 
 **為什麼轉接層在 `src/gui_layers/`、不在 `src/harness/`**：superagent 與 kb 各自的測試都要求 harness 資料夾不 import、也不執行它們。所以 `harness_gui.py` 只提供一個通用掛點（`register_extension`：開關、幾個設定、一個用資料描述的面板、幾個動作），完全不知道有哪些層；`src/gui_layers/launcher.py` 才把兩層註冊進去。用原本的 `python src/harness/harness_gui.py` 啟動時設定頁會寫明「沒有載入任何疊加層」與要改用的指令。刪掉 `src/gui_layers/`，GUI 跟以前一樣。
 
-**驗證**：`tests/test_gui_layers.py`（25 項）與 `tests/test_harness_gui.py::TestSessionActions`（11 項）；18 個突變全被抓（關掉的層仍回應、answer 送 `a`、圍欄固定三個反引號、複製沒改圖片路徑、刪除不結束行程／不刪圖／不刪標題檔／先刪標題檔／失敗後仍標成已刪、複製失敗留下圖片或對話、刪除後仍可重啟與寫回、kb 的 `--` 少了、未知設定被接受、複製後自動執行、設定沒記住、放行不再確認）。**第三方審查一次**（小o，唯讀、靜態；它沒執行測試）：確認 3 項 medium，我逐條核對後——(1) 刪除中途刪檔失敗時，session 已從記憶體移除、標題檔卻可能還在（或相反，留下列不出來的對話與圖片）→ **成立，已修**：標題檔改成最後才刪，失敗就維持 session 存在、可再刪；(2) 複製失敗（`copytree` 中途、寫標題檔失敗）會留下私人圖片與半份對話 → **成立，已修**：失敗時清掉新 session 的所有檔案，標題檔最後才寫；(3) 關閉開關與進行中請求的窗口 → 屬實，**維持並寫明限度**（見上）。小o 駁回的項目（新端點守衛、參數注入、`innerHTML`、檔名注入、圖片路徑改寫）我也看過原碼，同意。這兩項修復只有我自己的測試與突變驗證，沒有再送小o 複審。另外有一個測試用 AST 掃 `src/harness/` 確認沒有任何 import 或 `-m` 命令指向 superagent／kb／gui_layers。真實瀏覽器手動點過一輪（開關、複製、下載內容、刪除、兩個面板對真實的 `superagent status` 與 `kb search`，用的是暫存資料夾）。**沒驗證**：`kb ask` 與 superagent 的按鈕（answer／stop／resume）沒有對真實運作中的 orchestrator 或真模型跑過，只有假的命令執行器測試；瀏覽器下載成檔案這一步只驗到「產生了正確內容的 Blob」，沒看到檔案落到磁碟；kb 的 hosted provider（需要金鑰）不支援。
+**驗證**：`tests/test_gui_layers.py`（25 項）與 `tests/test_harness_gui.py::TestSessionActions`（11 項）；18 個突變全被抓（關掉的層仍回應、answer 送 `a`、圍欄固定三個反引號、複製沒改圖片路徑、刪除不結束行程／不刪圖／不刪標題檔／先刪標題檔／失敗後仍標成已刪、複製失敗留下圖片或對話、刪除後仍可重啟與寫回、kb 的 `--` 少了、未知設定被接受、複製後自動執行、設定沒記住、放行不再確認）。**第三方審查一次**（小o，唯讀、靜態；它沒執行測試）：確認 3 項 medium，我逐條核對後——(1) 刪除中途刪檔失敗時，session 已從記憶體移除、標題檔卻可能還在（或相反，留下列不出來的對話與圖片）→ **成立，已修**：標題檔改成最後才刪，失敗就維持 session 存在、可再刪；(2) 複製失敗（`copytree` 中途、寫標題檔失敗）會留下私人圖片與半份對話 → **成立，已修**：失敗時清掉新 session 的所有檔案，標題檔最後才寫；(3) 關閉開關與進行中請求的窗口 → 屬實，**維持並寫明限度**（見上）。小o 駁回的項目（新端點守衛、參數注入、`innerHTML`、檔名注入、圖片路徑改寫）我也看過原碼，同意。這兩項修復只有我自己的測試與突變驗證，沒有再送小o 複審。另外有一個測試用 AST 掃 `src/harness/` 確認沒有任何 import 或 `-m` 命令指向 superagent／kb／gui_layers。真實瀏覽器手動點過一輪（開關、複製、下載內容、刪除、兩個面板對真實的 `superagent status` 與 `kb search`，用的是暫存資料夾）。**第二輪驗證（2026-11-24，PR #40 合併後；真實 Chrome＋Selenium，每項單次）**：
+
+- **下載落盤**：headless Chrome 點「保存 .md／.json」，檔案真的落到下載資料夾（檔名 `標題_-id前六碼.副檔名`），內容與 API 匯出逐位元組相同（`.md` 只差一行匯出時間）。
+- **superagent 面板對運作中的 orchestrator**（真的引擎、真的 harness 子行程，**模型是腳本化的假模型**，不是真模型）：開三張 Ticket，各自的 harness 要求寫檔而停在等待核准；點「允許一次」→ 檔案真的被寫出；點「拒絕」→ 檔案沒有被寫；點「停止」→ 先跳確認、之後 Ticket 變 `stopped`、檔案沒被寫；13 項檢查全過，收尾 `down` 後沒有殘留行程。
+  - **抓到並修掉一個缺陷**：引擎的 `resume` 會把**任何** Ticket 重新打開，包括人「永久停止」的（文件寫 stopped＝不再收任何東西），而面板原本對每張 Ticket 都放「續跑」，等於一顆能撤銷停止的按鈕（點了回覆 `resumed`）。現在「停止」只給 open／waiting，「續跑」只給帶 note 的（被 park 的）Ticket。引擎本身的 `resume` 不檢查狀態是既有行為，我沒改。真正 park 的 Ticket 沒有在這次實測重現（要讓 executor 連死三次），這一條只有單元測試。
+- **`kb ask` 經 GUI 對真實模型端點**（合成資料：一段安全文字加一段植入的攻擊文字，沒有任何個人資料）：問「Zorvath Lantern 何時點亮」，答案取自安全段落並通過引文核對，攻擊段落被找到後列為「left out」、植入字串沒有出現在答案裡；因來源是貼上的、且有段落被排除，答案狀態是 `HELD`，面板列出它並可「看」，按「放行」先跳確認、之後紀錄顯示 released。第二個問題（第三天、黃昏）答對並引文通過。兩次問答各約 6 秒；端點與模型名稱只放在暫存設定檔（跑完已刪），輸出中以佔位符取代。**一個模型、兩個問題、lexical 檢索，是存在性檢查，不是準確率。**
+
+**仍沒驗證**：kb 的 hosted provider（需要金鑰）不支援；superagent 沒對真實模型跑過（只有腳本化模型，真模型的 superagent 端到端是另一個開關 `SUPERAGENT_LIVE=1`）；被 park 的 Ticket 上的「續跑」。
+

@@ -206,6 +206,23 @@ class TestSuperagentPanel(unittest.TestCase):
                          [("answer", {"ask_id": 7, "yes": True}), ("answer", {"ask_id": 7, "yes": False})])
         self.assertEqual(self.rec.calls[0][:4], ["-m", "superagent", "--home=H", "status"])
 
+    def test_a_button_is_offered_only_where_it_means_something(self):
+        """The engine's `resume` reopens any ticket, also one a person stopped 'for good'. A resume button
+        on a stopped ticket would be a button that undoes a stop (clicking it against a running
+        orchestrator showed exactly that), so resume exists only for a parked ticket and stop only
+        for one that can still be stopped."""
+        status = dict(self.STATUS, open_asks=[], tickets=[
+            {"id": 1, "state": "open", "thread": "a", "note": ""},
+            {"id": 2, "state": "waiting", "thread": "b", "note": ""},
+            {"id": 3, "state": "stopped", "thread": "c", "note": ""},
+            {"id": 4, "state": "ended", "thread": "d", "note": ""},
+            {"id": 5, "state": "open", "thread": "e", "note": "parked: the executor died 3 times"},
+            {"id": 6, "state": "stopped", "thread": "f", "note": "left over note"}])
+        layer = self.layer((0, json.dumps(status), ""))
+        items = [b for b in layer.panel({"home": "H"})["blocks"] if b["type"] == "list"][1]["items"]
+        offered = {int(i["text"].split()[0][1:]): [b["action"] for b in i["buttons"]] for i in items}
+        self.assertEqual(offered, {1: ["stop"], 2: ["stop"], 3: [], 4: [], 5: ["stop", "resume"], 6: []})
+
     def test_answering_sends_y_or_n_and_never_the_permanent_a(self):
         """A button must not be able to grant 'always allow' (the CLI refuses it, and so must this)."""
         layer = self.layer((0, "answered", ""))
