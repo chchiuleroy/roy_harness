@@ -23,8 +23,40 @@ input,select,textarea{background:var(--card);border:1px solid var(--line);border
 #newform{padding:8px 12px;display:grid;gap:6px;border-bottom:1px solid var(--line)}
 #newform .pair{display:flex;gap:6px}
 #list{overflow:auto;flex:1}
-.item{padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+.item{padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer;position:relative}
 .item:hover,.item.on{background:var(--card)}
+.item .acts{display:none;position:absolute;right:6px;top:4px;gap:2px;background:var(--card);border-radius:6px}
+.item:hover .acts,.item:focus-within .acts{display:flex}
+.acts button{padding:0 6px;border:0;background:transparent;font-size:13px}
+.acts button:hover{background:var(--panel)}
+#right .cmds.wide button{font-size:13px;padding:3px 10px}
+@media(hover:none){.item .acts{display:flex}}
+#foot{border-top:1px solid var(--line);padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px}
+#foot button.on{border-color:var(--accent);color:var(--accent)}
+#page{display:none;flex:1;overflow:auto;padding:16px 24px;min-width:0}
+body.paged #page{display:block}
+body.paged #body{display:none}
+#page h1{font-size:18px;margin:0 0 4px}
+#page .head{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+#page .head .sp{flex:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:10px 0;max-width:720px}
+.card .row{display:flex;gap:10px;align-items:center}
+.card .row .grow{flex:1;font-weight:600}
+.card p{margin:6px 0;color:var(--dim);font-size:13px}
+.field{display:grid;gap:2px;margin:8px 0}
+.field label{font-size:12px;color:var(--dim)}
+.switch{position:relative;display:inline-block;width:42px;height:24px;flex:none}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+.switch .slider{position:absolute;inset:0;background:var(--line);border-radius:12px;transition:background .15s}
+.switch .slider::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+.switch input:checked+.slider{background:var(--ok)}
+.switch input:checked+.slider::before{transform:translateX(18px)}
+.switch input:focus-visible+.slider{outline:2px solid var(--accent);outline-offset:2px}
+.panelrow{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line)}
+.panelrow span{overflow-wrap:anywhere}
+.panelform{display:flex;gap:8px;margin:8px 0;max-width:720px}
+#page pre.out{font:12.5px var(--mono);white-space:pre-wrap;word-break:break-word;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 10px;max-width:900px}
+.pnote{color:var(--dim);font-size:13px;margin:6px 0}
 .item .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item .s{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px}
@@ -109,6 +141,7 @@ table.st{font-size:12px;width:100%}table.st td:last-child{text-align:right;font-
   </div>
   <h2>所有 session</h2>
   <div id="list"></div>
+  <div id="foot"></div>
 </aside>
 <section id="main">
   <div id="alertbar" role="alert"></div>
@@ -121,6 +154,7 @@ table.st{font-size:12px;width:100%}table.st td:last-child{text-align:right;font-
     <div id="views"><div id="empty">在左邊建立或選一個 session</div></div>
     <aside id="right"></aside>
   </div>
+  <div id="page"></div>
 </section>
 <div id="backdrop"></div>
 <script nonce="__NONCE__" src="/md.js"></script>
@@ -188,6 +222,7 @@ async function refresh() {
   try {
     const j = await api("GET", "/api/sessions");
     LIST = j.sessions;
+    for (const sid of [...V.keys()]) if (!LIST.some((s) => s.id === sid)) closeTab(sid);   // deleted (here or in another window)
     for (const v of V.values()) if (v.parked && info(v.id).running) wake(v);     // resumed from another tab or the terminal
     if (!$("cwd").value) $("cwd").value = j.default_cwd;
     const dl = $("cwds"); dl.replaceChildren();
@@ -198,6 +233,15 @@ async function refresh() {
       const t = el("div", "t"); const d = el("span", "dot" + (s.waiting ? " wait" : s.running ? " run" : ""));
       t.append(d, s.title || "(新 session)");
       it.append(t, el("div", "s", s.cwd + " · " + s.mode + " · " + new Date(s.updated * 1000).toLocaleString()));
+      const acts = el("div", "acts");
+      for (const [icon, tip, fn] of [["⧉", "複製這個 session（含對話與圖片，不會自動執行）", () => copySession(s.id)],
+                                     ["⬇", "保存對話為 Markdown 檔", () => saveSession(s.id, "md")],
+                                     ["🗑", "刪除這個 session", () => deleteSession(s.id)]]) {
+        const b = el("button", "", icon); b.title = tip;
+        b.onclick = (e) => { e.stopPropagation(); fn(); };
+        acts.append(b);
+      }
+      it.append(acts);
       it.onclick = () => { openSession(s.id); document.body.classList.remove("show-side"); };
       box.append(it);
     }
@@ -210,7 +254,30 @@ $("create").onclick = async () => {
   try { const s = await api("POST", "/api/sessions", {cwd, mode: $("mode").value}); await refresh(); openSession(s.id); document.body.classList.remove("show-side"); }
   catch (e) { alert("建立失敗：" + e.message); }
 };
-$("navSide").onclick = () => { document.body.classList.toggle("show-side"); document.body.classList.remove("show-right"); };
+// ---- what the person can do with a whole session: copy it, keep it as a file, delete it
+async function copySession(sid) {
+  try { const s = await api("POST", `/api/sessions/${sid}/copy`, {}); await refresh(); openSession(s.id); document.body.classList.remove("show-side"); }
+  catch (e) { alert("複製失敗：" + e.message); }
+}
+async function saveSession(sid, fmt) {
+  try {
+    const r = await fetch(`/api/sessions/${sid}/export?format=${fmt}`, {headers: {"Authorization": "Bearer " + TOKEN}});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+    const url = URL.createObjectURL(await r.blob());
+    const name = (info(sid).title || "session").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40) + "-" + sid.slice(0, 6) + "." + fmt;
+    const a = el("a"); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (e) { alert("保存失敗：" + e.message); }
+}
+async function deleteSession(sid) {
+  const i = info(sid);
+  const name = i.title || "(新 session)";
+  if (!confirm(`刪除「${name}」？\n\n對話記錄與貼過的圖片會永久刪除，無法復原${i.running ? "；執行中的 harness 會先被結束" : ""}。\n專案資料夾裡的檔案不會動。\n（要留一份：先按「保存」。）`)) return;
+  try { await api("POST", `/api/sessions/${sid}/delete`, {}); }
+  catch (e) { alert("刪除失敗：" + e.message); return; }
+  if (V.has(sid)) closeTab(sid); else refresh();
+}
+$("navSide").onclick =() => { document.body.classList.toggle("show-side"); document.body.classList.remove("show-right"); };
 $("navRight").onclick = () => { document.body.classList.toggle("show-right"); document.body.classList.remove("show-side"); };
 $("backdrop").onclick = () => document.body.classList.remove("show-side", "show-right");
 
@@ -238,6 +305,7 @@ function closeTab(sid) {
   saveTabs(); renderTabs(); refresh();
 }
 function activate(sid) {
+  hidePage();
   ACTIVE = sid;
   const v = V.get(sid); if (v) v.unread = false;
   for (const [id, w] of V) w.root.classList.toggle("on", id === sid);
@@ -488,6 +556,7 @@ async function follow(v) {
       v.ctl = new AbortController();
       const r = await fetch(`/api/sessions/${v.id}/stream?from=${v.seq}`, {headers: {"Authorization": "Bearer " + TOKEN}, signal: v.ctl.signal});
       if (r.status === 401) { setConn("auth", true); throw new Error("401"); }
+      if (r.status === 404) { closeTab(v.id); return; }       // the session was deleted: nothing to follow
       if (!r.ok) throw new Error(String(r.status));
       setConn("auth", false); setConn("offline", false);
       const rd = r.body.getReader(); let buf = "";
@@ -536,6 +605,15 @@ function renderRight() {
     cmds.append(b);
   }
   p.append(cmds);
+  p.append(el("h3", "", "Session"));
+  const acts = el("div", "cmds wide");
+  for (const [label, tip, fn, cls] of [["複製", "複製這個 session（含對話與圖片，不會自動執行）", () => copySession(v.id), ""],
+                                       ["保存 .md", "下載成可讀的 Markdown", () => saveSession(v.id, "md"), ""],
+                                       ["保存 .json", "下載 harness 的完整對話檔", () => saveSession(v.id, "json"), ""],
+                                       ["刪除", "永久刪除這個 session", () => deleteSession(v.id), "danger"]]) {
+    const b = el("button", cls, label); b.title = tip; b.onclick = fn; acts.append(b);
+  }
+  p.append(acts);
   p.append(el("h3", "", "統計"));
   const tb = el("table", "st"), s = st && st.stats;
   if (s) for (const [k, n] of [["模型呼叫", s.model_calls], ["tokens in", s.tokens_in], ["tokens out", s.tokens_out], ["工具呼叫", s.tool_calls], ["工具錯誤", s.tool_errors], ["問過人", s.asked_human], ["壓縮", s.compactions]]) {
@@ -547,7 +625,109 @@ function renderRight() {
     p.append(b); }
 }
 
-restoreTabs(); setInterval(refresh, 5000);
+// ---- the settings page and the pages of the optional layers: one of them at a time replaces the chat area.
+// What the layers are and what they show comes from the server (a generic description), not from this page.
+let PAGE = null, PAGE_RUN = 0, LAYERS = [], HINT = "", LAST = {msg: "", result: ""};
+async function loadLayers() {
+  try { const j = await api("GET", "/api/settings"); LAYERS = j.layers; HINT = j.hint || ""; } catch (e) { /* the banner says why */ }
+  renderFoot();
+}
+function renderFoot() {
+  const foot = $("foot"); foot.replaceChildren();
+  const s = el("button", PAGE === "settings" ? "on" : "", "⚙ 設定"); s.title = "疊加層的開關與設定"; s.onclick = () => showPage("settings"); foot.append(s);
+  for (const l of LAYERS) if (l.enabled) {                       // a switched-off layer has no entrance
+    const b = el("button", PAGE === l.key ? "on" : "", l.title); b.onclick = () => showPage(l.key); foot.append(b);
+  }
+}
+function showPage(kind) {
+  PAGE = kind; LAST = {msg: "", result: ""};
+  document.body.classList.add("paged"); document.body.classList.remove("show-side");
+  renderFoot(); renderPage();
+}
+function hidePage() { if (!PAGE) return; PAGE = null; PAGE_RUN++; document.body.classList.remove("paged"); renderFoot(); }
+function pageHead(title, status) {
+  const head = el("div", "head"); head.append(el("h1", "", title));
+  if (status) head.append(el("span", "pnote", status));
+  head.append(el("span", "sp"));
+  const back = el("button", "", "← 回到對話"); back.onclick = hidePage; head.append(back);
+  return head;
+}
+async function renderPage() {
+  const run = ++PAGE_RUN, box = $("page");
+  if (PAGE === "settings") { await loadLayers(); if (run === PAGE_RUN && PAGE === "settings") renderSettings(box); return; }
+  const l = LAYERS.find((x) => x.key === PAGE && x.enabled);
+  if (!l) { showPage("settings"); return; }                      // switched off while it was open
+  let p;
+  try { p = await api("GET", `/api/layers/${l.key}/panel`); }
+  catch (e) { if (run === PAGE_RUN) box.replaceChildren(pageHead(l.title), el("pre", "out", "讀不到面板：" + e.message)); return; }
+  if (run === PAGE_RUN && PAGE === l.key) renderLayer(box, l, p);
+}
+function renderSettings(box) {
+  box.replaceChildren(pageHead("設定"));
+  box.append(el("div", "pnote", "這些是可選的疊加層。開關立刻生效並記在這台機器上（~/.roy_harness_gui/settings.json）；關掉的層，伺服器也不接受它的請求。"));
+  if (HINT) box.append(el("div", "pnote", HINT));
+  for (const l of LAYERS) {
+    const card = el("div", "card"), row = el("div", "row"), saved = el("span", "pnote");
+    row.append(el("span", "grow", l.title));
+    const sw = el("label", "switch"), cb = el("input"); cb.type = "checkbox"; cb.setAttribute("role", "switch");
+    cb.checked = l.enabled; cb.setAttribute("aria-label", l.title + " 開關");
+    sw.append(cb, el("span", "slider")); row.append(saved, sw);
+    cb.onchange = async () => {
+      try { await api("POST", "/api/settings", {layer: l.key, enabled: cb.checked}); saved.textContent = cb.checked ? "已開啟" : "已關閉"; }
+      catch (e) { cb.checked = !cb.checked; saved.textContent = ""; alert("儲存失敗：" + e.message); }
+      await loadLayers();
+    };
+    card.append(row, el("p", "", l.description), el("p", "", "預設：" + (l.default_enabled ? "開" : "關")));
+    for (const f of l.fields) {
+      const fd = el("div", "field"), inp = el("input"); inp.value = f.value; inp.placeholder = f.default || "";
+      fd.append(el("label", "", f.label + (f.hint ? "（" + f.hint + "）" : "")), inp);
+      inp.onchange = async () => {
+        try { await api("POST", "/api/settings", {layer: l.key, fields: {[f.key]: inp.value}}); saved.textContent = "已儲存"; }
+        catch (e) { saved.textContent = ""; alert("儲存失敗：" + e.message); }
+      };
+      card.append(fd);
+    }
+    box.append(card);
+  }
+}
+function renderLayer(box, l, p) {
+  box.replaceChildren(pageHead(p.title || l.title, p.status));
+  const msg = el("div", "pnote"), out = el("pre", "out");
+  const show = (m, result) => { LAST = {msg: m || "", result: result || ""}; msg.textContent = LAST.msg; out.textContent = LAST.result; out.style.display = LAST.result ? "block" : "none"; };
+  const act = async (action, args, slow) => {
+    show(slow ? "處理中…（可能要等幾分鐘）" : "處理中…", "");
+    try {
+      const r = await api("POST", `/api/layers/${l.key}/act`, {action, args});
+      show((r.ok === false ? "失敗：" : "") + (r.message || ""), r.result);
+      if (r.refresh && PAGE === l.key) { const q = await api("GET", `/api/layers/${l.key}/panel`); if (PAGE === l.key) renderLayer(box, l, q); }   // LAST carries the message over
+    } catch (e) { show("失敗：" + e.message, ""); }
+  };
+  const again = el("button", "", "↻ 重新整理"); again.onclick = () => renderPage(); box.firstChild.insertBefore(again, box.firstChild.lastChild);
+  for (const b of p.blocks || []) {
+    if (b.type === "text") box.append(el("div", "pnote", b.text));
+    else if (b.type === "pre") box.append(el("pre", "out", b.text));
+    else if (b.type === "list") {
+      for (const it of b.items || []) {
+        const row = el("div", "panelrow"), btns = el("div", "cmds"); row.append(el("span", "", it.text));
+        for (const x of it.buttons || []) {
+          const bt = el("button", x.action === "stop" ? "danger" : "", x.label);
+          bt.onclick = () => { if (x.confirm && !confirm(x.confirm)) return; act(x.action, x.args || {}); };
+          btns.append(bt);
+        }
+        row.append(btns); box.append(row);
+      }
+    } else if (b.type === "form") {
+      const f = el("div", "panelform"), inp = el("input"), go = el("button", "primary", b.submit || "送出");
+      inp.placeholder = b.placeholder || "";
+      const run = () => { if (inp.value.trim()) act(b.action, {text: inp.value}, b.slow); };
+      go.onclick = run; inp.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) run(); });
+      f.append(inp, go); box.append(f);
+    }
+  }
+  box.append(msg, out); show(LAST.msg, LAST.result);
+}
+
+renderFoot(); loadLayers(); restoreTabs(); setInterval(refresh, 5000);
 </script>
 </body>
 </html>

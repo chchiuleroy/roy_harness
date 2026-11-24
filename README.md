@@ -71,6 +71,7 @@ python -X utf8 src/harness/harness_vllm.py            # 互動；session 存成 
 python -X utf8 src/harness/harness_vllm.py my.json    # 指定 session 檔，再次執行同檔名即接續
 $env:HARNESS_MODE = "auto"; python -X utf8 src/harness/harness_vllm.py
 python src/harness/harness_gui.py                     # 網頁 GUI，見下
+python src/gui_layers/launcher.py                     # 同一個 GUI，另外載入 superagent／kb 的設定頁開關與面板
 ```
 
 Bash（Git Bash 等）：
@@ -252,6 +253,7 @@ src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）�
                harness_mcp.py、harness_skills.py、harness_notes.py（筆記與 MEMORY.md）、harness_dream.py（/dream）、
                harness_gui.py ＋ .html ＋ _md.js（GUI）
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
+src/gui_layers/ 把 superagent、kb 接成 GUI 設定頁開關與面板的轉接層（launcher.py 啟動）；harness 資料夾不認得它們
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
 docs/          詳細文件：harness 的細節（從 README 拆出，原文未改）、notes-and-dream.md、superagent.md、驗證與審查紀錄
