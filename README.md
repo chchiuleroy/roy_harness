@@ -1,23 +1,23 @@
 # roy_harness
 
-兩樣東西放在同一個 repo，彼此獨立：
+一個核心、兩個可選的疊加層，放在同一個 repo：
 
-- **harness**：一個給本機模型用的 coding agent 外殼。把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復、跨 session 的筆記與整理，以及一個網頁 GUI。
-- **superagent**：疊在 harness 之上、**可選也可整個拿掉**的編排層。讓外部事件自己開工單，交給獨立的 harness 子行程去做，把結果送回來，做完的工單閒置後自己結束、有人再發言就重開。
+- **harness（核心）**：一個給本機模型用的 coding agent 外殼。把 Isuru Wijesiri 的《Harness Engineering 101》玩具 agent 從 Anthropic 格式移植到 **OpenAI 相容端點**（vLLM／llama.cpp／SGLang／OpenAI／Anthropic 相容層），並補上玩具版沒有的部分：串流與重試、壓縮、背景任務與喚醒、權限分層、並行子 agent、Hook／MCP／Skill、圖片、崩潰恢復、跨 session 的筆記與整理，以及一個網頁 GUI。
+- **superagent（疊加層）**：讓外部事件自己開工單，交給獨立的 harness 子行程去做，把結果送回來。**它依賴 harness**（每張工單就是一個 harness 子行程），但 harness 不認得它：刪掉 `src/superagent/`，harness 與其測試的結果逐項不變，有測試驗證。
+- **GUI 疊加層面板（`src/gui_layers/`）**：把 superagent 與 **kb（個人知識庫）**接成網頁 GUI 設定頁裡的開關與面板。同樣，harness 不認得它。**kb 不在這個 repo**：repo 根目錄下的 `kb/`（面板找的是 `kb/src`）只存在作者本機、沒有推上來；沒有它時 kb 面板顯示「未安裝」，其他功能不受影響。
 
-> 這是教學／實驗用的程式，不是產品。harness 的 `shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。
+> 這是教學／實驗用的程式，不是產品。harness 的 `shell=True` 是刻意設計（它就是要讓模型執行指令），真正的控制在 `gate()` 與安全分層。**只在 Windows 11、對單一模型（作者的 vLLM 上的 Qwen3.6-35B-A3B）實測過**；其他 provider 只做了離線測試。測試用的 Python 是 3.13（CI 與作者機器），其他版本沒驗證。
 
 ## 先看哪裡
 
-| 我想… | 看這裡 |
-|---|---|
-| 快速了解這個專案的設計取向 | 〈特色〉 |
-| 在本機模型上跑一個 coding agent | 〈快速開始〉 |
-| 知道最近加了什麼 | 〈最近新增〉 |
-| 了解記憶：`AGENT.md`、`MEMORY.md`、筆記、`/dream` | 〈記憶：`AGENT.md`、`MEMORY.md` 與筆記〉、[docs/notes-and-dream.md](docs/notes-and-dream.md) |
-| 用網頁操作、貼圖給模型看 | 〈網頁 GUI 與圖片〉、[docs/images-and-gui.md](docs/images-and-gui.md) |
-| 讓外部事件自動開工單並回覆 | 〈疊加層：superagent〉、[docs/superagent.md](docs/superagent.md) |
-| 知道哪些東西實測過、哪些沒有 | 〈測試與驗證〉、〈已知限制〉 |
+| 我想… | 執行 | 看這裡 |
+|---|---|---|
+| 在終端機用本機模型跑一個 coding agent | `python -X utf8 src/harness/harness_vllm.py` | 〈快速開始〉 |
+| 用網頁操作（多 session、貼圖、核准卡片、複製／保存／刪除 session） | `python src/harness/harness_gui.py` | 〈網頁 GUI〉 |
+| 同一個網頁，**再載入**superagent／kb 兩個疊加層（設定頁出現它們的開關卡片與面板；用上一列的指令啟動時設定頁還在，但沒有任何層可開） | `python src/gui_layers/launcher.py` | 〈網頁 GUI〉 |
+| 讓外部事件自動開工單並回覆 | 在 `src/` 下 `python -X utf8 -m superagent …` | 〈疊加層：superagent〉 |
+| 知道哪些東西驗證過、哪些沒有 | | 〈測試與驗證〉、〈已知限制〉 |
+| 了解記憶（`AGENT.md`、`MEMORY.md`、筆記） | | 〈記憶〉、[docs/notes-and-dream.md](docs/notes-and-dream.md) |
 
 - 只用 Python 標準函式庫，零依賴；harness 主程式 [`src/harness/harness_vllm.py`](src/harness/harness_vllm.py)（約 2,200 行）。
 - 本 repo **只放我自己新增與修改的部分**，不轉載書稿（書的文字是 CC BY-NC-ND，不可改作）。上游：[IsuruMaduranga/harness-engineering-101](https://github.com/IsuruMaduranga/harness-engineering-101)。
@@ -27,9 +27,9 @@
 1. **確定性規則優先，模型只做判斷**。路徑保護、先讀再編輯、來源追蹤、引文逐字驗證都是程式碼，不是請模型自己小心；模型參與的地方（`auto` 分類器、`/dream`、superagent 的准入判斷）都沒有工具、只回 JSON；分類器的 ALLOW 與 `/dream` 的提案還必須附上程式能驗證的引文。
 2. **分層安全**。從「子 agent 不給手」到「檔案工具的寫入限制在專案根目錄」共五層，預設只問有風險的指令；Hook 只能否決、不能放行。**沒有 OS 級 sandbox**：shell 指令仍可讀寫專案外的檔案（見〈已知限制〉）。
 3. **記憶有信任模型**。人寫的 `AGENT.md` 當指令；模型寫的筆記永遠是**資料**，要附你原話的引文才會自動載入；目錄 `MEMORY.md` 由程式產生，手改無效。
-4. **可拔除的編排層**。刪掉 `src/superagent/`，harness 與其測試的結果逐項不變，有測試驗證。
+4. **可拔除的疊加層**。superagent 與 GUI 面板各自可以整個刪掉；harness 的原始碼不 import、也不執行它們（有測試掃描）。
 5. **崩潰可續、絕不重跑**。先寫再執行；重開時沒有結果的呼叫補 `INTERRUPTED`，不自動重做。
-6. **重要的測量與驗證數字會附上環境、次數與限度**。哪裡實測過、哪裡只有離線測試、哪裡沒量，盡量都寫在文字裡（純結構數字如行數、題型數不另附）；〈已知限制〉單獨成節；多輪第三方（小o，唯讀靜態）審查紀錄在 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
+6. **驗證分層標示**。CI、作者機器上的 live 測試、手動操作、沒驗證的東西分開寫（〈測試與驗證〉），多數量測數字附環境、次數與限度；〈已知限制〉單獨成節；多輪第三方（小o，唯讀靜態）審查紀錄在 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
 ## 功能一覽
 
@@ -43,7 +43,7 @@
 | 背景任務 | 任務結束、鬧鐘、監控條件成立會**自己啟動新回合**；`/tasks`、`/stop` | |
 | 崩潰恢復 | 先寫再執行；重開時沒有結果的呼叫補 `INTERRUPTED`，**絕不自動重跑** | [docs/validation-and-reviews.md](docs/validation-and-reviews.md) |
 | Hook／MCP／Skill | 確定性反射（只能否決）、MCP 客戶端（兩代協定）、按需載入的 skill | [docs/hooks-mcp-skills.md](docs/hooks-mcp-skills.md) |
-| 圖片與 GUI | `view_image`、網頁 GUI（含貼圖／上傳、背景任務面板、核准卡片） | [docs/images-and-gui.md](docs/images-and-gui.md) |
+| 圖片與網頁 GUI | `view_image`；多 session 分頁、核准卡片、背景任務面板、貼圖／上傳；session 的複製／保存／刪除；設定頁與疊加層面板 | 〈網頁 GUI〉、[docs/images-and-gui.md](docs/images-and-gui.md) |
 | 評測 | [`bench/`](bench/README.md)：12 個題型、確定性評分器、自我改進迴圈 | |
 | 事件編排 | superagent：事件 → 工單 → 做事 → 回覆 | [docs/superagent.md](docs/superagent.md) |
 
@@ -53,7 +53,8 @@
 
 | PR | 日期 | 內容 |
 |---|---|---|
-| #35、#36 | 2026-11-12 | **筆記與 `/dream`**：`remember`／`recall`、`.harness_notes/MEMORY.md` 目錄、`/notes`、`/dream`；**預設開啟**（`HARNESS_NOTES=0` 關閉）；superagent 工單與 bench 固定關閉 |
+| #39–#41 | 2026-11-19～24 | **CI**（GitHub Actions、Windows）與 main 分支保護；修 `superagent status` 的讀取競態；GUI **設定頁**（疊加層滑動開關）、superagent／kb 面板（`src/gui_layers/`）、**session 複製／保存／刪除**；修「續跑」鈕會撤銷停止的缺陷與一個偶發失敗的筆記測試 |
+| #35–#38 | 2026-11-12 | **筆記與 `/dream`**：`remember`／`recall`、`.harness_notes/MEMORY.md` 目錄、`/notes`、`/dream`；**預設開啟**（`HARNESS_NOTES=0` 關閉）；superagent 工單與 bench 固定關閉；README 重構與審查修正 |
 | #27–#34 | 2026-11-10～11 | `auto` 分類器補**來源追蹤**、同一回合的先前動作（R6）、寫檔內容檢查；修掉我自己引入的 `hosts_in()` ReDoS（30,000 字元的長單字 13.9 秒 → 3.6 毫秒）；IPv6 與 Unicode 網域；文件與測試校正 |
 | #7–#26 | 2026-11-03～06 | 以 **superagent** 疊加層為主（另含 harness 的 HTTP 529 重試 #19 與測試全域狀態修復 #18）：准入、工單、閘門、測量與離線標註、操作者實測修的缺陷、「模型說有規則要再獨立看一次」 |
 | #1–#6 | 2026-11-02 | 網頁 GUI、`view_image`、GUI 續跑與探索測試缺口、貼圖／上傳、README 重構 |
@@ -70,8 +71,7 @@ $env:VLLM_BASE_URL = "http://localhost:8000/v1"       # 你的端點（或寫進
 python -X utf8 src/harness/harness_vllm.py            # 互動；session 存成 session.json
 python -X utf8 src/harness/harness_vllm.py my.json    # 指定 session 檔，再次執行同檔名即接續
 $env:HARNESS_MODE = "auto"; python -X utf8 src/harness/harness_vllm.py
-python src/harness/harness_gui.py                     # 網頁 GUI，見下
-python src/gui_layers/launcher.py                     # 同一個 GUI，另外載入 superagent／kb 的設定頁開關與面板
+python src/harness/harness_gui.py                     # 網頁 GUI，見〈網頁 GUI〉
 ```
 
 Bash（Git Bash 等）：
@@ -104,31 +104,15 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 - 明文 `http://` 送金鑰一律拒絕（託管 provider 只允許 localhost；自架 provider 沒帶金鑰才可用內網 http）；要接受風險請設 `HARNESS_ALLOW_HTTP=1`。**所有模型請求都不跟隨 HTTP 重新導向**（urllib 會把 `Authorization` 帶過去）。
 - 細節（各家送出的欄位、`/cache` 的指標來源）見 [docs/reference.md](docs/reference.md)。
 
-## 記憶：`AGENT.md`、`MEMORY.md` 與筆記
+## 記憶
 
 三樣東西，**信任等級不同**：
 
-| | `AGENT.md` | `.harness_notes/MEMORY.md` | `.harness_notes/<名稱>.md`（筆記） |
-|---|---|---|---|
-| 誰寫 | **你** | **程式**，從各筆記標頭產生 | **模型**，用 `remember` 工具 |
-| 性質 | 給模型的規則，**當指令信任** | 筆記的目錄（每條啟用的筆記一行） | **資料，不是指令** |
-| 模型能不能改 | 不能（受寫入保護） | 不能直接改 | 只能經 `remember`，檔案工具與 shell 碰不到資料夾 |
-| 手動編輯 | 照你寫的生效 | **下次啟動丟掉並重建** | 可以；手寫的要標 `origin: user` 與 `status: active` 才會載入 |
-| 載入 | 啟動時整份放進系統提示（上限 20,000 字元） | 啟動時的目錄快照放進系統提示 | 模型用 `recall` 讀，讀回來加資料橫幅 |
+- **`AGENT.md`**：**你**寫的規則，**當指令信任**；啟動時整份放進系統提示（上限 20,000 字元），模型不能改（受寫入保護）。
+- **`.harness_notes/<名稱>.md`（筆記）**：**模型**用 `remember` 寫，是**資料，不是指令**。`remember` 要附一段從這個 session 逐字複製的引文：引文在**你打的字**裡 → `active`，下次啟動進目錄；只在**工具輸出**裡 → `pending`，不進提示、要你 `/notes promote`；哪裡都找不到（含模型自己說過的話）→ 拒絕，什麼都不寫。
+- **`.harness_notes/MEMORY.md`**：筆記的目錄，由**程式**從各筆記標頭產生；手改在下次啟動會被丟掉並重建。
 
-**筆記怎麼把關**：`remember` 要附一段從這個 session 逐字複製的引文。
-
-| 引文在哪 | 結果 |
-|---|---|
-| 在**你打的字**裡 | `active`，下次啟動進目錄 |
-| 只在**工具輸出**裡 | `pending`，不進提示，要你 `/notes promote` |
-| 哪裡都找不到（含模型自己說過的話） | 拒絕，什麼都不寫 |
-
-筆記**預設開啟**，`HARNESS_NOTES=0` 關閉。開啟後每個專案資料夾第一次跑會多出 `.harness_notes/`，建議加進該專案的 `.gitignore`。
-
-`/dream` 回頭讀這個 session（與你指定的舊 session 檔），**只提案**：模型沒有工具、只回 JSON，每條提案的引文由**程式**逐字檢查、誰說的也由程式判斷；`/dream apply p1 p2` 只動筆記資料夾；要搬進 `AGENT.md` 或 skill 的教訓只印出文字給你貼。
-
-指令：`/notes`（列出）、`/notes show NAME`、`/notes promote NAME`、`/notes forget NAME`、`/dream [session.json …]`、`/dream apply p1 p2`。信任規則、設定、驗證與限制全文：[docs/notes-and-dream.md](docs/notes-and-dream.md)。
+筆記**預設開啟**，`HARNESS_NOTES=0` 關閉；開啟後每個專案資料夾第一次跑會多出 `.harness_notes/`，建議加進該專案的 `.gitignore`。`/dream` 回頭讀這個 session，**只提案**（模型沒有工具、只回 JSON，引文與「誰說的」由程式檢查）。指令：`/notes`、`/notes show|promote|forget NAME`、`/dream [session.json …]`、`/dream apply p1 p2`。信任規則、設定、驗證與限制全文：[docs/notes-and-dream.md](docs/notes-and-dream.md)。
 
 ## 安全分層
 
@@ -152,16 +136,22 @@ VLLM_MODEL=Qwen/Qwen3.6-35B-A3B
 | `HARNESS_DEBUG` | 無 | 設任意值就把每次請求存到 `debug/`（圖片 base64 會遮掉） |
 | `HARNESS_SANDBOX` | 無 | JSON 陣列，作為指令前綴（**未實測**） |
 | `HARNESS_CLASSIFIER_MODEL` | 無（用主模型） | 讓 `auto` 分類器改問另一個模型；同一個伺服器與金鑰，所以那個模型要由同一個端點供應。**只做了離線測試，沒有對第二個真實模型跑過** |
+| `HARNESS_GUI_HOME` | `~/.roy_harness_gui` | GUI 存 session 與設定的資料夾 |
 
 完整清單與統計欄位（`/stats`）見 [docs/reference.md](docs/reference.md)。
 
-## 網頁 GUI 與圖片
+## 網頁 GUI
 
 ```bash
-python src/harness/harness_gui.py     # 印出帶 token 的網址並開瀏覽器；--port（預設 8791）、--no-browser
+python src/harness/harness_gui.py     # 核心 GUI：印出帶 token 的網址並開瀏覽器；--port（預設 8791）、--no-browser
+python src/gui_layers/launcher.py     # 同一個 GUI，另外載入疊加層（superagent／kb）；參數相同
 ```
 
-多個 session 分頁與續跑、核准卡片、背景任務面板、模式切換，可以貼上或拖進圖片。每個 session 是一個子行程 `harness_vllm.py --jsonl`；只綁 `127.0.0.1`，每次啟動隨機 token、檢查 `Host`／`Origin`、CSP。**token 外洩等於交出執行權**，重啟伺服器才換新。架構、限制與測試過程見 [docs/images-and-gui.md](docs/images-and-gui.md)。
+- **核心功能**（兩種啟動方式都有）：多個 session 分頁與續跑、核准卡片、背景任務面板、模式切換，可以貼上或拖進圖片。每個 session 是一個子行程 `harness_vllm.py --jsonl`。
+- **session 的複製、保存、刪除**（右側面板，或左側列表每一列滑過時的圖示）：複製＝同一段對話與圖片的新 session，**不會自動執行**；保存＝下載 `.md`（給人讀）或 `.json`（harness 的完整對話檔）；刪除＝先確認，再結束它的 harness 並**永久**刪掉對話、標題與貼過的圖片（沒有垃圾桶，不動專案資料夾）。
+- **設定頁**（左下角「⚙ 設定」）：每個疊加層一張卡片、一個滑動開關，加上它自己的幾個文字設定；記在 `~/.roy_harness_gui/settings.json`。**superagent 預設開、kb 預設關。** 關掉的層，伺服器對它的請求回 409，不只是把按鈕藏起來（已經開始的動作不會被中斷）。開著的層在左下角有入口。用 `harness_gui.py` 啟動時設定頁會寫明沒有載入任何疊加層。
+- **superagent 面板**：顯示工單、等你回答的問題、outbox；問題可按「允許一次」「拒絕」，工單可「停止」，被擱置的才能「續跑」。它**不會替你啟動 orchestrator**。**kb 面板**：搜尋、「問」（先檢索再問模型，模型沒有工具；會把檢索到的段落送到你填的模型端點）、看與放行被扣住的答案；沒有 `kb/src` 時顯示「未安裝」。
+- 只綁 `127.0.0.1`，每次啟動隨機 token、檢查 `Host`／`Origin`、CSP。**token 外洩等於交出執行權**，重啟伺服器才換新。架構、限制與測試過程見 [docs/images-and-gui.md](docs/images-and-gui.md)。
 
 `view_image(path)` 讓模型看圖：session 只存參照（不存位元組），組請求時才讀檔並驗 sha256，只送最近 3 張；從檔頭判斷格式，上限 5 MB、總像素數不超過 3840×2160（寬×高的乘積，不是各邊各自的上限）。預設只對 `vllm` 開；託管的第三方 provider 每張圖都會問你。
 
@@ -175,8 +165,8 @@ inbox/*.json ─► 准入（確定性）─► Ticket：一個目錄＋一個 s
                   └─ 不是明確請求、但可能屬於某條主動規則 → 可選：交給一個「沒有任何工具」的模型判斷
 ```
 
-- **只經三條線碰 harness**：子行程 `harness_vllm.py --jsonl`、每張 Ticket 目錄裡的 hook 設定、自己組的受控環境。`src/harness/` 不 import 它；刪掉 `src/superagent/`，harness 與其測試的結果逐項不變（有測試驗證）。
-- **權限不放大**：Executor 固定 `safe` 模式，寫檔與指令都要人答 `y`（`python -X utf8 -m superagent --home <資料夾> answer <ask_id> y|n`，永不送會變成永久授權的 `a`）；外部文字永遠先包框；hook 把 `read_file`／`write_file`／`edit_file` 限在 Ticket 目錄，並否決 `agent`／`skill`／MCP 等工具（shell 指令不限路徑，靠人答 `y` 把關）；**筆記固定關閉**（`HARNESS_NOTES=0`），工單處理外部文字、沒人看著，不該留下筆記。
+- **只經三條線碰 harness**：子行程 `harness_vllm.py --jsonl`、每張 Ticket 目錄裡的 hook 設定、自己組的受控環境。
+- **權限不放大**：Executor 固定 `safe` 模式，寫檔與指令都要人答 `y`（永不送會變成永久授權的 `a`）；外部文字永遠先包框；hook 把 `read_file`／`write_file`／`edit_file` 限在 Ticket 目錄，並否決 `agent`／`skill`／MCP 等工具（shell 指令不限路徑，靠人答 `y` 把關）；**筆記固定關閉**（`HARNESS_NOTES=0`），工單處理外部文字、沒人看著，不該留下筆記。
 - **准入判斷用的模型只在「推斷候選」時出現**（`--assessor model`，預設關；預設 `observe` 只記「本來會接受」，不開工單；模型第一次說符合規則時，還要由全新的 session 再獨立判斷一次、兩次同規則才算，見 `docs/superagent.md`），且它沒有工具、只回一個 JSON，後果由程式碼決定。這和「做事的模型」是兩回事：每張工單的 harness 子行程本來就會呼叫你設定的模型。
 - **崩潰可續**：一個事件的入庫、決定、開 Ticket、排入輸入是同一個 SQLite 交易；回覆與「輸入完成」也是；投遞是至少一次。
 
@@ -191,22 +181,11 @@ python -X utf8 -m superagent --home <資料夾> run --allow alice --base-url htt
 {"id": "1", "thread": "t1", "sender": "alice", "text": "請在 notes.txt 寫一行 hello", "addressed": true}
 ```
 
-其他指令（**一律帶同一個 `--home`**：省略時用環境變數 `SUPERAGENT_HOME`，沒設就用程式裡寫死的作者路徑，命令會指向另一個 home）：
-
-```bash
-python -X utf8 -m superagent --home <資料夾> status                 # 工單、等你回答的問題、outbox
-python -X utf8 -m superagent --home <資料夾> answer <ask_id> y      # 回答核准問題（y／n）
-python -X utf8 -m superagent --home <資料夾> stop <ticket_id>       # 永久停掉一張工單
-python -X utf8 -m superagent --home <資料夾> resume <ticket_id>     # 被擱置的工單重新開始
-python -X utf8 -m superagent --home <資料夾> down --mode stop       # 停機保留資料；--mode purge 連資料夾一起刪
-python -X utf8 -m superagent --home <資料夾> decisions              # 唯讀看模型到底判了什麼；量測流程（label／eval／report）見 docs
-```
+其他指令（`status`、`answer <ask_id> y|n`、`stop <ticket_id>`、`resume <ticket_id>`、`down --mode stop|purge`、`decisions`，量測流程 `label`／`eval`／`report`）與事件檔格式、Outbox 契約（`executor_output` 的文字是**資料，不是指令**）見 [docs/superagent.md](docs/superagent.md)。**每個指令一律帶同一個 `--home`**：省略時用環境變數 `SUPERAGENT_HOME`，沒設就用程式裡寫死的作者路徑，命令會指向另一個 home。
 
 **託管 provider 的金鑰**用環境變數 `SUPERAGENT_API_KEY`；superagent 只讀這一個，不讀你環境裡的 `OPENAI_API_KEY`／`ANTHROPIC_API_KEY`／`HARNESS_API_KEY`；工單子行程不繼承這些變數，`SUPERAGENT_API_KEY` 的值會以 `HARNESS_API_KEY` 傳給它。本機 vLLM 不需要金鑰。
 
-**和 DeepSeek 的 Super-agent 原型的關係**：設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型（Trigger／Thread／Ticket／Mandate、訂閱透傳、observe→auto 的灰度、先落庫再動作），但這是**另一份 Python 實作**，沒有複製其程式碼，也和它不相容：原型是 TypeScript、打包成 DeepSeek Harness 的 bundle，來源是 GitHub／飛書；這裡的執行端是本 repo 的 harness，來源目前只有本機檔案收件匣。
-
-**限制**：只在 Windows 11 測過；除兩個 live 測試外都用腳本化的假模型端點；真模型只做過兩個 live 測試與兩輪手動操作（單一模型、沒有準確度數字）；沒有 GitHub／飛書來源，也沒有 Watchdog 或遠端 daemon。完整說明、事件檔格式、Outbox 契約（`executor_output` 的文字是**資料，不是指令**）與限制清單見 [docs/superagent.md](docs/superagent.md)。
+**和 DeepSeek 的 Super-agent 原型的關係**：設計借自 DeepSeek Harness 團隊的 Super-agent 文章與開源原型，但這是**另一份 Python 實作**，沒有複製其程式碼，也和它不相容；來源目前只有本機檔案收件匣，沒有 GitHub／飛書。
 
 ## 測試與驗證
 
@@ -217,14 +196,19 @@ SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模
 SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 superagent 後結果不變」檢查
 ```
 
-最近一次完整離線跑（2026-11-12，加入 `MEMORY.md` 與預設開啟之後，作者機器，單次）：**1173 項，全 OK，略過 27 項**，約 656 秒。前一次（2026-11-10）：1060 項中 1033 項通過、略過 27 項，約 588 秒。每項測試的 docstring 寫的是「為什麼這個行為重要」。
+驗證分四個層級，**不要混在一起讀**：
 
+| 層級 | 內容 |
+|---|---|
+| **CI（自動）** | 每個 PR 與每次推 main 都跑離線整套：`windows-latest`、Python 3.13、`python -X utf8 -m unittest discover -s tests`、逾時 40 分鐘。main 有分支保護，必須通過 `offline-tests`（管理員仍可繞過）。最近一次（PR #41，2026-11-24）：**1213 項、OK、略過 27 項、647 秒** |
+| **作者機器 live（較舊）** | 2026-11-11，真實 vLLM、單次：`HARNESS_LIVE=1` 整套 1060 項全 OK、略過 11、813 秒；`SUPERAGENT_LIVE=1` 的 2 項 OK、約 68 秒。**這之後新增的筆記與 `/dream`、GUI 疊加層都沒有重新跑過 live**（筆記與 `/dream` 真模型只手動跑過 2 次，單一模型，沒量過模型主動存筆記的頻率與 `/dream` 準確度） |
+| **手動瀏覽器（真實 Chrome＋Selenium，單次，腳本沒進 repo）** | 2026-11-24：GUI 設定頁與 session 複製／保存／刪除端到端 25 項檢查；superagent 面板對運作中的 orchestrator（**腳本化假模型**，不是真模型）13 項；kb 面板的「問」對真實模型端點（合成資料）13 項，兩個問題、一個模型、lexical 檢索，是存在性檢查，不是準確率 |
+| **沒驗證** | superagent 對真模型的端到端（新功能之後）；真正被擱置（parked）的工單上的「續跑」鈕（只有單元測試）；kb 搭配需要金鑰的 hosted provider（面板不支援）；POSIX；GUI 沒有放進 repo 的自動化瀏覽器測試 |
+
+- **CI 的偶發失敗**：兩個都是時間相關的測試。筆記測試（機制已在作者機器重現：Windows 檔案時間戳可能比剛取的 `time.time()` 還早，零間隔下 600 次寫入有 444 次；**那次 CI 失敗是否就是這個機制，是推測**，沒有 runner 上的時序紀錄；PR #41 已改成明確設定修改時間）；`test_superagent_replay` 的一個 chunk 逾時測試（2 秒逾時，2026-11-24 在 #40 合併後的 main 失敗一次、之後一次綠，**尚未修**）。**單次綠燈不等於穩定。**
 - **略過的 27 項**：需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。
-- **突變驗證**：筆記與 `/dream` 的規則被一個一個弄壞（67 個），測試全部抓到（腳本沒進 repo）。
-- **移除檢查**（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）：2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒；2026-11-11 再跑一次（`discover -s tests -p test_superagent_cli.py`），`test_suite_identical_without_superagent` 通過、該檔 17 項 OK，約 921 秒。
-- **live 測試**：2026-11-11（作者機器，真實 vLLM，單次）以 `HARNESS_LIVE=1` 整套一次 `discover` 跑過：**1060 項、全 OK、略過 11、0 失敗，813 秒**；逐檔跑與之一致（累計約 930 秒）；另以 `SUPERAGENT_LIVE=1` 跑 `test_superagent_live.py` 的 2 項（真模型判斷、整個工單迴圈），OK、約 68 秒。**這之後新增的筆記與 `/dream`，真模型只手動跑過 2 次**（單一模型；沒量過模型主動存筆記的頻率與 `/dream` 準確度）。
-- superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。
-- 實測與多輪第三方（小o，唯讀靜態）審查紀錄見 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
+- 每項測試的 docstring 寫的是「為什麼這個行為重要」；筆記與 `/dream`、GUI 這批新程式碼另做過突變驗證（把規則一個一個弄壞，測試要抓到；腳本沒進 repo）。
+- 較早的整套離線跑、移除檢查、live 紀錄與多輪第三方（小o，唯讀靜態）審查紀錄都在 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
 
 ## 已知限制
 
@@ -237,12 +221,17 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 - **`auto` 分類器新增的三項檢查（來源追蹤、先前動作、寫檔內容）證據很薄**：來源追蹤只看主機、不看路徑，拆字串／環境變數／編碼可繞過，也會讓工具輸出裡出現過的名稱（如 `socket.io`）之後被提到時多問一次人；鏈偵測只量過 9 個我自己寫的案例；`edit_file` 的分類器看不到檔案其餘部分；`HARNESS_CLASSIFIER_MODEL` 沒有對第二個真實模型驗證。完整清單見 [docs/reference.md](docs/reference.md) 的〈已知限制〉。
 - 除了 `vllm`，其他 provider 只做了離線測試；模型回應與 `/cache` 的回應沒有大小上限。
 - 白名單與風險字串偏 Windows／cmd；沒有在 POSIX 實跑過。
-- GUI：同一個瀏覽器開 6 個以上「執行中」的 session 會用光連線；「停止」是強制結束、不能只中斷一輪。
+
+**GUI**
+
+- 同一個瀏覽器開 6 個以上「執行中」的 session 會用光連線；「停止」是強制結束、不能只中斷一輪。
+- session 的刪除是永久的（沒有垃圾桶）；疊加層的開關只管「之後的請求」，已經開始的動作（例如一個還沒回來的 `kb ask`）會跑完。
+- kb 不在這個 repo：kb 面板只有作者本機驗證過。
 
 **superagent**
 
 - Ticket 的行程仍以你的 OS 帳號執行，`safe` 模式靠人答 `y` 把關，不是隔離。
-- 只在 Windows 11 測過；真模型端到端只有兩個 live 測試與兩輪手動操作（單一模型）；來源只有本機收件匣。其餘見上一節與 [docs/superagent.md](docs/superagent.md)。
+- 只在 Windows 11 測過；真模型端到端只有兩個 live 測試與兩輪手動操作（單一模型）；來源只有本機收件匣。其餘見 [docs/superagent.md](docs/superagent.md)。
 
 完整清單見 [docs/reference.md](docs/reference.md)。
 
@@ -251,12 +240,14 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 ```
 src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）、harness_origin.py（主機來源追蹤）、harness_hooks.py、
                harness_mcp.py、harness_skills.py、harness_notes.py（筆記與 MEMORY.md）、harness_dream.py（/dream）、
-               harness_gui.py ＋ .html ＋ _md.js（GUI）
+               harness_gui.py ＋ .html ＋ _md.js（GUI；只有通用的疊加層掛點，不認得任何一層）
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
 src/gui_layers/ 把 superagent、kb 接成 GUI 設定頁開關與面板的轉接層（launcher.py 啟動）；harness 資料夾不認得它們
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
 bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
 docs/          詳細文件：harness 的細節（從 README 拆出，原文未改）、notes-and-dream.md、superagent.md、驗證與審查紀錄
+.github/       CI（workflows/ci.yml）
+kb/（不在 repo） 個人知識庫，只在作者本機；GUI 的 kb 面板在它存在時才有內容
 ```
 
 ## 出處與授權
