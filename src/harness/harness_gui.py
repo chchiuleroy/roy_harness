@@ -25,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -110,10 +111,62 @@ def messages_to_events(messages):
                         "text": content[:CLIP], "history": True})
     return out
 
+def fence(text):
+    """A code fence longer than any run of backticks inside `text`, so a tool result that itself
+    contains ``` cannot end the block early."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+def _retry(action, path):
+    """Windows holds a file for a moment after its process ends (and virus scanners a little longer)."""
+    for attempt in range(10):
+        try:
+            action(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            if attempt == 9:
+                raise RuntimeError(f"could not remove {path}: {e}")
+            time.sleep(0.2)
+
+def remove_file(path):
+    _retry(os.remove, path)
+
+def remove_tree(path):
+    _retry(shutil.rmtree, path)
+
+def events_to_markdown(title, cwd, mode, events):
+    """A readable copy of a conversation (what the person keeps). Everything is quoted as text:
+    tool output goes in a fence that cannot be closed from inside."""
+    out = [f"# {title or '(未命名 session)'}", "", f"- 專案資料夾：`{cwd}`", f"- 模式：{mode}",
+           f"- 匯出時間：{time.strftime('%Y-%m-%d %H:%M:%S')}", ""]
+    for ev in events:
+        kind, text = ev.get("kind"), str(ev.get("text") or "")
+        if kind == "user":
+            out += ["## 你", "", text, ""]
+        elif kind == "assistant":
+            out += ["## 助理", "", text, ""]
+        elif kind == "tool_call":
+            body = f"{ev.get('name')}({ev.get('args', '')})"
+            f = fence(body)
+            out += ["**工具呼叫**", "", f + "text", body, f, ""]
+        elif kind == "tool_result":
+            f = fence(text)
+            out += ["**工具結果**", "", f + "text", text, f, ""]
+        elif kind == "image":
+            out += [f"（附圖：{ev.get('name')}）", ""]
+        elif kind == "summary":
+            out += ["> （對話曾被壓縮，以下摘要取代前面的內容）", ""] + ["> " + l for l in text.splitlines()] + [""]
+        elif kind == "notice":
+            out += [f"（harness 通知：{text[:200]}）", ""]
+    return "\n".join(out) + "\n"
+
 class Session:
     def __init__(self, sid, cwd, mode="normal", title="", created=None):
         self.id, self.cwd, self.mode, self.title = sid, cwd, mode, title
         self.created = created or time.time()
+        self.deleted = False                 # set by Registry.delete: nothing may write this session's files again
         self.cond = threading.Condition()
         self.events, self.base = [], 0
         self.pending = {}                    # rid -> the ask event still waiting for an answer
@@ -145,6 +198,8 @@ class Session:
             self.cond.notify_all()
 
     def save_meta(self):
+        if self.deleted:                     # a late title update must not bring a deleted session back
+            return
         os.makedirs(SESSIONS, exist_ok=True)
         tmp = self.meta_file + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -163,7 +218,7 @@ class Session:
 
     def start(self):
         with self.start_lock:
-            if self.running:
+            if self.running or self.deleted:
                 return
             env = dict(os.environ, HARNESS_MODE=self.mode, PYTHONIOENCODING="utf-8")
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -230,6 +285,8 @@ class Session:
     def keep_picture(self, name, data):
         """Store an uploaded picture under its own hash, next to the session and outside every
         project (the model's write_file cannot reach it). -> {"id", "name", "bytes"}."""
+        if self.deleted:
+            raise ValueError("this session was deleted")
         kind = picture_kind(data)
         if kind is None:
             raise ValueError("not a PNG, JPEG, GIF or WebP picture")
@@ -309,6 +366,31 @@ class Session:
         if self.running:
             harness_hooks.kill_tree(self.proc)
 
+    def read_messages(self):
+        """The harness' session file as a list; [] when it has not written one yet (nothing was said).
+        ValueError when it exists but cannot be read. The harness replaces the file in one step, so
+        what is read here is always a whole checkpoint, also while the session runs."""
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            raise ValueError(f"cannot read the session file: {e}")
+        if not isinstance(data, list):
+            raise ValueError("the session file is not a conversation")
+        return data
+
+    def export(self, fmt):
+        """(bytes, content type, file extension) of the conversation, for the person to keep."""
+        messages = self.read_messages()
+        if fmt == "json":                    # the harness' own file: everything, and loadable again
+            return json.dumps(messages, indent=1, ensure_ascii=False).encode("utf-8"), "application/json", "json"
+        if fmt == "md":                      # for reading: long tool output is cut like on the screen
+            text = events_to_markdown(self.title, self.cwd, self.mode, messages_to_events(messages))
+            return text.encode("utf-8"), "text/markdown", "md"
+        raise ValueError("format must be json or md")
+
 class Registry:
     def __init__(self):
         self.lock = threading.Lock()
@@ -345,6 +427,77 @@ class Registry:
             self.live[sid] = s
             return s
 
+    def copy(self, sid):
+        """A new session that starts from the same conversation: same folder and mode, its own
+        files. It is not started (the person decides when it runs). The pictures are copied and the
+        references inside the conversation point at the copy, so deleting either session leaves the
+        other one whole."""
+        src = self.get(sid)
+        if not src:
+            return None
+        messages = src.read_messages()
+        new = Session(secrets.token_hex(6), src.cwd, src.mode, (src.title + " (副本)") if src.title else "")
+        try:
+            if os.path.isdir(src.images_dir):
+                shutil.copytree(src.images_dir, new.images_dir)
+                old_dir = os.path.normcase(os.path.abspath(src.images_dir))
+                for m in messages:
+                    for p in (m.get("content") if isinstance(m, dict) and isinstance(m.get("content"), list) else []):
+                        if isinstance(p, dict) and p.get("type") == "image_ref" and isinstance(p.get("path"), str) \
+                                and os.path.normcase(os.path.dirname(os.path.abspath(p["path"]))) == old_dir:
+                            p["path"] = os.path.join(new.images_dir, os.path.basename(p["path"]))
+            if messages:
+                tmp = new.file + ".tmp"
+                os.makedirs(SESSIONS, exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(messages, f, indent=1, ensure_ascii=False)
+                os.replace(tmp, new.file)
+            new.save_meta()                  # last: a session exists for the list only once everything else is there
+        except Exception:                    # a failed copy leaves nothing behind (private pictures, half a conversation)
+            for path in (new.meta_file, new.meta_file + ".tmp", new.file, new.file + ".tmp"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            shutil.rmtree(new.images_dir, ignore_errors=True)
+            raise
+        for ev in messages_to_events(messages):
+            new.add(ev)
+        with self.lock:
+            self.live[new.id] = new
+        return new
+
+    def delete(self, sid):
+        """Stop the session, then remove everything of it that the GUI keeps (conversation, title,
+        pictures). False when there is no such session; RuntimeError when it would not stop.
+        Not touched: the project folder, and what the harness keeps per project (notes, permissions)."""
+        s = self.get(sid)
+        if not s:
+            return False
+        with s.start_lock:                   # a resume that is starting right now finishes first, or sees `deleted`
+            s.deleted = True
+            s.stop()
+            proc = s.proc
+        if proc is not None:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                s.deleted = False
+                raise RuntimeError("the harness did not stop")
+        # The title file goes LAST: it is what makes the session exist for the list and for a restarted
+        # server. If a file is locked and a removal fails, the session is still there and whole enough to
+        # try again (and to resume), instead of vanishing from the page while its files stay on disk.
+        try:
+            remove_tree(s.images_dir)
+            for path in (s.file + ".tmp", s.file, s.meta_file + ".tmp", s.meta_file):
+                remove_file(path)
+        except RuntimeError:
+            s.deleted = False
+            raise
+        with self.lock:
+            self.live.pop(sid, None)
+        return True
+
     def listing(self):
         found = {}
         if os.path.isdir(SESSIONS):
@@ -368,6 +521,99 @@ class Registry:
             s.stop()
 
 REGISTRY = Registry()
+
+# ---------------------------------------------------------------- optional layers (a generic hook)
+# The GUI knows nothing about which layers exist. Whoever starts it may register objects like this:
+#
+#     key, title, description        what the settings page shows
+#     default_enabled                the switch before the person has touched it
+#     fields                         [{"key", "label", "default", "hint"}]: text settings kept with the switch
+#     panel(values) -> dict          {"title", "status", "blocks": [...]} (blocks: text, pre, list, form)
+#     act(values, action, args)      -> {"ok", "message", "result"?, "refresh"?}; ValueError = a bad request
+#
+# `values` is the field values as the person set them. A switched-off layer is refused here, on the
+# server, not just hidden by the page.
+EXTENSIONS = {}
+FIELD_MAX = 500
+LAUNCHER_HINT = "沒有任何可選的疊加層被載入。要用 superagent／kb 的開關，請改用：python src/gui_layers/launcher.py"
+_settings_lock = threading.Lock()
+
+def register_extension(ext):
+    EXTENSIONS[ext.key] = ext
+
+def settings_path():
+    return os.path.join(HOME, "settings.json")
+
+def load_settings():
+    try:
+        with open(settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+def layer_settings(ext, saved=None):
+    """-> (enabled, {field key: value}): what the person set, else the layer's own defaults."""
+    saved = (saved if saved is not None else load_settings()).get("layers", {})
+    mine = saved.get(ext.key) if isinstance(saved, dict) and isinstance(saved.get(ext.key), dict) else {}
+    enabled = mine["enabled"] if isinstance(mine.get("enabled"), bool) else bool(ext.default_enabled)
+    stored = mine.get("fields") if isinstance(mine.get("fields"), dict) else {}
+    values = {f["key"]: stored[f["key"]] if isinstance(stored.get(f["key"]), str) else f.get("default", "")
+              for f in ext.fields}
+    return enabled, values
+
+def layers_view():
+    saved = load_settings()
+    out = []
+    for ext in EXTENSIONS.values():
+        enabled, values = layer_settings(ext, saved)
+        out.append({"key": ext.key, "title": ext.title, "description": ext.description,
+                    "enabled": enabled, "default_enabled": bool(ext.default_enabled),
+                    "fields": [dict(f, value=values[f["key"]]) for f in ext.fields]})
+    return out
+
+def update_layer(body):
+    """One change from the settings page: {"layer", "enabled"?, "fields"?: {key: text}}. ValueError if it is not valid."""
+    key = body.get("layer")
+    ext = EXTENSIONS.get(key) if isinstance(key, str) else None
+    if ext is None:
+        raise ValueError("no such layer")
+    enabled, fields = body.get("enabled"), body.get("fields")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("enabled must be true or false")
+    if fields is not None:
+        known = {f["key"] for f in ext.fields}
+        if not isinstance(fields, dict) or set(fields) - known:
+            raise ValueError("unknown setting")
+        for v in fields.values():
+            if not isinstance(v, str) or len(v) > FIELD_MAX or "\x00" in v:
+                raise ValueError(f"a setting must be text of at most {FIELD_MAX} characters")
+    with _settings_lock:                     # read-modify-write: two quick changes must not lose one
+        data = load_settings()
+        layers = data.setdefault("layers", {})
+        if not isinstance(layers, dict):
+            layers = data["layers"] = {}
+        mine = layers.setdefault(ext.key, {})
+        if enabled is not None:
+            mine["enabled"] = enabled
+        if fields:
+            mine["fields"] = dict(mine.get("fields") if isinstance(mine.get("fields"), dict) else {}, **fields)
+        os.makedirs(HOME, exist_ok=True)
+        tmp = settings_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, settings_path())
+    return next(v for v in layers_view() if v["key"] == ext.key)
+
+def layer_for_use(key):
+    """-> (extension, values, ""), or (None, None, why) when it is unknown or switched off."""
+    ext = EXTENSIONS.get(key)
+    if ext is None:
+        return None, None, "no such layer"
+    enabled, values = layer_settings(ext)
+    if not enabled:
+        return None, None, "this layer is switched off in the settings"
+    return ext, values, ""
 
 # ---------------------------------------------------------------- http
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -425,6 +671,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self._guard(True):
             return
         parts = url.path.strip("/").split("/")
+        if parts == ["api", "settings"]:
+            return self._json({"layers": layers_view(), "hint": "" if EXTENSIONS else LAUNCHER_HINT})
+        if len(parts) == 4 and parts[:2] == ["api", "layers"] and parts[3] == "panel":
+            ext, values, why = layer_for_use(parts[2])
+            if ext is None:
+                return self._fail(404 if why == "no such layer" else 409, why)
+            try:
+                return self._json(ext.panel(values))
+            except Exception as e:                       # a layer's bug must not take the server's thread with it
+                return self._fail(500, f"{ext.key} failed: {type(e).__name__}: {e}")
         if parts == ["api", "sessions"]:
             sessions = REGISTRY.listing()
             recent = list(dict.fromkeys(s["cwd"] for s in sessions))[:10]
@@ -439,6 +695,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 start = 0
             return self._stream(s, start)
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "export":
+            s = REGISTRY.get(parts[2])
+            if not s:
+                return self._fail(404, "no such session")
+            fmt = urllib.parse.parse_qs(url.query).get("format", ["md"])[0]
+            try:
+                body, ctype, ext = s.export(fmt)
+            except ValueError as e:
+                return self._fail(400, str(e))
+            self.send_response(200)
+            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="session-{s.id}.{ext}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self._fail(404, "not found")
 
     def do_POST(self):
@@ -461,6 +735,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return self._fail(400, "object expected")
         parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+        if parts == ["api", "settings"]:
+            try:
+                return self._json(update_layer(body))
+            except ValueError as e:
+                return self._fail(400, str(e))
+        if len(parts) == 4 and parts[:2] == ["api", "layers"] and parts[3] == "act":
+            ext, values, why = layer_for_use(parts[2])
+            if ext is None:
+                return self._fail(404 if why == "no such layer" else 409, why)
+            args = body.get("args", {})
+            if not isinstance(body.get("action"), str) or not isinstance(args, dict):
+                return self._fail(400, "action (text) and args (object) expected")
+            try:
+                return self._json(ext.act(values, body["action"], args))
+            except ValueError as e:
+                return self._fail(400, str(e))
+            except Exception as e:
+                return self._fail(500, f"{ext.key} failed: {type(e).__name__}: {e}")
         if parts == ["api", "sessions"]:
             named = str(body.get("cwd") or "").strip()
             if not named:                                # realpath("") is the server's own folder
@@ -505,6 +797,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if act == "stop":
                 s.stop()
                 return self._json({"ok": True})
+            if act == "copy":
+                try:
+                    new = REGISTRY.copy(s.id)
+                except (OSError, ValueError) as e:
+                    return self._fail(409, f"cannot copy: {e}")
+                return self._json(new.summary()) if new else self._fail(404, "no such session")
+            if act == "delete":
+                try:
+                    found = REGISTRY.delete(s.id)
+                except RuntimeError as e:
+                    return self._fail(409, str(e))
+                return self._json({"ok": True}) if found else self._fail(404, "no such session")
         self._fail(404, "not found")
 
     def _static(self, path, content_type):

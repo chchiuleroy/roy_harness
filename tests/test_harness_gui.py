@@ -856,5 +856,213 @@ class TestRealHarness(GuiBase):
         self.assertGreaterEqual(first["seq"], seen)                  # new events only, from the resumed harness
 
 
+class TestSessionActions(GuiBase):
+    """Copy, keep as a file, delete: what a person does with a whole session."""
+
+    def idle_session(self, messages, title="my talk"):
+        """A session as the harness would have left it (no process): a conversation file, a title, a folder."""
+        s = gui.REGISTRY.create(self.project, "normal")
+        s.title = title
+        s.save_meta()
+        os.makedirs(gui.SESSIONS, exist_ok=True)
+        with open(s.file, "w", encoding="utf-8") as f:
+            json.dump(messages, f)
+        return s
+
+    def export(self, sid, fmt, headers=None):
+        h = {"Host": f"127.0.0.1:{self.port}", "Authorization": f"Bearer {TOKEN}"}
+        h.update(headers or {})
+        h = {k: v for k, v in h.items() if v is not None}
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
+        c.request("GET", f"/api/sessions/{sid}/export?format={fmt}", headers=h)
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        return r.status, r, body
+
+    def test_a_copy_has_the_conversation_and_its_own_pictures(self):
+        """A copy is for trying another direction from the same point. If it shared the original's
+        picture files, deleting the original would silently break the copy."""
+        s = self.idle_session([])
+        pic = s.keep_picture("shot.png", png_bytes())
+        ref = {"type": "image_ref", "path": os.path.join(s.images_dir, pic["id"]), "name": "shot.png",
+               "sha256": pic["id"].split(".")[0], "width": 8, "height": 6}
+        messages = [{"role": "user", "content": [{"type": "text", "text": "look at this"}, ref]},
+                    {"role": "assistant", "content": "I see red"}]
+        with open(s.file, "w", encoding="utf-8") as f:
+            json.dump(messages, f)
+        st, c = self.call("POST", f"/api/sessions/{s.id}/copy", {})
+        self.assertEqual(st, 200, c)
+        self.assertNotEqual(c["id"], s.id)
+        self.assertEqual((c["title"], c["cwd"], c["mode"], c["running"]), ("my talk (副本)", s.cwd, "normal", False))
+        copy = gui.REGISTRY.get(c["id"])
+        self.assertEqual([e["kind"] for e in copy.events], ["user", "image", "assistant"])
+        with open(copy.file, encoding="utf-8") as f:
+            copied = json.load(f)
+        new_path = copied[0]["content"][1]["path"]
+        self.assertEqual(os.path.dirname(os.path.abspath(new_path)), os.path.abspath(copy.images_dir))
+        self.assertTrue(os.path.isfile(new_path))
+        self.assertEqual(copied[1], messages[1])
+        self.assertEqual(gui.Registry().get(c["id"]).title, "my talk (副本)")   # a fresh server finds it on disk
+        st, _ = self.call("POST", f"/api/sessions/{s.id}/delete", {})
+        self.assertEqual(st, 200)
+        self.assertTrue(os.path.isfile(new_path), "deleting the original took the copy's picture with it")
+
+    def test_a_copy_of_a_running_session_is_not_started_and_the_original_is_untouched(self):
+        """Copying must not run anything: the person decides when the copy goes (resume)."""
+        FakeLLM.script = [text_reply("first answer")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "remember KESTREL-81"})
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        st, c = self.call("POST", f"/api/sessions/{sid}/copy", {})
+        self.assertEqual(st, 200, c)
+        copy = gui.REGISTRY.get(c["id"])
+        self.assertIsNone(copy.proc)
+        self.assertTrue(s.running)
+        with open(s.file, encoding="utf-8") as f1, open(copy.file, encoding="utf-8") as f2:
+            self.assertEqual(json.load(f1), json.load(f2))
+
+    def test_a_session_nobody_has_spoken_in_can_be_copied(self):
+        """No conversation file yet is a normal state (a session just created), not an error."""
+        s = gui.REGISTRY.create(self.project, "safe")
+        st, c = self.call("POST", f"/api/sessions/{s.id}/copy", {})
+        self.assertEqual(st, 200, c)
+        self.assertEqual((c["mode"], c["title"], c["events"]), ("safe", "", 0))
+
+    def test_save_gives_the_whole_conversation_as_json(self):
+        """The .json is the harness' own file: it is what a later import or a diff would use,
+        so nothing may be cut or reformatted away from it."""
+        messages = [{"role": "user", "content": "hi " + "x" * 6000}, {"role": "assistant", "content": "收到"}]
+        s = self.idle_session(messages)
+        st, r, body = self.export(s.id, "json")
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(body.decode("utf-8")), messages)
+        self.assertIn("attachment", r.getheader("Content-Disposition"))
+        self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
+
+    def test_save_as_markdown_cannot_be_broken_by_what_a_tool_printed(self):
+        """A tool result can contain ``` (any file with a code block). If the export fenced it with
+        three backticks the rest of the file would turn into 'code' or the other way round."""
+        printed = "before\n```\ninside\n```\nafter"
+        messages = [{"role": "user", "content": "show the file"},
+                    {"role": "assistant", "content": "ok", "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\": \"a.md\"}"}}]},
+                    {"role": "tool", "tool_call_id": "c1", "content": printed},
+                    {"role": "assistant", "content": "done"}]
+        s = self.idle_session(messages)
+        st, r, body = self.export(s.id, "md")
+        self.assertEqual(st, 200)
+        text = body.decode("utf-8")
+        self.assertTrue(text.startswith("# my talk"))
+        for part in ("## 你", "show the file", "## 助理", "read_file", "done"):
+            self.assertIn(part, text)
+        lines = text.splitlines()
+        i = lines.index("````text")                                  # one backtick more than the longest run inside
+        self.assertEqual(lines[i + 1:i + 6], printed.splitlines())
+        self.assertEqual(lines[i + 6], "````")
+
+    def test_save_refuses_what_it_cannot_make_and_has_the_usual_guards(self):
+        s = self.idle_session([])
+        self.assertEqual(self.export(s.id, "pdf")[0], 400)
+        self.assertEqual(self.export("0" * 12, "md")[0], 404)
+        self.assertEqual(self.export(s.id, "md", headers={"Authorization": None})[0], 401)
+        self.assertEqual(self.export(s.id, "md", headers={"Origin": "http://evil.example"})[0], 403)
+        with open(s.file, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(self.export(s.id, "json")[0], 400)           # an unreadable file is said, not turned into []
+
+    def test_delete_stops_the_harness_and_removes_what_the_gui_keeps(self):
+        """Deleting a running session must not leave a harness running with its files gone, and
+        must not touch the project folder (the person's work is there)."""
+        marker = os.path.join(self.project, "keep-me.txt")
+        with open(marker, "w") as f:
+            f.write("mine")
+        FakeLLM.script = [text_reply("answer")]
+        sid, s = self.new_session()
+        self.wait(s, lambda e: e["kind"] == "ready", "ready")
+        self.call("POST", f"/api/sessions/{sid}/send", {"text": "hello"})
+        self.wait(s, lambda e: e["kind"] == "turn_end", "turn_end")
+        self.assertEqual(self.upload_picture(sid)[0], 200)
+        proc = s.proc
+        self.assertTrue(os.path.isfile(s.file) and os.path.isdir(s.images_dir))
+        st, _ = self.call("POST", f"/api/sessions/{sid}/delete", {})
+        self.assertEqual(st, 200)
+        self.assertIsNotNone(proc.poll(), "the harness is still running")
+        for path in (s.file, s.file + ".tmp", s.meta_file, s.images_dir):
+            self.assertFalse(os.path.exists(path), path)
+        self.assertTrue(os.path.isfile(marker))
+        self.assertNotIn(sid, [x["id"] for x in self.call("GET", "/api/sessions")[1]["sessions"]])
+        self.assertIsNone(gui.Registry().get(sid))                   # a restarted server does not find it either
+        for method, path in (("POST", f"/api/sessions/{sid}/send"), ("POST", f"/api/sessions/{sid}/resume"),
+                             ("POST", f"/api/sessions/{sid}/delete"), ("POST", f"/api/sessions/{sid}/copy"),
+                             ("GET", f"/api/sessions/{sid}/stream")):
+            self.assertEqual(self.call(method, path, {} if method == "POST" else None)[0], 404, path)
+        self.assertEqual(self.export(sid, "md")[0], 404)
+
+    def upload_picture(self, sid):
+        return self.call("POST", f"/api/sessions/{sid}/upload",
+                         {"name": "a.png", "data": base64.b64encode(png_bytes()).decode()})
+
+    def test_a_deleted_session_cannot_be_written_back_by_a_late_call(self):
+        """A resume, a title update or an upload that was already on its way when the delete
+        happened would otherwise recreate files for a session that is gone."""
+        s = self.idle_session([])
+        old = gui.REGISTRY.get(s.id)
+        st, _ = self.call("POST", f"/api/sessions/{s.id}/delete", {})
+        self.assertEqual(st, 200)
+        old.title = "late title"
+        old.save_meta()
+        old.start()
+        with self.assertRaises(ValueError):
+            old.keep_picture("a.png", png_bytes())
+        self.assertIsNone(old.proc)
+        self.assertEqual(os.listdir(gui.SESSIONS), [])
+
+    def test_copy_and_delete_have_the_same_guards_as_everything_else(self):
+        s = self.idle_session([])
+        for act in ("copy", "delete"):
+            path = f"/api/sessions/{s.id}/{act}"
+            self.assertEqual(self.call("POST", path, {}, headers={"Authorization": None})[0], 401)
+            self.assertEqual(self.call("POST", path, {}, headers={"Origin": "http://evil.example"})[0], 403)
+            self.assertEqual(self.call("POST", path, raw="{}", headers={"Content-Type": "text/plain"})[0], 415)
+        self.assertTrue(os.path.isfile(s.meta_file))                # none of the refused calls did anything
+        self.assertEqual(len(os.listdir(gui.SESSIONS)), 2)         # the conversation and its title, no stray copy
+
+    def test_a_delete_that_fails_leaves_a_session_that_is_still_listed_and_can_be_deleted_again(self):
+        """On Windows a file can be locked for a moment. The page must not lose a session whose files
+        are still on disk (it would come back after a restart, or stay forever with no way to remove it)."""
+        s = self.idle_session([{"role": "user", "content": "hi"}])
+        s.keep_picture("a.png", png_bytes())
+        with mock.patch.object(gui, "remove_tree", side_effect=RuntimeError("locked")):
+            st, r = self.call("POST", f"/api/sessions/{s.id}/delete", {})
+        self.assertEqual(st, 409, r)
+        self.assertIn(s.id, [x["id"] for x in self.call("GET", "/api/sessions")[1]["sessions"]])
+        self.assertTrue(os.path.isfile(s.meta_file) and os.path.isfile(s.file))
+        self.assertFalse(gui.REGISTRY.get(s.id).deleted)
+        st, _ = self.call("POST", f"/api/sessions/{s.id}/delete", {})
+        self.assertEqual(st, 200)
+        self.assertEqual(os.listdir(gui.SESSIONS), [])
+
+    def test_a_copy_that_fails_leaves_nothing_behind(self):
+        """A failed copy would otherwise keep private pictures and half a conversation on disk,
+        under a name no list shows."""
+        s = self.idle_session([{"role": "user", "content": "hi"}])
+        s.keep_picture("a.png", png_bytes())
+        before = sorted(os.listdir(gui.SESSIONS))
+
+        def half_done(src, dst):
+            os.makedirs(dst)
+            with open(os.path.join(dst, "half"), "w") as f:
+                f.write("x")
+            raise OSError("disk full")
+        with mock.patch.object(gui.shutil, "copytree", side_effect=half_done):
+            self.assertEqual(self.call("POST", f"/api/sessions/{s.id}/copy", {})[0], 409)
+        self.assertEqual(sorted(os.listdir(gui.SESSIONS)), before)
+        with mock.patch.object(gui.Session, "save_meta", side_effect=OSError("disk full")):   # after the files were made
+            self.assertEqual(self.call("POST", f"/api/sessions/{s.id}/copy", {})[0], 409)
+        self.assertEqual(sorted(os.listdir(gui.SESSIONS)), before)
+
+
 if __name__ == "__main__":
     unittest.main()
