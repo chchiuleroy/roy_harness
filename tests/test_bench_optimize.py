@@ -63,6 +63,57 @@ class ParseTests(unittest.TestCase):
         """An empty candidate would be evaluated as 'no AGENT.md' and could be 'accepted'."""
         self.assertIsNone(optimize.parse_candidate("just chatting"))
 
+    def test_two_skills_each_stop_at_the_next_marker(self):
+        """A body that ran on into the next skill would put one skill's text in another's file."""
+        c = optimize.parse_candidate("===AGENT.md===\nA\n===SKILL name=a description=da===\nbody a\n"
+                                     "===SKILL name=b description=db===\nbody b\n===END===")
+        self.assertEqual([(s["name"], s["body"]) for s in c["skills"]],
+                         [("a", "body a"), ("b", "body b")])
+        self.assertEqual(c["agent"], "A")
+
+    def test_a_skill_header_that_never_closes_is_dropped_but_earlier_skills_stay(self):
+        """The reply may be cut off mid-header; the skills before it are still complete."""
+        c = optimize.parse_candidate("===AGENT.md===\nA\n===SKILL name=a description=da===\nbody a\n"
+                                     "===SKILL name=b description=never closed")
+        self.assertEqual([s["name"] for s in c["skills"]], ["a"])
+
+    def test_a_skill_with_an_empty_body_does_not_swallow_the_next_one(self):
+        c = optimize.parse_candidate("===AGENT.md===\nA\n===SKILL name=a description=da===\n"
+                                     "\n===SKILL name=b description=db===\nbody b\n===END===")
+        self.assertEqual([(s["name"], s["body"]) for s in c["skills"]], [("a", ""), ("b", "body b")])
+
+    def test_a_description_over_several_lines_becomes_one_line(self):
+        """The description goes into a one-line front-matter field; a raw newline would end it."""
+        c = optimize.parse_candidate("===AGENT.md===\nA\n===SKILL name=a description=Parse   CSV\nwith care===\nb")
+        self.assertEqual(c["skills"][0]["description"], "Parse CSV with care")
+
+    def test_rationale_is_read_up_to_the_agent_marker(self):
+        c = optimize.parse_candidate("===RATIONALE===\nwhy\n===AGENT.md===\nA")
+        self.assertEqual(c["rationale"], "why")
+        self.assertEqual(optimize.parse_candidate("===AGENT.md===\nA")["rationale"], "")
+
+    def test_an_empty_rationale_stays_empty(self):
+        c = optimize.parse_candidate("===RATIONALE===\n\n===AGENT.md===\nA\n===AGENT.md===\nB")
+        self.assertEqual(c["rationale"], "")
+
+    def test_rationale_stops_at_the_first_agent_marker_not_the_last(self):
+        c = optimize.parse_candidate("===RATIONALE===\nwhy\n===AGENT.md===\nA\n===AGENT.md===\nB")
+        self.assertEqual(c["rationale"], "why")
+
+    def test_a_long_reply_that_repeats_a_header_is_parsed_in_linear_time(self):
+        """The reply is model output, so it may repeat a header thousands of times without the
+        text that would close it. With lazy regexes every repeat rescanned the rest of the text
+        (300,000 characters took over 20 s); the bound is loose on purpose: linear is ~ms."""
+        import time
+        for label, tail in (("rationale", "===RATIONALE===\n" * 6000),
+                            ("skill", "===SKILL name=a description=" * 20000)):
+            text = "===AGENT.md===\nx\n" + tail
+            t0 = time.perf_counter()
+            c = optimize.parse_candidate(text)
+            took = time.perf_counter() - t0
+            self.assertIsNotNone(c)
+            self.assertLess(took, 1.0, f"{label}: {len(text)} chars took {took:.2f}s")
+
     def test_written_skill_loads_in_the_harness(self):
         """A skill file the harness cannot parse is silently skipped, so the candidate would
         be scored without the skill the proposer thinks it wrote."""
