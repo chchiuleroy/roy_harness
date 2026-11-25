@@ -208,13 +208,21 @@ class TestWhichRowsAreScored(ReplayCase):
         self.assertTrue(any("uncertain" in w for w in rep["warnings"]))
 
 
+STUCK = 120.0      # seconds the scripted first call would take: never finishes within the test
+TIMEOUT = 15.0     # chunk deadline: the first chunk gives up after this, the second must still start and answer within it
+
+
 class TestFailures(ReplayCase):
+    # The deadline of a chunk includes starting a NEW harness child process for it (after a timeout the engine and
+    # the model session are restarted). With a 2 s deadline the second chunk failed on a busy CI runner as well
+    # ("unavailable" instead of "a"); with the CPU saturated it failed 10 of 10 runs, idle 0 of 6. So the deadline
+    # is long enough for a slow start, and the stuck call stays stuck for much longer than the deadline.
     def test_a_chunk_that_never_finishes_is_given_up_and_the_next_one_still_runs(self):
         """A stuck model call must not stop the whole measurement, and what was in flight must not answer
         the next chunk."""
         def table(text, n):
             return "a"
-        self.llm.script = [{"text": "late", "delay": 6}]
+        self.llm.script = [{"text": "late", "delay": STUCK}]
         self.script_after_first = True
         s = Scripted(self.llm, table)
 
@@ -225,11 +233,11 @@ class TestFailures(ReplayCase):
             def pop(self_, i):
                 if not self.llm_first_done[0]:
                     self.llm_first_done[0] = True
-                    return {"text": "late", "delay": 6}
+                    return {"text": "late", "delay": STUCK}
                 return s.pop(i)
         self.llm_first_done = [False]
         self.llm.script = Chain()
-        rep = rp.replay(self.corpus(row(1, "a"), row(2, "a")), self.cfg(batch_max=1, chunk_timeout=2.0))
+        rep = rp.replay(self.corpus(row(1, "a"), row(2, "a")), self.cfg(batch_max=1, chunk_timeout=TIMEOUT))
         self.assertEqual([r["outcomes"] for r in rep["rows"]], [[UNAVAILABLE], ["a"]])
         self.assertEqual(rep["failures"]["timeout"], 1)
 

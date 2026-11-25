@@ -14,7 +14,7 @@ from .support import SRC, tmpdir
 
 ROOT = os.path.dirname(SRC)
 PROBE = os.path.join(ROOT, "tools", "r2_probe.py")
-HARNESS_DIR = os.environ.get("KB_HARNESS_DIR", "C:/Users/roy/roy_harness/src/harness")
+HARNESS_DIR = os.environ.get("KB_HARNESS_DIR", os.path.normpath(os.path.join(os.path.dirname(ROOT), "src", "harness")))   # kb lives in the roy_harness checkout
 IGNORED = {"import_s"}
 
 

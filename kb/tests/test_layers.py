@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import importgraph  # noqa: E402
 
 PKG = os.path.join(SRC, "kb")
-HARNESS_DIR = os.environ.get("KB_HARNESS_DIR", "C:/Users/roy/roy_harness/src/harness")
+HARNESS_DIR = os.environ.get("KB_HARNESS_DIR", os.path.normpath(os.path.join(os.path.dirname(ROOT), "src", "harness")))   # kb lives in the roy_harness checkout
 
 
 def write_tree(testcase, files):
