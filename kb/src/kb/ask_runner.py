@@ -20,7 +20,8 @@ from .errors import KbError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "ask_hook.py")
-DEFAULT_HARNESS = "C:/Users/roy/roy_harness/src/harness/harness_vllm.py"
+# kb lives in the roy_harness checkout (kb/src/kb/ask_runner.py), so the harness is found relative to this file, not at one machine's path
+DEFAULT_HARNESS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "src", "harness", "harness_vllm.py").replace(os.sep, "/")
 SYSTEM_KEEP = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP")
 PIN_EMPTY = ("HARNESS_API_KEY", "VLLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HARNESS_DEBUG", "HARNESS_SKILLS_DIRS", "HARNESS_SANDBOX",
              "VLLM_BASE_URL", "VLLM_MODEL", "HARNESS_ALLOW_HTTP")

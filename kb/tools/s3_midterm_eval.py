@@ -136,7 +136,6 @@ def parse(argv):
 
 
 def evaluate(parent, synthetic, run_number):
-    import wiki_embed as we
     conv_registry.register(conv_pdf.PdfConverter())
     a0_dir = (synthetic + "/a0/") if synthetic else S1 + "a0/"
     gap_file = (synthetic + "/gap.json") if synthetic else GAP_FILE
@@ -157,6 +156,7 @@ def evaluate(parent, synthetic, run_number):
     stems = [unicodedata.normalize("NFC", stem(os.path.basename(n))).casefold() for n in names]          # the way Windows compares names, not just the exact string
     if len(stems) != len(set(stems)):
         raise Abort("two sources of the home share a name stem: a gold page could be matched by the wrong source")
+    import wiki_embed as we                    # the author's private wiki scripts: imported where first used, after the guards above, so the guards can be tested without them
     present = {os.path.splitext(os.path.basename(p))[0] for p in we.discover_pages()}
     res = {"run_number": run_number, "synthetic": bool(synthetic), "model": emb.identity.as_dict(), "commit": active, "sources_in_home": len(names),
            "active_files_verified_by_hash": True}
