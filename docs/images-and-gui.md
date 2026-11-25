@@ -109,5 +109,11 @@ python src/harness/harness_gui.py            # 印出帶 token 的網址並開�
   - **抓到並修掉一個缺陷**：引擎的 `resume` 會把**任何** Ticket 重新打開，包括人「永久停止」的（文件寫 stopped＝不再收任何東西），而面板原本對每張 Ticket 都放「續跑」，等於一顆能撤銷停止的按鈕（點了回覆 `resumed`）。現在「停止」只給 open／waiting，「續跑」只給帶 note 的（被 park 的）Ticket。引擎本身的 `resume` 不檢查狀態是既有行為，我沒改。真正 park 的 Ticket 沒有在這次實測重現（要讓 executor 連死三次），這一條只有單元測試。
 - **`kb ask` 經 GUI 對真實模型端點**（合成資料：一段安全文字加一段植入的攻擊文字，沒有任何個人資料）：問「Zorvath Lantern 何時點亮」，答案取自安全段落並通過引文核對，攻擊段落被找到後列為「left out」、植入字串沒有出現在答案裡；因來源是貼上的、且有段落被排除，答案狀態是 `HELD`，面板列出它並可「看」，按「放行」先跳確認、之後紀錄顯示 released。第二個問題（第三天、黃昏）答對並引文通過。兩次問答各約 6 秒；端點與模型名稱只放在暫存設定檔（跑完已刪），輸出中以佔位符取代。**一個模型、兩個問題、lexical 檢索，是存在性檢查，不是準確率。**
 
-**仍沒驗證**：kb 的 hosted provider（需要金鑰）不支援；superagent 沒對真實模型跑過（只有腳本化模型，真模型的 superagent 端到端是另一個開關 `SUPERAGENT_LIVE=1`）；被 park 的 Ticket 上的「續跑」。
+**第三輪驗證（2026-11-25，單次）**：
+- **superagent 對真實模型**（作者的 vLLM）：`SUPERAGENT_LIVE=1` 的兩項 OK（73.8 秒）；面板那一輪 7 項：事件要求工單寫 `notes.txt`，真模型的 harness（safe 模式）問核准，面板按「允許一次」，檔案寫出且含 hello，工單回覆「完成」進 outbox，收尾沒有殘留行程。
+- **真正被擱置的工單**：用一個替身行程（立刻結束三次、第四次起變成真的 harness）當 Ticket 的 executor，由引擎自己的規則擱置（`its executor died 3 times without finishing a turn`）。面板那一列顯示備註與「停止」「續跑」；按「續跑」回覆 `resumed`、備註清掉、工單重新跑起來（真 harness 問寫檔、允許後檔案寫出）；不再被擱置後「續跑」鈕消失。8 項。**限度**：擱置是替身行程造成的，不是真 harness 自己當掉。
+- **kb 的金鑰路徑**：對一個要求 `Authorization: Bearer <金鑰>` 的**本機假託管端點**（`--provider openai`）跑 `kb ask --api-key-env`：金鑰（本次隨機造的假值）到得了請求；值不在 kb 的 stdout／stderr、也不在 kb 家目錄任何檔案；變數沒設就在送出前拒絕（exit 2）；金鑰錯誤（端點回 401）與完全沒給金鑰，都變成「扣住的答案」（`the model gave no reply`）而不是當機，也不回顯金鑰。11 項。**這不是對真的託管服務的測試**：沒有真金鑰可用，我也不會把金鑰填進任何欄位。
+- **發現（沒修）**：kb 面板**沒有**金鑰欄位，組出的命令不帶 `--api-key-env`，所以面板只能用不需要金鑰的端點；要用需要金鑰的託管 provider 得走命令列。
+
+**仍沒驗證**：真正的託管服務（OpenAI／Anthropic）；superagent 對真模型只有一個模型、單次；真 harness 自己當掉造成的擱置；kb 面板的金鑰支援（不存在）。
 
