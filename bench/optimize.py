@@ -133,17 +133,40 @@ def digest(results_dir, by):
     return "\n".join(lines), len(fails)
 
 
+_SKILL_HEAD = re.compile(r"===SKILL name=([A-Za-z0-9._-]+) description=")
+_SECTION_END = re.compile(r"\n===(?:SKILL|END)")
+
+
 def parse_candidate(text):
-    m = re.search(r"===AGENT\.md===\n(.*?)(?=\n===(?:SKILL|END)|\Z)", text, re.S)
-    if not m:
+    # Linear scan on purpose. This used to be three regexes with a lazy `(.*?)` followed by a
+    # required tail; a reply that repeats "===RATIONALE===" or "===SKILL name=a description="
+    # without the tail made every repeat rescan to the end of the text (300,000 characters: over
+    # 20 s). A header with no closing marker after it means no later header can close either.
+    head = "===AGENT.md===\n"
+    i = text.find(head)
+    if i < 0:
         return None
-    cand = {"agent": m.group(1).strip(), "skills": []}
-    r = re.search(r"===RATIONALE===\n(.*?)\n===AGENT", text, re.S)
-    cand["rationale"] = r.group(1).strip() if r else ""
-    for s in re.finditer(r"===SKILL name=([A-Za-z0-9._-]+) description=(.*?)===\n(.*?)(?=\n===(?:SKILL|END)|\Z)",
-                         text, re.S):
-        cand["skills"].append({"name": s.group(1), "description": " ".join(s.group(2).split()),
-                               "body": s.group(3).strip()})
+    end = _SECTION_END.search(text, i + len(head))
+    cand = {"agent": text[i + len(head): end.start() if end else len(text)].strip(), "skills": []}
+    rationale, rat = "", "===RATIONALE===\n"
+    j = text.find(rat)
+    if j >= 0:
+        stop = text.find("\n===AGENT", j + len(rat))
+        if stop >= 0:
+            rationale = text[j + len(rat): stop]
+    cand["rationale"] = rationale.strip()
+    pos = 0
+    while True:
+        h = _SKILL_HEAD.search(text, pos)
+        if not h:
+            break
+        close = text.find("===\n", h.end())
+        if close < 0:
+            break
+        end = _SECTION_END.search(text, close + 4)
+        pos = end.start() if end else len(text)
+        cand["skills"].append({"name": h.group(1), "description": " ".join(text[h.end():close].split()),
+                               "body": text[close + 4: pos].strip()})
     return cand
 
 
