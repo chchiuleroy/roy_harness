@@ -1,0 +1,32 @@
+{
+ "real": {
+  "n": 27,
+  "top5_same_as_saved": 3,
+  "top1_same_as_saved": 16,
+  "top5_changed_by_dropping_edited_files": 6,
+  "gold_unedited": 26,
+  "hits_full": 20,
+  "hits_trimmed": 20,
+  "hits_saved": 21
+ },
+ "blind1": {
+  "n": 40,
+  "top5_same_as_saved": 10,
+  "top1_same_as_saved": 28,
+  "top5_changed_by_dropping_edited_files": 10,
+  "gold_unedited": 39,
+  "hits_full": 38,
+  "hits_trimmed": 38,
+  "hits_saved": 36
+ },
+ "blind2": {
+  "n": 40,
+  "top5_same_as_saved": 8,
+  "top1_same_as_saved": 31,
+  "top5_changed_by_dropping_edited_files": 10,
+  "gold_unedited": 40,
+  "hits_full": 34,
+  "hits_trimmed": 34,
+  "hits_saved": 35
+ }
+}

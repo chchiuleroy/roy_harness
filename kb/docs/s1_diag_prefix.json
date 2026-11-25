@@ -1,0 +1,73 @@
+{
+ "A0 saved result": {
+  "real": "22/27",
+  "blind1": "37/40",
+  "blind2": "35/40"
+ },
+ "A0 stored index (first 400 chars) x A0 formula": {
+  "real": "22/27",
+  "blind1": "37/40",
+  "blind2": "35/40"
+ },
+ "focus ranks | A0 stored index (first 400 chars) x A0 formula": {
+  "Q1-5": 5,
+  "D3": 3,
+  "A1": 2,
+  "C4": 5
+ },
+ "A0 stored index (first 400 chars) x FTS5 formula": {
+  "real": "21/27",
+  "blind1": "37/40",
+  "blind2": "34/40"
+ },
+ "focus ranks | A0 stored index (first 400 chars) x FTS5 formula": {
+  "Q1-5": 5,
+  "D3": 3,
+  "A1": 2,
+  "C4": 5
+ },
+ "kb chunks, full text x FTS5 formula": {
+  "real": "24/27",
+  "blind1": "36/40",
+  "blind2": "33/40"
+ },
+ "focus ranks | kb chunks, full text x FTS5 formula": {
+  "Q1-5": 6,
+  "D3": 7,
+  "A1": 6,
+  "C4": 6
+ },
+ "kb chunks, full text x A0 formula": {
+  "real": "24/27",
+  "blind1": "36/40",
+  "blind2": "33/40"
+ },
+ "focus ranks | kb chunks, full text x A0 formula": {
+  "Q1-5": 6,
+  "D3": 6,
+  "A1": 9,
+  "C4": 5
+ },
+ "kb chunks cut to first 400 chars x FTS5 formula": {
+  "real": "24/27",
+  "blind1": "34/40",
+  "blind2": "34/40"
+ },
+ "focus ranks | kb chunks cut to first 400 chars x FTS5 formula": {
+  "Q1-5": 4,
+  "D3": 6,
+  "A1": 5,
+  "C4": 5
+ },
+ "kb chunks cut to first 400 chars x A0 formula": {
+  "real": "24/27",
+  "blind1": "35/40",
+  "blind2": "33/40"
+ },
+ "focus ranks | kb chunks cut to first 400 chars x A0 formula": {
+  "Q1-5": 4,
+  "D3": 4,
+  "A1": 6,
+  "C4": 5
+ }
+}

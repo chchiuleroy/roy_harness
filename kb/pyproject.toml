@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kb"
+version = "0.0.0"
+description = "Optional knowledge layer: write-side (convert, metadata, chunk, approve, delete) and read-side (search) for text, PDF, image, audio and video."
+requires-python = ">=3.11"
+# Tier T0 (core) uses the standard library and SQLite only. Heavier tiers declare their own extras later.
+# It must never depend on roy_harness: the harness does not know kb (Gate 2 OPT1).
+dependencies = []
+
+[project.optional-dependencies]
+dense = ["numpy"]
+
+[project.scripts]
+kb = "kb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

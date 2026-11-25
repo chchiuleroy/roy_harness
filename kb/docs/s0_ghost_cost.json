@@ -1,0 +1,11 @@
+{
+ "n_chunks": 31980,
+ "text_hash_s_median": 0.09,
+ "vector_hash_s_median": 0.119,
+ "total_full_verify_s": 0.209,
+ "per_chunk_us": 6.5,
+ "extrapolated_1M_chunks_s": 6.5,
+ "runs": 5,
+ "decision": "verify ALL chunks at every commit (content layer); sampling only if cost per 1M chunks exceeds 30 s",
+ "note": "hash cost only; reading vectors from disk is not included (they were in memory). Single machine, 5 repeats."
+}

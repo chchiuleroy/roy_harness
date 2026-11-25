@@ -1,0 +1,1214 @@
+{
+ "run_number": 1,
+ "synthetic": false,
+ "model": {
+  "model_id": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+  "model_sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+  "dim": 1024,
+  "pooling": "last",
+  "instruction_sha256": "958c1e6fe80831e4900964e47008331f762a849fcc66c9f65e5b3ba81d3b029f"
+ },
+ "commit": "cm_iupbddzg7omdj2l6rcryx4zh",
+ "sources_in_home": 1104,
+ "active_files_verified_by_hash": true,
+ "frozen_files_verified": true,
+ "gap_file_sha256": "aa386e64471ef89f2e25f11d8efcb085c2396ac4fb168dad916e9e2686fe83a9",
+ "baseline_sets": {
+  "real": {
+   "n_valid": 27,
+   "comparator_variant": "vector",
+   "comparator_score": 25,
+   "lexical": {
+    "score": 24,
+    "by_category": {
+     "1_known_title_exact_keyword": {
+      "n": 7,
+      "kb": 6,
+      "comparator": 7
+     },
+     "2_chinese_paraphrase": {
+      "n": 6,
+      "kb": 4,
+      "comparator": 5
+     },
+     "3_mixed_zh_en": {
+      "n": 6,
+      "kb": 6,
+      "comparator": 6
+     },
+     "4b_graph_traversal": {
+      "n": 1,
+      "kb": 1,
+      "comparator": 1
+     },
+     "5_scattered_answer": {
+      "n": 7,
+      "kb": 7,
+      "comparator": 6
+     }
+    },
+    "worst_category_loss": 1,
+    "lost_queries": [
+     "Q1-5",
+     "Q2-3",
+     "Q2-4"
+    ],
+    "won_queries": [
+     "Q2-5",
+     "Q5-8"
+    ],
+    "rule_met": true
+   },
+   "hybrid": {
+    "score": 26,
+    "by_category": {
+     "1_known_title_exact_keyword": {
+      "n": 7,
+      "kb": 7,
+      "comparator": 7
+     },
+     "2_chinese_paraphrase": {
+      "n": 6,
+      "kb": 5,
+      "comparator": 5
+     },
+     "3_mixed_zh_en": {
+      "n": 6,
+      "kb": 6,
+      "comparator": 6
+     },
+     "4b_graph_traversal": {
+      "n": 1,
+      "kb": 1,
+      "comparator": 1
+     },
+     "5_scattered_answer": {
+      "n": 7,
+      "kb": 7,
+      "comparator": 6
+     }
+    },
+    "worst_category_loss": 0,
+    "lost_queries": [
+     "Q2-3"
+    ],
+    "won_queries": [
+     "Q2-5",
+     "Q5-8"
+    ],
+    "rule_met": true
+   },
+   "s1_lexical_wiki_only_for_reference": 24
+  },
+  "blind1": {
+   "n_valid": 40,
+   "comparator_variant": "hybrid_rrf",
+   "comparator_score": 39,
+   "lexical": {
+    "score": 33,
+    "by_category": {
+     "A_exact_term": {
+      "n": 8,
+      "kb": 6,
+      "comparator": 8
+     },
+     "B_paraphrase": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "C_mixed_zh_en": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "D_partial_memory": {
+      "n": 8,
+      "kb": 6,
+      "comparator": 7
+     },
+     "E_cross_page": {
+      "n": 8,
+      "kb": 5,
+      "comparator": 8
+     }
+    },
+    "worst_category_loss": 3,
+    "lost_queries": [
+     "A1",
+     "A7",
+     "D3",
+     "E1",
+     "E3",
+     "E6"
+    ],
+    "won_queries": [],
+    "rule_met": false
+   },
+   "hybrid": {
+    "score": 37,
+    "by_category": {
+     "A_exact_term": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "B_paraphrase": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "C_mixed_zh_en": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "D_partial_memory": {
+      "n": 8,
+      "kb": 7,
+      "comparator": 7
+     },
+     "E_cross_page": {
+      "n": 8,
+      "kb": 6,
+      "comparator": 8
+     }
+    },
+    "worst_category_loss": 2,
+    "lost_queries": [
+     "E3",
+     "E6"
+    ],
+    "won_queries": [],
+    "rule_met": false
+   },
+   "s1_lexical_wiki_only_for_reference": 36
+  },
+  "blind2": {
+   "n_valid": 40,
+   "comparator_variant": "hybrid_page",
+   "comparator_score": 38,
+   "lexical": {
+    "score": 32,
+    "by_category": {
+     "A_exact_term": {
+      "n": 8,
+      "kb": 7,
+      "comparator": 8
+     },
+     "B_paraphrase": {
+      "n": 8,
+      "kb": 3,
+      "comparator": 6
+     },
+     "C_mixed_zh_en": {
+      "n": 8,
+      "kb": 7,
+      "comparator": 8
+     },
+     "D_partial_memory": {
+      "n": 8,
+      "kb": 7,
+      "comparator": 8
+     },
+     "E_cross_page": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     }
+    },
+    "worst_category_loss": 3,
+    "lost_queries": [
+     "A1",
+     "B1",
+     "B5",
+     "B8",
+     "C4",
+     "D8"
+    ],
+    "won_queries": [],
+    "rule_met": false
+   },
+   "hybrid": {
+    "score": 38,
+    "by_category": {
+     "A_exact_term": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "B_paraphrase": {
+      "n": 8,
+      "kb": 6,
+      "comparator": 6
+     },
+     "C_mixed_zh_en": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "D_partial_memory": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     },
+     "E_cross_page": {
+      "n": 8,
+      "kb": 8,
+      "comparator": 8
+     }
+    },
+    "worst_category_loss": 0,
+    "lost_queries": [],
+    "won_queries": [],
+    "rule_met": true
+   },
+   "s1_lexical_wiki_only_for_reference": 33
+  }
+ },
+ "pdf_gap_group": {
+  "kb": {
+   "lexical": {
+    "n": 30,
+    "L1": 12,
+    "L2": 8,
+    "L2_at_1": 7,
+    "L3": 8,
+    "by_category": {
+     "paraphrase": {
+      "n": 10,
+      "L1": 0,
+      "L2": 0
+     },
+     "partial_memory": {
+      "n": 6,
+      "L1": 1,
+      "L2": 1
+     },
+     "exact_term": {
+      "n": 5,
+      "L1": 3,
+      "L2": 1
+     },
+     "mixed_zh_en": {
+      "n": 9,
+      "L1": 8,
+      "L2": 6
+     }
+    },
+    "per_task": [
+     {
+      "id": "PDF-P01",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P04",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P05",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P06",
+      "category": "exact_term",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P07",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P10",
+      "category": "exact_term",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P11",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P12",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P13",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P14",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P16",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P19",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P20",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P21",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P23",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P24",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P27",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P28",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P29",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P30",
+      "category": "mixed_zh_en",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P32",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P33",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P34",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P35",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P36",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P37",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P38",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P41",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P46",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P48",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     }
+    ]
+   },
+   "dense": {
+    "n": 30,
+    "L1": 27,
+    "L2": 16,
+    "L2_at_1": 6,
+    "L3": 16,
+    "by_category": {
+     "paraphrase": {
+      "n": 10,
+      "L1": 10,
+      "L2": 6
+     },
+     "partial_memory": {
+      "n": 6,
+      "L1": 3,
+      "L2": 0
+     },
+     "exact_term": {
+      "n": 5,
+      "L1": 5,
+      "L2": 3
+     },
+     "mixed_zh_en": {
+      "n": 9,
+      "L1": 9,
+      "L2": 7
+     }
+    },
+    "per_task": [
+     {
+      "id": "PDF-P01",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P04",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P05",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P06",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P07",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P10",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P11",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P12",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P13",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P14",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P16",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P19",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P20",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P21",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P23",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P24",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P27",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P28",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P29",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P30",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P32",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P33",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P34",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P35",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P36",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P37",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P38",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P41",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P46",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P48",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     }
+    ]
+   },
+   "hybrid": {
+    "n": 30,
+    "L1": 16,
+    "L2": 12,
+    "L2_at_1": 8,
+    "L3": 12,
+    "by_category": {
+     "paraphrase": {
+      "n": 10,
+      "L1": 1,
+      "L2": 1
+     },
+     "partial_memory": {
+      "n": 6,
+      "L1": 2,
+      "L2": 1
+     },
+     "exact_term": {
+      "n": 5,
+      "L1": 5,
+      "L2": 3
+     },
+     "mixed_zh_en": {
+      "n": 9,
+      "L1": 8,
+      "L2": 7
+     }
+    },
+    "per_task": [
+     {
+      "id": "PDF-P01",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P04",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P05",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P06",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P07",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P10",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P11",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P12",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P13",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P14",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P16",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P19",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P20",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P21",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P23",
+      "category": "exact_term",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P24",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P27",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P28",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P29",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P30",
+      "category": "mixed_zh_en",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P32",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P33",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P34",
+      "category": "partial_memory",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P35",
+      "category": "exact_term",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P36",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": true,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P37",
+      "category": "partial_memory",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P38",
+      "category": "paraphrase",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P41",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P46",
+      "category": "paraphrase",
+      "L1": false,
+      "L2": false,
+      "L2_at_1": false,
+      "L3": false,
+      "n_results": 5
+     },
+     {
+      "id": "PDF-P48",
+      "category": "mixed_zh_en",
+      "L1": true,
+      "L2": true,
+      "L2_at_1": false,
+      "L3": true,
+      "n_results": 5
+     }
+    ]
+   }
+  },
+  "s1_baseline_system_n30": {
+   "bm25": {
+    "L1": 16,
+    "L2": 15,
+    "L2_at_1": 6
+   },
+   "dense": {
+    "L1": 28,
+    "L2": 18,
+    "L2_at_1": 14
+   },
+   "hybrid": {
+    "L1": 28,
+    "L2": 19,
+    "L2_at_1": 15
+   }
+  }
+ },
+ "latency_ms_hybrid_source_view": {
+  "n": 107,
+  "median": 738.4,
+  "p95": 808.1,
+  "max": 857.1
+ },
+ "latency_ms_hybrid_chunk_view": {
+  "n": 30,
+  "median": 4896.7,
+  "p95": 5276.1,
+  "max": 5548.7
+ },
+ "latency_ms_query_embedding_alone": {
+  "n": 40,
+  "median": 31.5,
+  "p95": 56.2
+ },
+ "embedding_server": {
+  "resident_mb": 73,
+  "running": true
+ }
+}

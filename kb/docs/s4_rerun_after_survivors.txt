@@ -1,0 +1,26 @@
+[1/24] s4_frame_names_keep_new_lines: killed
+[2/24] s4_frame_names_not_cut: killed
+[3/24] s4_frame_passage_name_raw: killed
+[4/24] s4_screen_reason_shows_the_text: killed
+[5/24] s4_outbox_overwrites: killed
+[6/24] s4_outbox_different_content_accepted: killed
+[7/24] s4_outbox_release_twice: killed
+[8/24] s4_outbox_release_of_nothing: killed
+[9/24] s4_outbox_id_unchecked: killed
+[10/24] s4_outbox_id_prefix_match: killed
+[11/24] s4_outbox_non_ascii_file: killed
+[12/24] s4_outbox_temp_file_left: killed
+[13/24] s4_outbox_released_flag_ignored: killed
+[14/24] s4_retrieve_agent_visibility_ignored: killed
+[15/24] s4_retrieve_external_model_ignored: killed
+[16/24] s4_retrieve_external_check_always: killed
+[17/24] s4_retrieve_flagged_passage_given_to_the_model: killed
+[18/24] s4_retrieve_more_than_k: killed
+[19/24] s4_retrieve_origin_from_any_location: killed
+[20/24] s4_retrieve_paste_counts_as_own: killed
+[21/24] s4_retrieve_unknown_origin_counts_as_own: killed
+[22/24] s4_retrieve_exclusion_reason_swapped: killed
+[23/24] s4_runner_child_never_stopped: survived
+[24/24] s4_ask_question_not_cleaned: killed
+killed 23, survived 1, could not apply 0
+  SURVIVED: s4_runner_child_never_stopped

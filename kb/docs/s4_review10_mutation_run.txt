@@ -1,0 +1,10 @@
+[1/9] s4_db_old_folder_with_sources_upgraded: killed
+[2/9] s4_keys_key_file_replaces_an_existing_one: killed
+[3/9] s4_keys_key_file_not_flushed_to_disk: killed
+[4/9] s4_db_schema8_upgrades_a_folder_with_sources: killed
+[5/9] s4_keys_the_migration_keeps_a_damaged_key: killed
+[6/9] s4_keys_fallback_replaces_a_key_made_meanwhile: killed
+[7/9] s4_keys_temporary_file_kept_after_a_failed_write: killed
+[8/9] s4_keys_a_vanished_key_is_not_reported: killed
+[9/9] s4_keys_a_damaged_key_is_replaced_by_anyone: killed
+killed 9, survived 0, could not apply 0

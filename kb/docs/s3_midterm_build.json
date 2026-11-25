@@ -1,0 +1,44 @@
+{
+ "conversion": {
+  "ok": 1102,
+  "partial": 2,
+  "failed": 0
+ },
+ "failed_reasons": {},
+ "pdf_conversions": {
+  "status": [
+   [
+    "ok",
+    220
+   ],
+   [
+    "partial",
+    2
+   ]
+  ],
+  "pages_without_text": 18,
+  "pages": 8072
+ },
+ "seconds_convert": 0.1,
+ "chunks": 47694,
+ "distinct_texts": 46456,
+ "seconds_embed_this_run": 0.0,
+ "embedded_this_run": 0,
+ "commit": {
+  "id": "cm_iupbddzg7omdj2l6rcryx4zh",
+  "outcome": "created",
+  "seconds": 83.9
+ },
+ "sizes_bytes": {
+  "fts.db": 64270336,
+  "manifest.json": 39010747,
+  "vec.npy": 195354752
+ },
+ "server": {
+  "configured": true,
+  "running": true,
+  "model": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+  "pid": 36760,
+  "port": 52044
+ }
+}

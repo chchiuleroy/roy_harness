@@ -1,0 +1,28 @@
+{
+  "_meta": "Labelled by the same author who wrote the baseline judge (小c), with no independent second annotator: treat the numbers as a smoke test of the evaluation harness, not as evidence about any judge. Labels: supports = the claim is said (nearly) as written; paraphrase_supports = same meaning, different words; multi_source_supports = needs two pieces of evidence together; not_supported = the evidence does not back the claim (including a claim that reuses the evidence's words but changes the fact).",
+  "samples": [
+    {"label": "supports", "claim": "The falcon flies over the harbor at dawn.", "evidence": ["The falcon flies over the harbor at dawn, every day."]},
+    {"label": "supports", "claim": "資料科學與統計學的筆記", "evidence": ["這是資料科學與統計學的筆記。"]},
+    {"label": "supports", "claim": "Kelp forests grow offshore.", "evidence": ["Kelp forests grow offshore near cold currents."]},
+    {"label": "supports", "claim": "The index is rebuilt after a profile change.", "evidence": ["After a profile change the index is rebuilt and checked."]},
+    {"label": "supports", "claim": "Hiding keeps the original file.", "evidence": ["Hiding a source keeps the original file and removes it from search."]},
+
+    {"label": "not_supported", "claim": "The falcon migrates to Antarctica in winter.", "evidence": ["The falcon flies over the harbor at dawn."]},
+    {"label": "not_supported", "claim": "Kelp forests were destroyed by the 2020 storm.", "evidence": ["Kelp forests grow offshore near cold currents."]},
+    {"label": "not_supported", "claim": "貝氏推論需要至少一千個樣本", "evidence": ["貝氏推論與先驗分配。"]},
+    {"label": "not_supported", "claim": "The commit protocol uses a blockchain.", "evidence": ["The commit protocol renames a staging folder and activates it in one transaction."]},
+    {"label": "not_supported", "claim": "The patient recovered fully after surgery.", "evidence": ["The patient was admitted to the ward on Monday."]},
+
+    {"label": "paraphrase_supports", "claim": "Hiding something does not delete the original file.", "evidence": ["Level a and b keep the original blob; only search and general access change."]},
+    {"label": "paraphrase_supports", "claim": "The system never edits the user's source files.", "evidence": ["Corrections are stored as separate statements; the raw evidence is immutable."]},
+    {"label": "paraphrase_supports", "claim": "每次提交都會驗證索引內容", "evidence": ["提交前會重新讀取索引並比對所有 chunk。"]},
+    {"label": "paraphrase_supports", "claim": "A person must confirm before anything is erased.", "evidence": ["Deletion needs the user's approval first."]},
+    {"label": "paraphrase_supports", "claim": "The falcon is seen at sunrise above the port.", "evidence": ["The falcon flies over the harbor at dawn."]},
+
+    {"label": "multi_source_supports", "claim": "The falcon flies over the harbor and kelp forests grow offshore.", "evidence": ["The falcon flies over the harbor at dawn.", "Kelp forests grow offshore near cold currents."]},
+    {"label": "multi_source_supports", "claim": "Approved proposals are applied in one transaction and become visible at the next commit.", "evidence": ["Applying writes all statements in a single transaction.", "Nothing is visible until the next commit."]},
+    {"label": "multi_source_supports", "claim": "資料科學筆記與貝氏推論都在這個知識庫", "evidence": ["資料科學與統計學的筆記。", "貝氏推論與先驗分配。"]},
+    {"label": "multi_source_supports", "claim": "Search results show why they matched and whether they are outdated.", "evidence": ["Each hit shows the matched terms and why it matched.", "A hit is marked outdated when a newer revision exists."]},
+    {"label": "multi_source_supports", "claim": "Hidden sources disappear from search and from the relation graph.", "evidence": ["Hidden sources are excluded from the index and from search.", "Edges to hidden sources are not shown in the relation graph."]}
+  ]
+}

@@ -1,0 +1,36 @@
+{
+ "n": 30,
+ "note": "L1 = frozen measure (the gold file in the top 5); L1_or_wiki also counts a wiki page that names the paper; an upper bound",
+ "lexical": {
+  "L1": 12,
+  "L1_or_wiki": 20,
+  "answered_only_by_a_wiki_page": [
+   "PDF-P01",
+   "PDF-P04",
+   "PDF-P06",
+   "PDF-P20",
+   "PDF-P24",
+   "PDF-P29",
+   "PDF-P33",
+   "PDF-P38"
+  ]
+ },
+ "dense": {
+  "L1": 27,
+  "L1_or_wiki": 28,
+  "answered_only_by_a_wiki_page": [
+   "PDF-P12"
+  ]
+ },
+ "hybrid": {
+  "L1": 16,
+  "L1_or_wiki": 21,
+  "answered_only_by_a_wiki_page": [
+   "PDF-P04",
+   "PDF-P16",
+   "PDF-P24",
+   "PDF-P29",
+   "PDF-P33"
+  ]
+ }
+}

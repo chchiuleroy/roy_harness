@@ -1,0 +1,3 @@
+{"kind": "attempt", "n": 1, "at": "2026-11-18T08:28:06", "reason": null, "token": "565a7b8cea1647669e3830c5229078e8"}
+{"kind": "provenance", "n": 1, "script_sha256": "b800495dc9f23946717af43e467cc3c22f16e1bb6e41a03253e0427574536c2d", "gap_file_sha256": "aa386e64471ef89f2e25f11d8efcb085c2396ac4fb168dad916e9e2686fe83a9", "frozen_task_file_sha256": "76d30d171a78734c1adc497932732333f1099217daa99acd665409248d8a85e2"}
+{"kind": "completed", "n": 1, "token": "565a7b8cea1647669e3830c5229078e8", "at": "2026-11-18T08:39:52", "result_file": "s3_midterm_run1.json", "result_sha256": "13f68cfe38695e041517b9b6dc4da3b6c9765aaf4381f912afe52c663bcb4d39"}

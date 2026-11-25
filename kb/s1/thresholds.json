@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "version": 2,
+    "status": "PROPOSED by 小c on 2026-11-16 from S-1 measurements (v2 after 小o review round 1). Roy did not specify numbers; they stand unless Roy objects before S1 starts. Changing any value after the freeze must be announced to Roy with the reason.",
+    "anchors": "every number names the measurement it is anchored to. Where the anchor does not cover the stated scope the item is labelled 'budget proposal, not yet measured at its scope' and becomes a verifiable gate only after S1 measures it at that scope.",
+    "no_acceptance_peeking": "anchors use baseline sets and the gap group only. The acceptance group is partially exposed (PDF BM25 aggregate 10/18 was seen at task-building time); no decision may cite it."
+  },
+  "H": {
+    "rule": "binary; any failure means the stage cannot be called complete (Gate 2 section 13)",
+    "items": ["H1 boundary", "H2 deletion canary", "H3 network destinations", "H4 provenance and licences", "H5 failures visible", "H6 open-to-place"]
+  },
+  "O_relevance": {
+    "text_wiki_noninferiority": {
+      "sets": ["eval_queries_real (27 valid)", "eval_queries_blind_v1 (40)", "eval_queries_blind_v2 (40)"],
+      "a0_comparator": {"real": {"variant": "vector", "score": 25}, "blind1": {"variant": "hybrid_rrf", "score": 39}, "blind2": {"variant": "hybrid_page", "score": 38}},
+      "anchor": "results/a0_summary.json; per-query ranked lists of every variant are saved in a0/*.json and are part of the freeze, so the per-category rule is reproducible",
+      "comparator_note": "the strongest variant per set was chosen after seeing those sets: a conservative comparator with selection bias, not a lenient one",
+      "rule": "kb Success@5 >= comparator score - 1 on each set AND no query category loses more than 1 query against the comparator system",
+      "margin_note": "-1 query is a proposal; with 27 to 40 queries per set no statistical claim is made, the result is reported descriptively"
+    },
+    "new_capability_pdf": {
+      "baseline_system": "naive composition of existing parts: page-level BM25 (positive-score pages only) plus Qwen3-Embedding dense (best chunk per page), RRF k=60; code = pdf_dense_eval.py at freeze time (hash recorded)",
+      "anchor_gap_group_n30": {"bm25_L1": 16, "bm25_L2": 15, "dense_L1": 28, "dense_L2": 18, "hybrid_L1": 28, "hybrid_L2": 19, "hybrid_L2_at1": 15},
+      "rule_relevance": "on the PDF acceptance group (n=18), kb L2@5 >= baseline L2@5 AND kb L1@5 >= baseline L1@5 AND no category loses more than 1 query. The per-task paired differences and a paired bootstrap interval are reported alongside; the decision rule itself is descriptive (n=18 cannot support a significance claim).",
+      "worth_the_complexity": "has three parts, all required: (1) relevance: kb beats the baseline by >= 2 queries on L2@5 on PDF acceptance, reported with the interval; (2) engineering budget: the E items below, once measured at their scope; (3) maintenance and failure cost: at S4 report the number of failure modes covered by tests, test and code size, and any case that needed an unplanned workaround. Passing (1) alone is not a claim of worth.",
+      "diagnostic_for_gap_work": "the measured gap is localisation: the right file is found 28/30 but the right page 18-19/30 (L1 vs L2). The cause is NOT established: gold quality, text extraction, query generation and page aggregation are all untested alternatives. Page-length diagnostic (descriptive): dense L2 is 11/17 for gold pages with <= 4 chunks and 7/13 for longer pages; median chunks of the top-1 page equals the overall median (4). Gap-group work should first diagnose, then change chunking; this is a development target, not a gate."
+    },
+    "image_page_tasks": "EXPLORATORY ONLY. Gold is silver (OCR-overlap mapping; 1 of 18 pages visually confirmed). Not part of any acceptance rule. Replaced at S5 by tasks with fully human-verified gold, frozen before S5 starts.",
+    "audio_video": "tolerance in seconds and the acceptance tasks are fixed before S6 and S7 start, by the same rules",
+    "tolerance_pages": 0
+  },
+  "E_engineering": {
+    "status_of_all_E": "budget proposals. They become verifiable gates only after S1 measures them at the stated scope (wiki + PDF collections, kb implementation). Anchors below are partial and are NOT evidence that the budget is achievable at full scope.",
+    "E1_first_result_latency_ms_p95": {"value": 150, "scope": "single hybrid query over wiki plus PDF collections, resident process, warm", "partial_anchor": "measured: wiki-only A0b end-to-end p95 70.6 ms; PDF-only query-embedding p95 about 76 ms. Not measured: full hybrid over wiki plus PDF including sparse, fusion and result assembly"},
+    "E2_new_file_visible_as_candidate_s": {"value": 10, "scope": "single text or markdown file under 1 MB", "partial_anchor": "none (proposal)"},
+    "E2_index_cost_reporting": "report only, no threshold. Measured: 31,980 PDF chunks embedded in 68 minutes at 7.8 chunks/s on this machine, one time",
+    "E3_login_to_ready_s": {"value": 30, "partial_anchor": "measured server ready 2.1 to 6.5 s and old JSON index load 7.8 s; the new system's index-open, recovery and collection discovery are not measured"},
+    "E4_sleep_resume": "binary: no lost or duplicated sources after kill or sleep during ingest",
+    "E5_resident_memory_mb": {"value": 2500, "scope": "all kb resident processes, idle, wiki plus PDF collections", "partial_anchor": "measured: llama-server 744 to 783 MB with -np 1 -c 4096 (9.4 GB with the default 4 slots at 8192) and python 389 MB for the wiki index. Not measured: the PDF sparse index, dense vectors in memory, metadata, workers, caches. The 4-slot default is forbidden"},
+    "embedding_context_limit_note": "the small server config caps one input at 4096 tokens; chunkers must stay under it"
+  },
+  "decisions_from_measurement": {
+    "embedding_backend_for_S1": "Qwen3-Embedding-0.6B Q8_0 GGUF through resident llama-server (-np 1 -c 4096). Reason: same vectors as the existing index (cos >= 0.9998), query 41 to 51 ms, 0.78 GB. CPU fallback: sentence-transformers on CPU (median 251 ms). Rejected: all-MiniLM-L6-v2 (blind1 15/40 and blind2 14/40 versus 33/40 and 32/40). Limit: no other multilingual model was compared.",
+    "ocr_for_S5_first_try": "Windows built-in OCR for horizontal screenshots (measured); vertical classical layouts need another engine, to be evaluated in S5 after Roy approves any download"
+  }
+}

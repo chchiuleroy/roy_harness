@@ -1,0 +1,6 @@
+[1/5] s4_keys_key_file_not_flushed_to_disk: killed
+[2/5] s4_keys_fallback_replaces_a_key_made_meanwhile: killed
+[3/5] s4_keys_cleanup_failure_replaces_the_real_error: killed
+[4/5] s4_keys_cleanup_failure_after_a_good_write_hidden: killed
+[5/5] s4_keys_temporary_file_not_removed: killed
+killed 5, survived 0, could not apply 0

@@ -1,0 +1,398 @@
+{
+ "derived_from": "s1/tasks/pdf_tasks.json",
+ "derived_from_sha256": "76d30d171a78734c1adc497932732333f1099217daa99acd665409248d8a85e2",
+ "group": "gap",
+ "tasks": [
+  {
+   "id": "PDF-P01",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "影像資料平均分給客戶並限制各戶樣本量",
+   "gold": {
+    "pdf": "arxiv_2605.18656_dp_federated_learning.pdf",
+    "page": 28
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "970ea957fc4988af3d0aee57978032c6be7f960022bdef4aaeb43f6d58e1b226"
+  },
+  {
+   "id": "PDF-P04",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "網格特徵分解只預算一次的密度估計法",
+   "gold": {
+    "pdf": "arxiv_2607.22366_pdkde_spatial_intensity.pdf",
+    "page": 10
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "fd6c043d53ee574b31a76fb53a29682225518f3a8210b953b01e4c4363749f5d"
+  },
+  {
+   "id": "PDF-P05",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "AI 找憑證後自己測內部服務權限那段",
+   "gold": {
+    "pdf": "anthropic_2026_ai_orchestrated_cyber_espionage.pdf",
+    "page": 10
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "c05bf4b3e5a402551d48b0ce3c7f1fbd49e1e12233344a731c775921b2d645ea"
+  },
+  {
+   "id": "PDF-P06",
+   "type": "pdf_passage",
+   "category": "exact_term",
+   "query": "Sklar’s theorem 如何拆分空間邊際與相依結構",
+   "gold": {
+    "pdf": "arxiv_2607.23063_copulas_geostatistical.pdf",
+    "page": 1
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "e93cf761c533d53fa1034b76f433466a8f2576a506d01571aa6f639497372025"
+  },
+  {
+   "id": "PDF-P07",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "Gaussian spherical covariance 的 W2 下界",
+   "gold": {
+    "pdf": "arxiv_2605.18069_wasserstein_ddpm_follmer.pdf",
+    "page": 8
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "c77f79456270f13679066c4d961a09555cab615ad6ef62b10fc6d03c1028c29b"
+  },
+  {
+   "id": "PDF-P10",
+   "type": "pdf_passage",
+   "category": "exact_term",
+   "query": "vMF kernel 的球面密度分數與漂移場等價",
+   "gold": {
+    "pdf": "arxiv_2603.10592_gradient_flow_drifting.pdf",
+    "page": 15
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "e354d28bd6dc602e6d701074b021ca2a887892a1110c1a1174d5d938eaa88cc1"
+  },
+  {
+   "id": "PDF-P11",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "Kimi Linear 的 auxiliary vector recurrence 證明",
+   "gold": {
+    "pdf": "kimi_2025_kimi_linear.pdf",
+    "page": 26
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "668f1903286032e349a67e1c08b4feae5c2f2b221b7cec29a56ac78ebc9d2b23"
+  },
+  {
+   "id": "PDF-P12",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "路口前有車停住，其他模擬車跟著煞車",
+   "gold": {
+    "pdf": "arxiv_2310.08710_waymax.pdf",
+    "page": 3
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "96dbc5ed9acc9981b318f70f22fadef11a1f5975bb8a562bbbaeab7ecb443daf"
+  },
+  {
+   "id": "PDF-P13",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "HMC tuning 的 step size 與 leapfrog steps 範圍",
+   "gold": {
+    "pdf": "paper_ssla_2605.12208.pdf",
+    "page": 30
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "aac453e515b925de2c8e2901871c77808462211fd7fd9fb2fede50eb371d62b7"
+  },
+  {
+   "id": "PDF-P14",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "沙盒居民會規劃生活、傳消息並協調活動",
+   "gold": {
+    "pdf": "arxiv_2304.03442_generative_agents.pdf",
+    "page": 1
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "de2489f61bcb46d1583221a2fac03efdf6d6d8c3af76aeb003d6b1e368ace6a9"
+  },
+  {
+   "id": "PDF-P16",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "自主軟體大幅擴張行動規模帶來身分風險",
+   "gold": {
+    "pdf": "nist_2026_ai_agent_identity_authorization.pdf",
+    "page": 6
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "9666360d0ddcff8705e31fb19610de2b2937be7c64f910e028e15c56d45956ba"
+  },
+  {
+   "id": "PDF-P19",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "資料集群組太少使穩健標準誤偏保守",
+   "gold": {
+    "pdf": "arxiv_2512.08296_scaling_agent_systems.pdf",
+    "page": 27
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "58fcc835b3e85670ab33d871cec407970d73ae32505c3ac88e47e4b830555a7e"
+  },
+  {
+   "id": "PDF-P20",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "Möbius bridge 少一個狀態位元，查表更省…",
+   "gold": {
+    "pdf": "anthropic_2026_aes_mobius_bridge.pdf",
+    "page": 29
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "7cd1b28e58cf117c3393ccccf0aa8810e3094c45d30d0fb942b2b06c2fff1128"
+  },
+  {
+   "id": "PDF-P21",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "YOLO dual assignment 推論時丟棄 one-to-many head",
+   "gold": {
+    "pdf": "arxiv_2405.14458_yolov10.pdf",
+    "page": 4
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "7aa5ad9049cb618b2c38f9ffb63bfa9b3c3f8a339494b055afd8e9fc2b2cb6c3"
+  },
+  {
+   "id": "PDF-P23",
+   "type": "pdf_passage",
+   "category": "exact_term",
+   "query": "Pairwise Ranking Prompting 為何勝過逐點與列表排序",
+   "gold": {
+    "pdf": "arxiv_2306.17563_prp_pairwise_ranking_prompting.pdf",
+    "page": 1
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "db16b1c14f0f07c66fbdfc94265abc0a87dab408431879004e498bdbe9a564ea"
+  },
+  {
+   "id": "PDF-P24",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "兩種抗癲癇藥比較中哪個副作用風險較低",
+   "gold": {
+    "pdf": "arxiv_2606.16224_bayesian_hierarchical_meta_analysis.pdf",
+    "page": 2
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "bd4ecabae6ffd20e4a971dd19e48362000c6a8d3c5f23901674b638504eb5600"
+  },
+  {
+   "id": "PDF-P27",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "量化敏感度指標中平方誤差最接近直接精度評估",
+   "gold": {
+    "pdf": "arxiv_2209.02976_yolov6.pdf",
+    "page": 16
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "0ca1b7aa1cd209174c13f27b888f78fbca888f8694ee13c07494eb733fcbc3fa"
+  },
+  {
+   "id": "PDF-P28",
+   "type": "pdf_passage",
+   "category": "exact_term",
+   "query": "Adjusted s-delay e-process 如何保留變點前後證據",
+   "gold": {
+    "pdf": "arxiv_2607.28322_e_detectors_change_detection.pdf",
+    "page": 17
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "35d98474eff1f2ec1e142f7482f506eb2446bd0ed6aa14205edb5c2338eb86f1"
+  },
+  {
+   "id": "PDF-P29",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "第一輪推理錯誤會把第二輪檢索帶偏…",
+   "gold": {
+    "pdf": "arxiv_2305.15294_iter_retgen.pdf",
+    "page": 9
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "3619926ba4ef68fbc646a6041013fb95cb8f45613d7666a3842a5320095d053c"
+  },
+  {
+   "id": "PDF-P30",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "RAG 與 search-as-a-tool 的整合差異",
+   "gold": {
+    "pdf": "arxiv_2503.09516_search_r1.pdf",
+    "page": 3
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "8dd1fb33b2a015d538d39990e6576a307dd8be730605f7ea27d975e215bcce6b"
+  },
+  {
+   "id": "PDF-P32",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "ENN reward model 用 ensemble variance 選人類查詢對",
+   "gold": {
+    "pdf": "asghari_2026_efficient_exploration_rlhf.pdf",
+    "page": 9
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "24f307fcf2a7b136f547c96ba09a2a25081ecf64facc37ef4a7b74fa3d80b670"
+  },
+  {
+   "id": "PDF-P33",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "深度學習理論最終會成為學習過程的力學",
+   "gold": {
+    "pdf": "arxiv_2604.21691_dl_theory_learning_mechanics.pdf",
+    "page": 2
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "30ecfd2d8fdd53450110e8b41542b7c5fc28982047eb787fd8a836f8a0d30ac1"
+  },
+  {
+   "id": "PDF-P34",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "瀏覽代理只有搜尋、開啟、頁內尋找…",
+   "gold": {
+    "pdf": "meta_2026_muse_glimmer_methodology.pdf",
+    "page": 2
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "b1773ed85f5a34410f1b1c57539890851ff0ab96ce57ac7ef9c69077dd7ca210"
+  },
+  {
+   "id": "PDF-P35",
+   "type": "pdf_passage",
+   "category": "exact_term",
+   "query": "hierarchical excitatory process 如何表達神經習慣化",
+   "gold": {
+    "pdf": "arxiv_2606.11768_hep_excitatory_process.pdf",
+    "page": 6
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "399049e4558ae69dc608e7083264c35d5333d9009c86d4d36fa53de1a0b246b3"
+  },
+  {
+   "id": "PDF-P36",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "Bilevel Autoresearch 的 outer cycle 與 runner 更新規則",
+   "gold": {
+    "pdf": "arxiv_2603.23420_bilevel_autoresearch.pdf",
+    "page": 8
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "585551cbb7f9834a6aa64c15ffa784c77b33a0c8cd4645d44a6fd1d0a5b12cf6"
+  },
+  {
+   "id": "PDF-P37",
+   "type": "pdf_passage",
+   "category": "partial_memory",
+   "query": "planner 接前輪 latent embedding，critic 再改計畫",
+   "gold": {
+    "pdf": "arxiv_2604.25917_recursivemas.pdf",
+    "page": 28
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "e3e1877787ca7ecf68c44464020347e4f9649237dd28315f18e8fde688b622c9"
+  },
+  {
+   "id": "PDF-P38",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "如何選脈衝與修正凸起的振幅以滿足矩條件",
+   "gold": {
+    "pdf": "openai_2026_navier_stokes.pdf",
+    "page": 131
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "d9babe4765c8a8db49ea695e643039430c18d0147ccf0fa8fded9b611008207d"
+  },
+  {
+   "id": "PDF-P41",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "SELF-RAG 的 retrieval threshold 如何權衡 accuracy",
+   "gold": {
+    "pdf": "arxiv_2310.11511_self_rag.pdf",
+    "page": 10
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "924c05d917513d3a051d6fae865dd24cfe23b565a886c4a08a4d84faef7d1d4a"
+  },
+  {
+   "id": "PDF-P46",
+   "type": "pdf_passage",
+   "category": "paraphrase",
+   "query": "條件分布由環狀形態平滑轉成兩團常態",
+   "gold": {
+    "pdf": "arxiv_2610.37611_agentic_distributional_regression.pdf",
+    "page": 19
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "1182e28f0a4c3f259b3192f0c0621d24fb7d2f34785e6b1da3035a0863d48dd9"
+  },
+  {
+   "id": "PDF-P48",
+   "type": "pdf_passage",
+   "category": "mixed_zh_en",
+   "query": "YOLOv2 在 COCO test-dev 的 S M L 表現比較",
+   "gold": {
+    "pdf": "arxiv_1612.08242_yolo9000_v2.pdf",
+    "page": 6
+   },
+   "group": "gap",
+   "author": "小o (blind to system, saw only the page excerpt)",
+   "text_sha256": "992d8a8999f1f2ac79ab4a0658b55fd4b352240d2affa5e576a0a0f21d91bda7"
+  }
+ ],
+ "tasks_sha256": "90fb8213eea132512af92983b8d903861d6c81150f0c858a56c588d50c64b8b0"
+}
