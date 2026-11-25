@@ -204,13 +204,13 @@ SUPERAGENT_REMOVAL=1 ...                               # 慢速的「拿掉 supe
 
 | 層級 | 內容 |
 |---|---|
-| **CI（自動）** | 每個 PR 與每次推 main 都跑離線整套：`windows-latest`、Python 3.13、`python -X utf8 -m unittest discover -s tests`、逾時 40 分鐘。main 有分支保護，必須通過 `offline-tests`（管理員仍可繞過）。最近一次（PR #41，2026-11-24）：**1213 項、OK、略過 27 項、647 秒** |
+| **CI（自動）** | 每個 PR 與每次推 main 都跑離線整套：`windows-latest`、Python 3.13、`python -X utf8 -m unittest discover -s tests`、逾時 40 分鐘。另有一個平行的 `kb-tests`（在 `kb/` 下 `python run_tests.py`；裝 `numpy` 與 `pymupdf`，它們是 kb 的可選套件）。main 有分支保護，**只要求 `offline-tests`** 通過（管理員仍可繞過），`kb-tests` 不是必須的檢查。最近一次（PR #44，2026-11-25）：`offline-tests` **1213 項、OK、略過 27 項、596 秒**；`kb-tests` **782 項、OK、略過 1 項、278 秒** |
 | **作者機器 live（較舊）** | 2026-11-11，真實 vLLM、單次：`HARNESS_LIVE=1` 整套 1060 項全 OK、略過 11、813 秒；`SUPERAGENT_LIVE=1` 的 2 項 OK、約 68 秒。**這之後新增的筆記與 `/dream`、GUI 疊加層都沒有重新跑過 live**（筆記與 `/dream` 真模型只手動跑過 2 次，單一模型，沒量過模型主動存筆記的頻率與 `/dream` 準確度） |
 | **手動瀏覽器（真實 Chrome＋Selenium，單次，腳本沒進 repo）** | 2026-11-24：GUI 設定頁與 session 複製／保存／刪除端到端 25 項檢查；superagent 面板對運作中的 orchestrator（**腳本化假模型**，不是真模型）13 項；kb 面板的「問」對真實模型端點（合成資料）13 項，兩個問題、一個模型、lexical 檢索，是存在性檢查，不是準確率 |
 | **沒驗證** | superagent 對真模型的端到端（新功能之後）；真正被擱置（parked）的工單上的「續跑」鈕（只有單元測試）；kb 搭配需要金鑰的 hosted provider（面板不支援）；POSIX；GUI 沒有放進 repo 的自動化瀏覽器測試 |
 
-- **kb 的測試**：在 `kb/` 下執行 `python run_tests.py`（標準函式庫 unittest）。2026-11-24（作者機器、單次、併入本 repo 之後）：**782 項、OK、略過 1 項、206 秒**。**CI 目前不跑它們**（CI 只跑根目錄的 `tests/`）。
-- **CI 的偶發失敗**：兩個都是時間相關的測試。筆記測試（機制已在作者機器重現：Windows 檔案時間戳可能比剛取的 `time.time()` 還早，零間隔下 600 次寫入有 444 次；**那次 CI 失敗是否就是這個機制，是推測**，沒有 runner 上的時序紀錄；PR #41 已改成明確設定修改時間）；`test_superagent_replay` 的一個 chunk 逾時測試（2 秒逾時，2026-11-24 在 #40 合併後的 main 失敗一次、之後一次綠，**尚未修**）。**單次綠燈不等於穩定。**
+- **kb 的測試**：在 `kb/` 下執行 `python run_tests.py`（標準函式庫 unittest）。在乾淨環境（沒裝任何套件）會有 52 個錯誤、4 個模組載入失敗，因為 numpy 與 PyMuPDF 是可選套件，要先裝；另外有兩個測試曾因為 import 作者私人 wiki 腳本而在 CI 上失敗（已修，#44）。裝好之後：作者機器 206 秒、CI 278 秒，都是 782 項、OK、略過 1 項（符號連結權限）。CI 從 #44 起會跑它們。
+- **CI 的偶發失敗**：兩個都是時間相關的測試。筆記測試（機制已在作者機器重現：Windows 檔案時間戳可能比剛取的 `time.time()` 還早，零間隔下 600 次寫入有 444 次；**那次 CI 失敗是否就是這個機制，是推測**，沒有 runner 上的時序紀錄；PR #41 已改成明確設定修改時間）；`test_superagent_replay` 的一個 chunk 逾時測試（逾時也涵蓋為下一段啟動新的 harness 行程；2026-11-24 在 #40 合併後的 main 失敗一次）。#44 把逾時從 2 秒放寬到 15 秒：在作者機器把 CPU 吃滿重現，修前 10 次全失敗，修後 1/6（24 個忙迴圈 0/6、閒置 0/4），所以**大幅改善但極端超載下不是免疫**。**單次綠燈不等於穩定。**
 - **略過的 27 項**：需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。
 - 每項測試的 docstring 寫的是「為什麼這個行為重要」；筆記與 `/dream`、GUI 這批新程式碼另做過突變驗證（把規則一個一個弄壞，測試要抓到；腳本沒進 repo）。
 - 較早的整套離線跑、移除檢查、live 紀錄與多輪第三方（小o，唯讀靜態）審查紀錄都在 [docs/validation-and-reviews.md](docs/validation-and-reviews.md)。
