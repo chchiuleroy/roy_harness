@@ -179,5 +179,5 @@ HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests  # 含打真實伺�
 - **略過的 27 項**：需要另設環境變數才會跑的 live 測試與移除檢查，以及依機器條件略過的測試（例如需要符號連結權限的那幾項，作者的機器沒有，從未實跑）。
 - **突變驗證**：筆記與 `/dream` 的規則被一個一個弄壞（67 個），測試全部抓到（腳本沒進 repo）。
 - **移除檢查**（`SUPERAGENT_REMOVAL=1`；離線，把整套測試各跑一次，一邊是完整的樹、一邊是刪掉 superagent 的副本，逐項比對）：2026-11-05 重寫後跑過一次，通過，約 790 秒；2026-11-06 加入第二眼後再跑一次，通過，約 797 秒；2026-11-11 再跑一次（`discover -s tests -p test_superagent_cli.py`），`test_suite_identical_without_superagent` 通過、該檔 17 項 OK，約 921 秒。
-- **live 測試**：2026-11-11（作者機器，真實 vLLM，單次）以 `HARNESS_LIVE=1` 整套一次 `discover` 跑過：**1060 項、全 OK、略過 11、0 失敗，813 秒**；逐檔跑與之一致（累計約 930 秒）；另以 `SUPERAGENT_LIVE=1` 跑 `test_superagent_live.py` 的 2 項（真模型判斷、整個工單迴圈），OK、約 68 秒。**這之後新增的筆記與 `/dream`，真模型只手動跑過 2 次**（單一模型；沒量過模型主動存筆記的頻率與 `/dream` 準確度）。
+- **live 測試**：2026-11-25（作者機器，真實 vLLM，單次）以 `HARNESS_LIVE=1` 整套一次 `discover` 跑過：**1213 項、全 OK、略過 11、0 失敗，1150 秒**。上一次是 2026-11-11：**1060 項、全 OK、略過 11、0 失敗，813 秒**；逐檔跑與之一致（累計約 930 秒）；另以 `SUPERAGENT_LIVE=1` 跑 `test_superagent_live.py` 的 2 項（真模型判斷、整個工單迴圈），OK、約 68 秒（11-25 的 `SUPERAGENT_LIVE=1` 是 74 秒，見 README）。**整套 live 通過不代表新功能對真模型的行為都量過：筆記與 `/dream`，真模型只手動跑過 2 次**（單一模型；沒量過模型主動存筆記的頻率與 `/dream` 準確度）。
 - superagent 的測試用真的 harness 子行程加腳本化假模型，不碰網路。前端沒有自動化瀏覽器測試，是手動對真實 vLLM 驗證的。
