@@ -457,6 +457,8 @@ def main(argv=None, out=None):
                 for c in rep["capabilities"]:
                     print(f"  [{'ok' if c['available'] else 'MISSING'}] {c['name']}: {c['detail']}"
                           + ("" if c["available"] else f"  -> affects: {', '.join(c['affects'])}"), file=out)
+                if rep["text_key"]["state"] not in ("no_database", "not_applicable"):
+                    print(f"text key: {rep['text_key']['state']}: {rep['text_key']['detail']}", file=out)
                 print("data folder: " + ("healthy" if rep["healthy"] else "PROBLEMS"), file=out)
                 for kind, detail in rep["problems"]:
                     print(f"  {kind}: {detail}", file=out)

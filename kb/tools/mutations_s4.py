@@ -283,6 +283,18 @@ S4_MUTATIONS = [
     ("s4_keys_fallback_replaces_a_key_made_meanwhile", "keys.py", "                with open(path, \"xb\") as f:", "                with open(path, \"wb\") as f:"),
     ("s4_keys_a_vanished_key_is_not_reported", "keys.py", "                if key is None:\n                    raise KeyProblem(f\"the text key {path_for(db_path)} was made and removed", "                if False:\n                    raise KeyProblem(f\"the text key {path_for(db_path)} was made and removed"),
     ("s4_keys_a_damaged_key_is_replaced_by_anyone", "keys.py", "            if not replace_damaged:\n                raise", "            if False:\n                raise"),
+    # ---- kb doctor reports the text key (2026-11-26)
+    ("s4_doctor_key_mismatch_called_ok", "doctor.py", "    if ids.key_check(key) != row[0]:\n        return \"mismatch\"", "    if False:\n        return \"mismatch\""),
+    ("s4_doctor_missing_key_called_ok", "doctor.py", "    if key is None:\n        return \"missing\", (", "    if False:\n        return \"missing\", ("),
+    ("s4_doctor_check_home_ignores_key_problems", "doctor.py", "    if state in KEY_PROBLEMS:", "    if False:"),
+    ("s4_doctor_key_printed_in_detail", "doctor.py", "({keys.SIZE} bytes) matches this database\"", "({keys.SIZE} bytes, {key.hex()}) matches this database\""),
+    ("s4_doctor_key_state_loads_the_key", "doctor.py", "    return \"ok\", f\"{path}", "    ids.use_key(key)\n    return \"ok\", f\"{path}"),
+    ("s4_doctor_damaged_key_called_missing", "doctor.py", "    except keys.KeyProblem as e:\n        return \"damaged\", str(e)", "    except keys.KeyProblem as e:\n        return \"missing\", str(e)"),
+    ("s4_doctor_old_schema_called_ok", "doctor.py", "return \"not_applicable\", \"this database", "return \"ok\", \"this database"),
+    ("s4_doctor_empty_check_table_called_fine", "doctor.py", "    if row is None:\n        return \"damaged\", \"the key check table", "    if False:\n        return \"damaged\", \"the key check table"),
+    ("s4_doctor_report_hides_the_key_state", "doctor.py", "    state, detail = key_state(home)\n    return {\"capabilities\"", "    state, detail = \"ok\", \"\"\n    return {\"capabilities\""),
+    ("s4_doctor_cli_does_not_print_the_key_state", "cli.py", "if rep[\"text_key\"][\"state\"] not in (\"no_database\", \"not_applicable\"):", "if False:"),
+    ("s4_doctor_database_error_raises", "doctor.py", "    except sqlite3.Error as e:\n        return \"unreadable\"", "    except ZeroDivisionError as e:\n        return \"unreadable\""),
     # ---- eleventh review (2026-11-24)
     ("s4_keys_cleanup_failure_replaces_the_real_error", "keys.py", "    except OSError:\n        if not failed:\n            raise", "    except OSError:\n        raise"),
     ("s4_keys_cleanup_failure_after_a_good_write_hidden", "keys.py", "    except OSError:\n        if not failed:\n            raise", "    except OSError:\n        pass"),

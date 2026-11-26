@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from dataclasses import asdict, dataclass
 
-from . import cas, commit, db
+from . import cas, commit, db, ids, keys
 from .errors import ArtifactsMissing
 
 
@@ -64,11 +64,53 @@ def check_capabilities(which=shutil.which, find_spec=importlib.util.find_spec, e
     ]
 
 
+KEY_PROBLEMS = ("missing", "damaged", "mismatch", "unreadable")
+
+
+def key_state(home):
+    """(state, detail) of the text key of this data folder. Read-only and it does NOT load the key into this process (`db.connect` does that and refuses
+    a folder whose key is missing; the doctor must report such a folder, not crash on it). States: ok; missing, damaged, mismatch, unreadable (problems);
+    no_database, not_applicable (a database older than schema 7 has no key yet; nothing to report). The key itself never appears in the detail."""
+    if not os.path.isfile(home.db_path):
+        return "no_database", f"{home.db_path} does not exist"
+    try:
+        conn = sqlite3.connect(f"file:{home.db_path}?mode=ro", uri=True, isolation_level=None, timeout=5.0)
+        try:
+            row = conn.execute("SELECT check_value FROM text_key_check").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return "not_applicable", "this database is older than schema 7 and has no text key yet"
+        return "unreadable", f"the key check of {home.db_path} could not be read ({e})"
+    except sqlite3.Error as e:
+        return "unreadable", f"the key check of {home.db_path} could not be read ({e})"
+    path = keys.path_for(home.db_path)
+    if row is None:
+        return "damaged", "the key check table holds no value: the database is damaged or was made by hand"
+    try:
+        key = keys.load(home.db_path)
+    except keys.KeyProblem as e:
+        return "damaged", str(e)
+    except OSError as e:
+        return "unreadable", f"{path} could not be read ({e})"
+    if key is None:
+        return "missing", (f"{path} is missing. Without it the ids of this knowledge base cannot be made again; put the file back "
+                           "(a copy of the whole data folder holds it), or make a new data folder and add your original files again")
+    if ids.key_check(key) != row[0]:
+        return "mismatch", f"{path} does not belong to this database"
+    return "ok", f"{path} ({keys.SIZE} bytes) matches this database"
+
+
 def check_home(home, deep=False):
     """Returns a list of problems (empty means healthy). deep re-hashes every stored blob."""
     problems = []
     if not os.path.isfile(home.db_path):
         return [("db_missing", f"{home.db_path} does not exist; run kb init")]
+    state, detail = key_state(home)
+    if state in KEY_PROBLEMS:
+        # Opening the database needs the key, so nothing else can be checked until it is back: say so instead of raising.
+        return [("text_key_" + state, detail + "; the other checks need the key and were not run")]
     conn = db.connect(home.db_path, readonly=True)
     try:
         v = db.schema_version(conn)
@@ -127,4 +169,6 @@ def embedding_backend_capability(home):
 def report(home, deep=False):
     caps = check_capabilities() + [embedding_backend_capability(home)]
     problems = check_home(home, deep=deep)
-    return {"capabilities": [asdict(c) for c in caps], "problems": [list(p) for p in problems], "healthy": not problems}
+    state, detail = key_state(home)
+    return {"capabilities": [asdict(c) for c in caps], "text_key": {"state": state, "detail": detail},
+            "problems": [list(p) for p in problems], "healthy": not problems}
