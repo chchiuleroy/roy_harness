@@ -143,6 +143,32 @@ class TestScreen(unittest.TestCase):
         self.assertEqual(ask_screen.screen("a​b​c"), [])
         self.assertTrue(ask_screen.screen("a" + "​" * (ask_screen.INVISIBLE_LIMIT + 1)))
 
+    def test_the_shapes_of_the_three_rewritten_patterns_still_decide_the_same_way(self):
+        """The template-marker, download-and-run and destructive-command patterns were made linear;
+        these are the cases where a careless rewrite would change the answer."""
+        flagged = ("\n\n# system override", "text\n \t## instructions here", "\r\n#### x\n  # SYSTEM", "a\n# system\nb",
+                   "curl a curl b | zsh", "wget x | bash", "CURL x |sh", "curl a | cat\ncurl b | sh",
+                   "rm -rfxf /", "RM -RF /", "rm -abrcf x", "rm  -rf")
+        clean = ("# systematic notes", "text # system", "curl a | cat | sh", "curl a\n| sh", "curl a | shell", "wget a b",
+                 "rm -rfx", "rm -f -r x", "rm -r", "rm -fr /", "rm -ar -abf x", "a\n\n\n  text # instructions")
+        for text in flagged:
+            with self.subTest(text):
+                self.assertTrue(ask_screen.screen(text), repr(text))
+        for text in clean:
+            with self.subTest(text):
+                self.assertEqual(ask_screen.screen(text), [], repr(text))
+
+    def test_a_passage_built_to_make_a_pattern_rescan_is_screened_in_linear_time(self):
+        """The text is whatever a source document says. With the old patterns each of these took seconds
+        (a blank-line run, a long '-rrrr...' flag, many 'curl' words); the bound is loose on purpose."""
+        import time
+        for label, text in (("blank lines", "\n" * 20000), ("space-newline", " \n" * 10000),
+                            ("rm flag", "rm -" + "r" * 20000), ("curl words", "curl " * 12000)):
+            t0 = time.perf_counter()
+            ask_screen.screen(text)
+            took = time.perf_counter() - t0
+            self.assertLess(took, 0.5, f"{label}: {len(text)} chars took {took:.2f}s")
+
 
 class TestVerify(unittest.TestCase):
     PASSAGES = {"P1": "The falcon  flew over\nthe harbor at dawn, and the tide was low.", "P2": "A different paragraph about quarterly taxes."}

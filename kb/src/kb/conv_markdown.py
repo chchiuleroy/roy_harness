@@ -12,6 +12,48 @@ WIKILINK = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
 KEYVAL = re.compile(r"^([A-Za-z_][\w-]*):[ \t]*(.*)$")
 
 
+class _Next:
+    """The first character of a set at or after a position, remembering the last answer: for every position up to that answer the
+    answer is the same, so a run of queries that only move forward reads each stretch of text once."""
+
+    def __init__(self, text, pattern):
+        self.text, self.rx, self.lo, self.hit = text, re.compile(pattern), None, None
+
+    def __call__(self, pos):
+        if self.lo is not None and self.lo <= pos and (self.hit is None or pos <= self.hit):
+            return self.hit
+        m = self.rx.search(self.text, pos)
+        self.lo, self.hit = pos, (m.start() if m else None)
+        return self.hit
+
+
+def wikilinks(text):
+    """The targets WIKILINK.findall(text) returns (WIKILINK stays as the reference the tests compare with), read in one pass.
+    findall tried every '[[' and each failing try read on to the end of the text ('[[a' or '[[a#' repeated: 30,000 characters took
+    8-16 s). Here the target ends at the first of ] | #; a #section or |alias after it only runs on to the next ] (neither may contain
+    one), so a link is the target, then the next ], then one more ]. Those positions are found once for all openers, and an opener that
+    fails means every opener before that target end fails the same way, so the search resumes there."""
+    out, pos = [], 0
+    target_end = _Next(text, r"[\]|#]")
+    close = _Next(text, r"\]")
+    while True:
+        s = text.find("[[", pos)
+        if s < 0:
+            return out
+        e = target_end(s + 2)
+        if e is None:
+            return out
+        k = e
+        if e > s + 2:                                             # the target is not empty
+            if text[e] in "#|":                                   # #section and |alias: on to the next ]
+                k = close(e + 1)
+            if k is not None and text.startswith("]]", k):
+                out.append(text[s + 2:e])
+                pos = k + 2
+                continue
+        pos = e
+
+
 def parse_front_matter(lines):
     """Returns (meta, number_of_lines_consumed). Only top-level 'key: value' pairs and '- item' lists: enough for title and tags."""
     if not lines or lines[0].strip() != "---":
@@ -96,7 +138,7 @@ class MarkdownConverter:
         for u in units:
             if u.kind == "code":                              # example text in a code block is not a link; front matter is not a unit
                 continue
-            for t in WIKILINK.findall(u.text):
+            for t in wikilinks(u.text):
                 t = t.strip()
                 if t and t not in links:
                     links.append(t)
