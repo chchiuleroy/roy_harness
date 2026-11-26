@@ -194,6 +194,7 @@ python -X utf8 -m superagent --home <資料夾> run --allow alice --base-url htt
 ## 測試與驗證
 
 ```bash
+python verify.py                                       # 一條指令跑離線 harness 與 kb 兩套（`--only kb` 只跑一段）；kb 缺 numpy／PyMuPDF 算失敗，不算略過
 python -X utf8 -m unittest discover -s tests          # 離線
 HARNESS_LIVE=1 python -X utf8 -m unittest discover -s tests   # 加上打真實伺服器的 live 測試
 SUPERAGENT_LIVE=1 ...                                  # superagent 對真實模型的端到端（模型判斷＋整個工單迴圈，兩個測試）
