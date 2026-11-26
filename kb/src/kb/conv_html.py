@@ -11,7 +11,7 @@ SKIP = {"script", "style", "template", "noscript", "svg", "canvas", "iframe", "o
 BLOCK = {"p", "div", "section", "article", "aside", "header", "footer", "main", "nav", "li", "ul", "ol", "dl", "dt", "dd", "blockquote",
          "figure", "figcaption", "tr", "table", "form", "fieldset", "address", "details", "summary", "body", "br", "hr"}
 HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
-CHARSET = re.compile(rb"charset\s*=\s*[\"']?\s*([A-Za-z0-9_\-]+)", re.I)
+CHARSET = re.compile(rb"charset\s*=\s*(?:[\"']\s*)?([A-Za-z0-9_\-]+)", re.I)   # same matches as ...=\s*["']?\s*(...) without the two overlapping \s*
 VOID = {"br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr"}
 
 

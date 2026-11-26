@@ -119,6 +119,51 @@ class TestMarkdown(unittest.TestCase):
         self.assertEqual(MarkdownConverter().convert(b"## Real Title\n\ntext").meta["title"], "Real Title")
         self.assertIsNone(MarkdownConverter().convert(b"just text").meta["title"])
 
+    def test_wikilink_edge_cases_keep_their_old_meaning(self):
+        """The link finder was rewritten to skip text it already knows cannot close; these are the shapes
+        that decide whether it still returns what the single regex returned."""
+        cases = {                                       # expected values are what the single regex returned before the rewrite
+            "[[a]] and [[b|c]] and [[d#e]] and [[f#g|h]]": ["a", "b", "d", "f"],
+            "[[a[[b]]": ["a[[b"],                       # the target may contain '[[': kept as it was
+            "[[x [[Other]]": ["x [[Other"],
+            "[[]] [[a]]": ["a"],
+            "[[a [[b [[c": [],
+            "[[a#b [[c]]": ["a"],
+            "[[a|b [[c]]": ["a"],
+            "[[[a]]": ["[a"],
+            "[[a]]]]": ["a"],
+            "[[a\nb]]": ["a\nb"],
+            "[[a#b|c#d]]": ["a"],
+            "[[a]][[b]]": ["a", "b"],
+            "[[ a ]]": ["a"],
+        }
+        for text, want in cases.items():
+            with self.subTest(text):
+                self.assertEqual(MarkdownConverter().convert(text.encode()).meta["links"], want, repr(text))
+
+    def test_the_one_pass_link_finder_returns_what_the_regex_returns(self):
+        """wikilinks() replaced WIKILINK.findall(); the regex stays as the reference. Random strings built from the
+        pieces that decide a link (openers, closers, # and |, empty and plain targets) must give the same list."""
+        import random
+        from kb.conv_markdown import WIKILINK, wikilinks
+        rng = random.Random(7)
+        pieces = ["[[", "]]", "[", "]", "|", "#", "a", "b c", " ", "\n", "[[a]]", "[[a|b]]", "[[a#b]]", "x"]
+        for _ in range(20000):
+            text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 16)))
+            self.assertEqual(wikilinks(text), WIKILINK.findall(text), repr(text))
+
+    def test_many_unclosed_link_openers_are_read_in_linear_time(self):
+        """'[[a', '[[a#' or '[[a|b' repeated made every opener rescan the rest of the text (30,000
+        characters took 1.5-16 s); the bound is loose on purpose."""
+        import time
+        for piece in ("[[a", "[[a#", "[[a|b", "[[a#b|c"):
+            data = (piece * (21000 // len(piece))).encode()
+            t0 = time.perf_counter()
+            res = MarkdownConverter().convert(data)
+            took = time.perf_counter() - t0
+            self.assertEqual(res.meta["links"], [], piece)
+            self.assertLess(took, 1.0, f"{piece!r} x {len(data) // len(piece)}: {len(data)} bytes took {took:.2f}s")
+
     def test_unclosed_code_fence_runs_to_the_end_without_crashing(self):
         res = MarkdownConverter().convert(b"before\n\n```\ncode never closed\nmore\n")
         self.assertEqual(res.units[-1].kind, "code")
@@ -179,6 +224,20 @@ class TestHtml(unittest.TestCase):
         self.assertIn("Hello bold world & friends.", texts(res))
         self.assertIn("Block text", texts(res))
         self.assertIn("line1\nline2", [u.text for u in res.units if u.kind == "code"])
+
+    def test_charset_declaration_with_many_spaces_is_found_or_skipped_in_linear_time(self):
+        """The declaration is read from the first 4,096 bytes of an untrusted file. With the old pattern
+        'charset=' followed by spaces and no name took about 16 s at 30,000 bytes; the bound is loose."""
+        import time
+        from kb.conv_html import CHARSET
+        for data, want in ((b"charset=" + b" " * 20000 + b"!", None), (b"charset = ' utf-8'", b"utf-8"),
+                           (b'charset="  big5"', b"big5"), (b"CHARSET=  gbk;", b"gbk"), (b"charset  =x_y-1", b"x_y-1"),
+                           (b"charset='", None), (b"charset= \t '", None)):
+            t0 = time.perf_counter()
+            m = CHARSET.search(data)
+            took = time.perf_counter() - t0
+            self.assertEqual(m.group(1) if m else None, want, data[:30])
+            self.assertLess(took, 0.5, f"{len(data)} bytes took {took:.2f}s")
 
     def test_declared_charset_is_honoured_and_failures_are_reported(self):
         body = "<html><head><meta charset='big5'><title>繁體</title></head><body><p>中文內容測試</p></body></html>"
