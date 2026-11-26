@@ -1,10 +1,12 @@
 """kb doctor (OPT6: missing capability is a report line, never a crash) and the command line."""
 import io
+import json
 import os
+import sqlite3
 import unittest
 from contextlib import redirect_stderr
 
-from kb import cas, cli, db, doctor
+from kb import cas, cli, db, doctor, ids, keys
 from kb.home import Home
 
 from .support import DbTestCase, tmpdir
@@ -84,6 +86,87 @@ class TestHomeHealth(DbTestCase):
         self.assertEqual(kinds, {"schema_version", "leftover_temp"})
 
 
+class TestTextKeyStatus(DbTestCase):
+    """`kb doctor` reports the state of the text key. Before, a folder whose key was missing or not its own made the doctor raise (db.connect refuses it),
+    so the tool meant to say what is wrong could not say it. A lost key is the one damage that cannot be repaired (ids are made from it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Home(os.path.join(tmpdir(self), "h"))
+        self.home.init()
+        self.key_path = keys.path_for(self.home.db_path)
+
+    def test_a_good_key_is_reported_ok_and_never_printed(self):
+        state, detail = doctor.key_state(self.home)
+        self.assertEqual(state, "ok")
+        with open(self.key_path, "rb") as f:
+            key = f.read()
+        rep = doctor.report(self.home)
+        self.assertEqual(rep["text_key"]["state"], "ok")
+        self.assertTrue(rep["healthy"])
+        self.assertNotIn(key.hex(), json.dumps(rep))                 # the report reveals where the key is, not what it is
+
+    def test_a_missing_key_is_a_reported_problem_not_an_exception(self):
+        os.remove(self.key_path)
+        problems = doctor.check_home(self.home, deep=True)           # used to raise KeyProblem
+        self.assertEqual([p[0] for p in problems], ["text_key_missing"])
+        self.assertIn("were not run", problems[0][1])                # says that the other checks could not run, so "one problem" is not read as "only one"
+        rep = doctor.report(self.home)
+        self.assertFalse(rep["healthy"])
+        self.assertEqual(rep["text_key"]["state"], "missing")
+
+    def test_a_key_of_the_wrong_size_is_damaged(self):
+        with open(self.key_path, "wb") as f:
+            f.write(b"short")
+        self.assertEqual(doctor.key_state(self.home)[0], "damaged")
+        self.assertEqual([p[0] for p in doctor.check_home(self.home)], ["text_key_damaged"])
+
+    def test_the_key_of_another_folder_is_a_mismatch(self):
+        with open(self.key_path, "wb") as f:
+            f.write(os.urandom(32))
+        self.assertEqual(doctor.key_state(self.home)[0], "mismatch")
+        self.assertEqual([p[0] for p in doctor.check_home(self.home)], ["text_key_mismatch"])
+
+    def test_a_check_table_without_a_row_is_damaged(self):
+        """db.connect refuses this database too (it would otherwise leave the key of another folder in use), so the doctor must say so rather than call it fine."""
+        conn = sqlite3.connect(self.home.db_path)
+        conn.execute("DELETE FROM text_key_check")
+        conn.commit()
+        conn.close()
+        self.assertEqual(doctor.key_state(self.home)[0], "damaged")
+        self.assertEqual([p[0] for p in doctor.check_home(self.home)], ["text_key_damaged"])
+
+    def test_a_file_that_is_not_a_database_is_reported_not_raised(self):
+        """sqlite raises DatabaseError, not OperationalError, for this; the doctor is the tool that has to say 'unreadable'."""
+        with open(self.home.db_path, "wb") as f:
+            f.write(b"this is not a sqlite file" * 100)
+        self.assertEqual(doctor.key_state(self.home)[0], "unreadable")
+        self.assertEqual([p[0] for p in doctor.check_home(self.home)], ["text_key_unreadable"])
+
+    def test_a_folder_without_a_database_is_not_called_a_key_problem(self):
+        h = Home(os.path.join(tmpdir(self), "nothing"))
+        self.assertEqual(doctor.key_state(h)[0], "no_database")
+        self.assertEqual([p[0] for p in doctor.check_home(h)], ["db_missing"])
+
+    def test_a_database_older_than_the_key_has_nothing_to_report(self):
+        conn = db.connect(self.home.db_path)
+        conn.execute("DROP TABLE text_key_check")
+        conn.close()
+        self.assertEqual(doctor.key_state(self.home)[0], "not_applicable")
+
+    def test_reading_the_state_loads_no_key_into_the_process(self):
+        """db.connect binds the key of the folder it opens; the doctor looks at a folder that may be someone else's and must leave the key in use alone."""
+        ids.use_key(b"\x07" * 32)
+        before = ids.text_sha256("probe")
+        self.assertEqual(doctor.key_state(self.home)[0], "ok")        # the folder's own, good key: the path that could load it
+        self.assertEqual(ids.text_sha256("probe"), before)
+        with open(self.key_path, "wb") as f:
+            f.write(os.urandom(32))
+        doctor.key_state(self.home)                                   # and a key that is not this folder's
+        doctor.report(self.home)
+        self.assertEqual(ids.text_sha256("probe"), before)
+
+
 class TestCli(unittest.TestCase):
     def run_cli(self, argv, env=None):
         old = {k: os.environ.get(k) for k in (env or {})}
@@ -120,6 +203,20 @@ class TestCli(unittest.TestCase):
         code, out, _ = self.run_cli(["--home", d, "doctor"])
         self.assertEqual(code, 0)
         self.assertIn("data folder: healthy", out)
+
+    def test_doctor_prints_the_key_state_and_exits_1_when_the_key_is_missing(self):
+        d = os.path.join(tmpdir(self), "h")
+        self.run_cli(["--home", d, "init"])
+        code, out, _ = self.run_cli(["--home", d, "doctor"])
+        self.assertEqual(code, 0)
+        self.assertIn("text key: ok", out)
+        os.remove(keys.path_for(Home(d).db_path))
+        code, out, err = self.run_cli(["--home", d, "doctor"])
+        self.assertEqual(code, 1, err)
+        self.assertIn("text key: missing", out)
+        self.assertIn("text_key_missing", out)
+        code, out, _ = self.run_cli(["--home", d, "doctor", "--json"])
+        self.assertEqual(json.loads(out)["text_key"]["state"], "missing")
 
     def test_doctor_exit_code_reflects_problems(self):
         """Scripts rely on the exit code; a damaged folder must not exit 0."""
