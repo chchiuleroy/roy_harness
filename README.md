@@ -46,7 +46,7 @@
 | 崩潰恢復 | 先寫再執行；重開時沒有結果的呼叫補 `INTERRUPTED`，**絕不自動重跑** | [docs/validation-and-reviews.md](docs/validation-and-reviews.md) |
 | Hook／MCP／Skill | 確定性反射（只能否決）、MCP 客戶端（兩代協定）、按需載入的 skill | [docs/hooks-mcp-skills.md](docs/hooks-mcp-skills.md) |
 | 圖片與網頁 GUI | `view_image`；多 session 分頁、核准卡片、背景任務面板、貼圖／上傳；session 的複製／保存／刪除；設定頁與疊加層面板 | 〈網頁 GUI〉、[docs/images-and-gui.md](docs/images-and-gui.md) |
-| 評測 | [`bench/`](bench/README.md)：12 個題型、確定性評分器、自我改進迴圈 | |
+| 評測 | [`bench/`](bench/README.md)：12 個題型、確定性評分器、自我改進迴圈；[`bench/labeling/`](bench/labeling/README.md)：用兩位獨立 AI 標註員做 superagent 的參考語料（資料放 repo 外） | |
 | 事件編排 | superagent：事件 → 工單 → 做事 → 回覆 | [docs/superagent.md](docs/superagent.md) |
 | 知識庫 | kb：收件、轉換、切塊、搜尋、提案與核准、`kb ask` | [kb/README.md](kb/README.md) |
 
@@ -250,7 +250,9 @@ src/harness/   harness_vllm.py（主程式）、harness_net.py（URL 政策）�
 src/superagent/ 可選的疊加層（engine、store、gate、executor、main_session、mandate_hook、frame、outbox…）
 src/gui_layers/ 把 superagent、kb 接成 GUI 設定頁開關與面板的轉接層（launcher.py 啟動）；harness 資料夾不認得它們
 tests/         各模組的測試（含 fake_mcp_server.py、live_fastmcp_server.py 與 superagent 的測試台）
-bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）
+bench/         評測與自我改進迴圈（結果夾 bench_runs/ 不進 repo）；bench/labeling/ 是 AI 標註參考語料的腳本（資料不進 repo）
+tools/         mutate_check.py：對 src/ 的突變檢查（kb 自己的在 kb/tools/）
+verify.py      一條指令跑 harness 與 kb 兩套離線測試；規則見 docs/VERIFY.md，給程式碼代理看的入口是 AGENTS.md
 docs/          詳細文件：harness 的細節（從 README 拆出，原文未改）、notes-and-dream.md、superagent.md、驗證與審查紀錄
 .github/       CI（workflows/ci.yml）
 kb/            個人知識庫（可選；自己的 pyproject、README、docs、tests；與 harness 互不 import）
