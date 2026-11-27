@@ -21,18 +21,19 @@ TEST = ("import os, sys, unittest\n"
         "        self.assertEqual(mod.f(), 1)\n")
 
 
-def toy(test_text=TEST):
+def toy(test_text=TEST, mod_text=MOD):
     root = tempfile.mkdtemp(prefix="mc_toy_")
-    for rel, text in (("src/mod.py", MOD), ("tests/test_mod.py", test_text)):
+    for rel, text in (("src/mod.py", mod_text), ("tests/test_mod.py", test_text)):
         os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
         with open(os.path.join(root, rel), "w", encoding="utf-8", newline="") as f:
             f.write(text)
     return root
 
 
-def verdict(old, new, test_text=TEST, timeout=60):
-    root = toy(test_text)
-    return mc.check_mutant(("m", "src/mod.py", old, new, "test_mod.TestMod.test_f"), root=root, timeout=timeout)[1]
+def verdict(old, new, test_text=TEST, timeout=60, mod_text=MOD):
+    root = toy(test_text, mod_text)
+    return mc.check_mutant(("m", "src/mod.py", old, new, "test_mod.TestMod.test_f"), root=root,
+                           copy_dirs=("src", "tests"), timeout=timeout)[1]
 
 
 class TestMutateCheck(unittest.TestCase):
@@ -42,6 +43,12 @@ class TestMutateCheck(unittest.TestCase):
     def test_a_change_the_test_cannot_see_survives(self):
         """`g` is never called by the test: breaking it must be reported, not hidden."""
         self.assertEqual(verdict("def g():\n    return 1", "def g():\n    return 2"), "SURVIVED")
+
+    def test_a_multi_line_change_works_on_a_file_with_windows_line_ends(self):
+        """A Windows checkout has CRLF; a mutant written with plain newlines must still apply, not be called invalid
+        (that would hide every multi-line mutant on the machines this repository is developed on)."""
+        crlf = MOD.replace("\n", "\r\n")
+        self.assertEqual(verdict("def f():\n    return 1", "def f():\n    return 2", mod_text=crlf), "killed")
 
     def test_an_old_text_that_is_not_unique_is_refused(self):
         """`return 1` occurs twice; replacing 'the first one' silently would make the verdict about a guess."""

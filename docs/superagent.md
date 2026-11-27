@@ -121,6 +121,8 @@ C5（對真實模型的端到端）見 `tests/test_superagent_live.py`，`SUPERA
 4. **量測**：`python -X utf8 -m superagent eval --corpus corpus_labelled.jsonl --rule ... --base-url ... --model ... --out report.json --errors`。標註檔裡有被截斷的列（頁面上有橘字提示）要加 `--allow-truncated`（照常重放但不計分）；有多列同一個 `thread`（真實匯出可能發生）要加 `--allow-shared-threads`（區間會偏窄，報告會警告）。沒加時 `eval` 會**一次列出全部問題**再拒絕，不會跑一半。stderr 會印進度（`[eval] pass 1/3: batch 4/17`，`--quiet` 關掉）；stdout 印可讀的摘要（主要指標、逐規則、穩定度、順序敏感度、失敗、警告、報告的結論原文，加上答錯的列和訊息開頭——**訊息開頭只印在終端，不寫進 report.json**）。
 5. **之後再看**：`python -X utf8 -m superagent report report.json [--errors --corpus corpus_labelled.jsonl]`。
 
+**要一份由兩位獨立 AI 標註員做出來的參考語料**（2026-11-06 那次的做法，不需要人工標註）：用 [bench/labeling/](../bench/labeling/README.md) 的腳本，資料放在 repo 外。
+
 跑一次要多久：每批一次模型呼叫；列數 ÷ `--batch-max` 就是一趟的批數，再乘上趟數（`--repeats`、加 `--order-check` 多一趟）；含第二眼時，第一次命中的列另外還要多批（每趟額外約「命中列數 ÷ `--batch-max`」批）。
 
 **限制（誠實）**：目前**沒有**真實部署的收件匣，也**沒有**人工標註的真實語料。做過的量測用的是一份公開 GitHub issue 語料（322 筆，由兩個 AI 各自獨立標註，兩者一致且都沒標「不確定」的 270 列當參考答案；2026-11-06，對一個模型端點、兩條規則）：參考答案是 AI 的共識，**不是人寫的，也不是你的流量**；文字裡的標題前綴與模板自述會同時抬高標註員與受測模型的分數；其中一位標註員（Claude 子 agent）的工具紀錄無法稽核。所以那份數字只能當工具與方向的參考，不是準確度證據；PR #24 與 #25 的描述寫了當時的結果與取捨。`rows_needed` 與區間都假設各列獨立；同一討論串多列、或語料不代表實際流量時，區間會偏樂觀。模型取樣設定用端點預設，不同端點的結果不可直接比較。
