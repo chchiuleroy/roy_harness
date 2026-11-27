@@ -60,6 +60,12 @@ S1_MUTATIONS = [
     ("chunk_cuts_mid_sentence", "chunker.py", "window.rfind(b) > hard * 0.5", "window.rfind(b) > hard * 2"),
     ("chunk_id_ignores_params", "chunker.py", "    ph = params_hash(params)", "    ph = \"0\" * 64"),
     ("chunk_keeps_blank_units", "chunker.py", "        if not text.strip():\n            continue\n        if section", "        if section"),
+    # added 2026-11-27 with test_chunker_properties_on_random_documents (units carry markers; counted once, in order, one section)
+    ("chunk_flush_keeps_texts_so_units_repeat", "chunker.py", "        cur_ids, cur_texts, cur_len = [], [], 0", "        cur_ids, cur_len = [], 0"),
+    ("chunk_joins_units_in_reverse_order", "chunker.py", "text = \"\\n\\n\".join(cur_texts)", "text = \"\\n\\n\".join(reversed(cur_texts))"),
+    ("chunk_windows_overlap_by_one_character", "chunker.py", "        pos += cut", "        pos += max(cut - 1, 1)"),
+    ("chunk_windows_drop_the_last_tail", "chunker.py", "    out.append(text[pos:])", "    pass"),
+    ("chunk_merge_limit_doubled", "chunker.py", "        if cur_texts and cur_len + extra > limit:", "        if cur_texts and cur_len + extra > limit * 2:"),
     # ---- display rule
     ("display_native_below_derived", "display.py", "RANK = {\"human\": 0, \"ai\": 1, \"native\": 2, \"derived\": 3}", "RANK = {\"human\": 0, \"ai\": 1, \"native\": 3, \"derived\": 2}"),
     ("display_unapproved_human_shown", "display.py", "        if s[\"origin\"] in (\"human\", \"ai\") and s[\"statement_id\"] not in approved:", "        if False:"),

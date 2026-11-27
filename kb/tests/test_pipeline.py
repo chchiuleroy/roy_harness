@@ -162,6 +162,13 @@ class TestUnitIdentityAcrossRevisions(Base):
 
 
 class TestChunker(unittest.TestCase):
+    def setUp(self):
+        """chunk ids are keyed hashes, so a text key must be loaded. These tests used to pass only after some other
+        test had left a key in the module global (run alone, all of them died with IdError). Own key, put back after."""
+        saved = ids._KEY
+        ids.use_key(b"c" * 32)
+        self.addCleanup(setattr, ids, "_KEY", saved)
+
     def units(self, spec):
         return [(f"uv_{chr(97 + i) * 20}", text, path) for i, (text, path) in enumerate(spec)]
 
@@ -216,6 +223,54 @@ class TestChunker(unittest.TestCase):
                 self.assertTrue(c.text.strip())
                 if len(c.unit_version_ids) > 1:
                     self.assertLessEqual(len(c.text), params["limit"])
+
+    def test_chunker_properties_on_random_documents(self):
+        """The test above is named 'exactly one chunk' but only checks `assertIn`, so a unit that lands twice, in the
+        wrong order or inside another section's chunk would pass. Every unit starts with a unique marker, which makes
+        'exactly once', 'in document order' and 'never across two sections' things that can be counted.
+        Why each matters: a duplicated unit makes the index return the same passage twice; a reordered one breaks
+        quotes that cite a position; a chunk across two sections gets cited under the wrong heading."""
+        import re
+        rng = random.Random(20261127)
+        words = ["alpha", "beta", "測試", "資料。", "end.", "line\n", "x" * 40, "句子；", "q? "]
+        marker = re.compile(r"@@U\d{3}@@")
+        checked_oversize = checked_merged = 0
+        for trial in range(80):
+            params = {"limit": rng.choice([100, 300, 800]), "hard": rng.choice([400, 900])}
+            spec = []
+            for i in range(rng.randint(1, 8)):
+                n_words = rng.choice([rng.randint(1, 12), rng.randint(1, 12), rng.randint(60, 200)])   # mostly short, some long
+                body = "".join(rng.choice(words) + " " for _ in range(n_words))
+                spec.append((f"@@U{i:03d}@@ " + body, (f"S{rng.randint(0, 2)}",)))
+            units = self.units(spec)
+            uv_section = {uv: path for uv, _, path in units}
+            ch = chunker.chunk_units(units, params)
+            chunk_texts = [c.text for c in ch]
+            # in document order, each unit's marker occurs exactly once across all chunks
+            self.assertEqual(marker.findall("\n\n".join(chunk_texts)), [f"@@U{i:03d}@@" for i in range(len(spec))])
+            # unit ids, read chunk by chunk, follow the document order (a unit cut into pieces repeats consecutively)
+            seq = [uv for c in ch for uv in c.unit_version_ids]
+            deduped = [uv for k, uv in enumerate(seq) if k == 0 or uv != seq[k - 1]]
+            self.assertEqual(deduped, [uv for uv, _, _ in units])
+            for c in ch:
+                self.assertEqual(len({uv_section[uv] for uv in c.unit_version_ids}), 1, "a chunk spans two sections")
+                if len(c.unit_version_ids) > 1:
+                    self.assertLessEqual(len(c.text), params["limit"])
+                    checked_merged += 1
+                else:                       # one unit or a piece of one: never longer than `hard` (limit may exceed hard)
+                    self.assertLessEqual(len(c.text), params["hard"])
+            for (text, _), (uv, _, _) in zip(spec, units):
+                mine = [c for c in ch if uv in c.unit_version_ids]
+                if len(text) <= params["hard"]:
+                    self.assertEqual(sum(text in c.text for c in ch), 1, "a whole unit must sit inside exactly one chunk")
+                else:
+                    checked_oversize += 1
+                    self.assertTrue(all(len(c.text) <= params["hard"] for c in mine))
+                    self.assertEqual(re.sub(r"\s+", "", "".join(c.text for c in mine)), re.sub(r"\s+", "", text),
+                                     "the pieces of a long unit must add up to the unit, with nothing lost or repeated")
+            self.assertEqual([c.chunk_id for c in chunker.chunk_units(units, params)], [c.chunk_id for c in ch])
+        self.assertGreater(checked_oversize, 10, "the generator no longer makes units longer than `hard`")
+        self.assertGreater(checked_merged, 10, "the generator no longer makes chunks that merge several units")
 
 
 class TestDisplayRule(unittest.TestCase):
