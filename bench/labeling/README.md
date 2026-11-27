@@ -48,7 +48,7 @@ python -X utf8 bench/labeling/labeling.py merge --work-dir D --pool candidates.j
 
 ## 驗證過什麼
 
-2026-11-27：用 2026-11-06 存下的 322 列快照與兩位標註員的原始輸出，重跑 `blind`（兩批）、`prompts`、`merge`，19 個產物（6 個 chunk、6 份提示、2 個 mapping、5 個語料與報告）與當時的檔案逐位元相同（只差換行：舊檔在 Windows 以 CRLF 寫出，新程式一律寫 LF）。**`fetch`／`fetch-usage` 沒有對真實 GitHub 重跑**（結果會隨時間變，只用假的 `gh` 輸出測試過篩選與配額）。
+2026-11-27：用 2026-11-06 存下的 322 列快照與兩位標註員的原始輸出，重跑 `blind`（兩批）、`prompts`、`merge`，19 個產物（6 個 chunk、6 份提示、2 個 mapping、5 個語料與報告）與當時的檔案逐位元相同（只差換行：舊檔在 Windows 以 CRLF 寫出，新程式一律寫 LF）。`fetch`／`fetch-usage` 的篩選與配額另用假的 `gh` 輸出測過。**同日也對真實 GitHub 小量跑過一次**（`gh` 已登入、單次，輸出寫到 repo 外的暫存資料夾）：`fetch --repos vllm-project/vllm=5,ollama/ollama=5 --since 2026-11-01`，兩個 repo 的候選池分別是 781 與 153 筆，各取 5 筆，共 10 列，文字最長 700 字元、id 不重複；`fetch-usage --plan vllm-project/vllm:usage:...:5,ollama/ollama:question:...:5`，池 49 與 4 筆，取到 9 列，全標 `usage-labelled`，與第一批沒有重複；兩批再接 `blind`（`--id-start 10 --first-chunk 4`）成功，給標註員的檔只有 `id`、`text`。這只證明「能跑、篩選與分頁合理」：抓到的內容與 2026-11-06 不同（issue 一直在新增），**不能拿來比對舊結果**；也沒有跑完整標註與 `merge`（那一步要兩位標註員）。
 
 ## 限度
 
