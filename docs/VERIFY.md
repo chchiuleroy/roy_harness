@@ -54,4 +54,4 @@ CI（`.github/workflows/ci.yml`）把同樣兩段拆成兩個 job：`offline-tes
 
 **不要用 `PUT $R` 整份重送**：沒列出的欄位會被預設值覆蓋。以上四個指令都只動一個欄位。
 
-已演練（2026-11-27，實測）：加入與移除 `kb-tests`、開關 `enforce_admins`，每次都讀回，其餘欄位與備份相同。**沒演練**：步驟 2 的 `--admin` 合併（需要一個故意失敗的檢查才測得到）。
+已演練（2026-11-27，實測）：加入與移除 `kb-tests`、開關 `enforce_admins`，每次都讀回，其餘欄位與備份相同。**緊急合併整條也演練過了**（同日，實測，用一個無關緊要的文件 PR #61）：取消它的 CI，兩個必要檢查變成 `cancelled`，PR 狀態 `BLOCKED`；一般合併被拒絕；**`enforce_admins` 開著時，`--admin` 也被拒絕**（`2 of 2 required status checks are cancelled`），所以步驟 1 不能省；依步驟 1、2、3 之後合併成功，`enforce_admins` 開回，讀回確認 `contexts` 仍是 `offline-tests` 與 `kb-tests`、`enforce_admins=true`、`strict`／force-push／刪除分支不變。保護關著的時間只有幾秒。限度：演練的是「檢查被取消」，真正的 Actions 故障（檢查一直 pending 或根本不出現）沒有造出來，我預期處理方式相同，但這是推斷。
