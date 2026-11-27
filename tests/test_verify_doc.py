@@ -46,6 +46,16 @@ class TestVerifyDoc(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(ROOT, "docs", "VERIFY.md")))
         self.assertIn("python verify.py", text)
 
+    def test_the_skill_pointer_points_at_the_doc_and_the_entry(self):
+        """The skill is only a pointer; the rules live in docs/VERIFY.md. If the relative link breaks, an agent that
+        loads the skill never reaches the rules, and one that reaches them never learns the command."""
+        skill_dir = os.path.join(ROOT, ".claude", "skills", "verify")
+        text = read(".claude/skills/verify/SKILL.md")
+        self.assertIn("python verify.py", text)
+        self.assertTrue(os.path.isfile(os.path.join(ROOT, "verify.py")))
+        self.assertIn("../../../docs/VERIFY.md", text)
+        self.assertTrue(os.path.isfile(os.path.normpath(os.path.join(skill_dir, "../../../docs/VERIFY.md"))))
+
     def test_the_doc_names_the_ci_jobs_that_exist(self):
         """The required-check names in the doc are the job ids in the workflow; a rename must not go unnoticed."""
         workflow = read(".github/workflows/ci.yml")
