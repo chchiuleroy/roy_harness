@@ -38,3 +38,20 @@ CI（`.github/workflows/ci.yml`）把同樣兩段拆成兩個 job：`offline-tes
 - 同一個 PR 可以改自己的檢查（見規則 6）；GitHub ruleset 能否鎖住 workflow 路徑，沒有查證。
 - `verify.py` 沒有快速模式；`--only` 是迭代用的，不能代替全套。
 - 本文件不描述 live 測試與移除檢查的做法，那些在 README〈測試與驗證〉。
+
+## 5. 分支保護與緊急解除
+
+`main` 的保護（2026-11-27 起）：必要檢查 `offline-tests` 與 `kb-tests`（就是 `ci.yml` 的兩個 job id，改名等於改保護），`enforce_admins` 開啟，所以**管理員也要等檢查通過才能合併**。`strict` 維持關閉，沒有強制 review（單人 repo）。開啟前的設定備份是 `gh api repos/chchiuleroy/roy_harness/branches/main/protection` 的輸出，存在作者機器上。
+
+代價：Actions 或 runner 故障時，檢查會一直 pending 或不出現，連管理員都合併不了。這時依序做（`R=repos/chchiuleroy/roy_harness/branches/main/protection`）：
+
+1. **只關 enforce_admins**：`gh api -X DELETE $R/enforce_admins`
+2. 合併，釘住 head：`gh pr merge <號碼> --merge --admin --match-head-commit <head sha>`
+3. **馬上還原**：`gh api -X POST $R/enforce_admins`，再讀回 `gh api $R`，確認 `enforce_admins.enabled` 是 `true`
+4. 在 PR 或 commit 說明為什麼繞過、哪個檢查沒跑。
+
+只有 `kb-tests` 壞掉（例如某個套件發行出問題）時，可以只拿掉它：`gh api -X DELETE $R/required_status_checks/contexts -f 'contexts[]=kb-tests'`，合併後加回：`gh api -X POST $R/required_status_checks/contexts -f 'contexts[]=kb-tests'`。
+
+**不要用 `PUT $R` 整份重送**：沒列出的欄位會被預設值覆蓋。以上四個指令都只動一個欄位。
+
+已演練（2026-11-27，實測）：加入與移除 `kb-tests`、開關 `enforce_admins`，每次都讀回，其餘欄位與備份相同。**沒演練**：步驟 2 的 `--admin` 合併（需要一個故意失敗的檢查才測得到）。
