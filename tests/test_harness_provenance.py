@@ -70,6 +70,54 @@ class TestHostsIn(unittest.TestCase):
             took = time.perf_counter() - started
             self.assertLess(took, 1.0, f"{name}: {took:.2f} s for {len(text):,} characters")
 
+    def test_new_patterns_miss_no_host_the_old_ones_found(self):
+        """Differential run, kept so the 2026-11-10 result is something a future change can break.
+        The URL and user@host patterns were rewritten to avoid O(n^2) scans; the rewrite must not make a
+        real host invisible (a host the gate does not see is a host it never asks about). The two OLD
+        patterns are frozen here on purpose (as first written in e9153bd): do not 'update' them.
+        60,000 random short strings (short, because the old patterns are quadratic) from a fixed seed.
+        Only the two rewritten patterns can differ; the IPv4 and bare-domain patterns are the module's own
+        on both sides, so a change to those is covered by the tests above, not by this one.
+        Excluded on both sides: strings with no letter or digit (`-`, `_`), which the module drops on
+        purpose; loopback. The new patterns may find MORE (IPv6 literals, Unicode names): that is allowed."""
+        import random
+        import re
+        old_url = re.compile(r"[a-z][a-z0-9+.-]*://(?:[^/\s@]*@)?([a-z0-9._-]+)", re.I)
+        old_at = re.compile(r"[\w.+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+)", re.I)
+
+        def old_hosts(text):
+            found = set()
+            for rx in (old_url, old_at, ho._IPV4, ho._BARE):
+                found.update(m.group(1).lower().strip(".") for m in rx.finditer(text))
+            return {h for h in found if h and any(c.isalnum() for c in h)
+                    and h not in ho.LOOPBACK and not h.startswith("127.")}
+
+        rng = random.Random(20261127)
+        pieces = ["a", "b", "x", "1", "9", ".", "-", "_", "@", "://", "http", "ftp", "s3", "git+ssh", "com", "org",
+                  "example", "/", ":", " ", "+", "[", "]", "user", "10", "co", "é", "例", "\t", "\n"]
+
+        def seen(text, host, now):
+            """ASCII text: the new patterns must find exactly the host the old ones did. Text with a non-ASCII
+            character: the old patterns stopped a host name at the first such character and could take a
+            `user@` part for the host (`co@<non-ASCII>x` gave `co`); the new ones read the whole name, so the
+            readings differ by design and only 'a host is still seen' is required (the readings themselves are
+            pinned by test_ipv6_literals_and_internationalised_names_are_destinations_too)."""
+            return host in now if text.isascii() else bool(now)
+
+        lost, with_hosts = [], 0
+        for _ in range(60_000):
+            s = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 14)))
+            before = old_hosts(s)
+            with_hosts += bool(before)
+            now = ho.hosts_in(s)
+            missing = sorted(h for h in before if not seen(s, h, now))
+            if missing:
+                lost.append((s, missing))
+        # measured with this seed: 3,190 strings contain a host the old patterns find; far fewer would mean the
+        # generator drifted away from host-shaped text and the comparison above proves little
+        self.assertGreater(with_hosts, 2_000, "the generator no longer produces hosts: the test would prove nothing")
+        self.assertEqual(lost[:5], [], f"{len(lost)} of 60,000 strings lost a host; first five shown")
+
     def test_the_fast_patterns_still_find_every_spelling_that_matters(self):
         """The O(n^2) fix changed how the URL and user@host patterns start. A differential run over
         60,000 random strings found no real host the old patterns saw and these miss; this pins the
